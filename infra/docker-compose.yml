@@ -1,0 +1,38 @@
+version: "3.8"
+networks:
+  cortex-net:
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: ${CORTEX_DB_PASSWORD}
+      POSTGRES_DB: cortex
+    volumes:
+      - cortex_pgdata:/var/lib/postgresql/data
+    networks: [cortex-net]
+
+  api:
+    build: ../services/api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
+    depends_on: [postgres]
+    ports:
+      - "127.0.0.1:8000:8000"     # pas exposé publiquement pour l'instant
+    networks: [cortex-net]
+
+  #prometheus:
+    # image: prom/prometheus:v2.54.1
+    # restart: unless-stopped
+    # volumes:
+    #   - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    #   - cortex_promdata:/prometheus
+    # ports:
+    #   - "10.0.1.10:9090:9090"      # accessible seulement sur le réseau privé
+    # networks: [cortex-net]
+
+volumes:
+  cortex_pgdata:
+  #cortex_promdata:
