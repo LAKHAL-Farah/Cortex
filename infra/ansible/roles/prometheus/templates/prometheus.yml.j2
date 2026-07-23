@@ -14,7 +14,8 @@ scrape_configs:
 
   - job_name: 'prometheus'
     static_configs:
-      - targets: ['{{ prometheus_bind_address }}:{{ prometheus_port }}']
+      - targets:
+          - '{{ hostvars[groups["prometheus_server"][0]].ansible_host }}:{{ prometheus_port }}'
         labels:
-          node: {{ inventory_hostname }}
-          role: {{ node_role }}
+          node: '{{ groups["prometheus_server"][0] }}'
+          role: '{{ hostvars[groups["prometheus_server"][0]].node_role }}'
