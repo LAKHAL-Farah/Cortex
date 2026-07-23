@@ -13,8 +13,7 @@ ExecStart=/usr/local/bin/prometheus \
   --storage.tsdb.path=/var/lib/prometheus \
   --web.console.templates=/etc/prometheus/consoles \
   --web.console.libraries=/etc/prometheus/console_libraries \
-  --web.listen-address=:{{ prometheus_port }}
-
+  --web.listen-address="{{ ansible_host }}:{{ prometheus_port }}"
 Restart=on-failure
 
 [Install]
