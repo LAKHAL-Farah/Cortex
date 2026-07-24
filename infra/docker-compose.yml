@@ -21,6 +21,8 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
+      CORTEX_API_KEY: ${CORTEX_API_KEY}                    # NEW
+      PROMETHEUS_FILE_SD_PATH: /file_sd/nodes.json          # NEW
     volumes:
       - ../services/api:/app
     depends_on:
@@ -32,3 +34,4 @@ services:
 
 volumes:
   cortex_pgdata:
+  - cortex_file_sd:/file_sd 
