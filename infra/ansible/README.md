@@ -78,6 +78,17 @@ Then open `http://localhost:9090` → **Status → Targets**.
 
 ## Adding a new node later
 
-Add it to `inventory/hosts.ini` under the right group with its `node_role`,
-then re-run `site.yml` — the Prometheus scrape config template regenerates
-itself from the inventory automatically.
+Two separate steps now:
+
+1. **Install node_exporter on the new VM** — add it to `inventory/hosts.ini`
+   under the right group with its `node_role`, then re-run:
+```bash
+   ansible-playbook site.yml --limit <new-host>
+```
+   (This only touches node_exporter; it no longer touches Prometheus's scrape
+   config.)
+
+2. **Register it with Prometheus** — use the Node Registry API/UI
+   (`/ui/nodes.html` or `POST /api/v1/nodes`) with its hostname, private IP,
+   and role. Prometheus picks it up from `/etc/prometheus/file_sd/nodes.json`
+   within `prometheus_file_sd_refresh_interval` (30s) — no restart needed.

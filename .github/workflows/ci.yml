@@ -33,12 +33,18 @@ jobs:
         working-directory: services/api
         run: pip install -r requirements.txt
 
-      - name: Lint (ruff)
+      - name: Run migrations
         working-directory: services/api
-        run: ruff check .
+        env:
+          DATABASE_URL: postgresql+psycopg2://cortex:cortex@localhost:5432/cortex_test
+        run: alembic upgrade head
 
       - name: Run tests
         working-directory: services/api
         env:
           DATABASE_URL: postgresql+psycopg2://cortex:cortex@localhost:5432/cortex_test
-        run: pytest -v
+          CORTEX_API_KEY: test-key
+          PROMETHEUS_FILE_SD_PATH: /tmp/prometheus_file_sd/nodes.json
+        run: |
+          mkdir -p /tmp/prometheus_file_sd
+          pytest -v

@@ -55,6 +55,14 @@
     - consoles
     - console_libraries
 
+- name: Create file_sd directory for dynamic node-registry targets
+  ansible.builtin.file:
+    path: "{{ prometheus_file_sd_dir }}"
+    state: directory
+    owner: prometheus
+    group: prometheus
+    mode: "0755"
+
 - name: Deploy prometheus.yml scrape config
   ansible.builtin.template:
     src: prometheus.yml.j2

@@ -23,4 +23,5 @@ def regenerate_file_sd(db: Session) -> None:
     fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
     with os.fdopen(fd, "w") as f:
         json.dump(targets, f, indent=2)
+    os.chmod(tmp_path, 0o644)          # NEW — mkstemp defaults to 0600
     os.replace(tmp_path, FILE_SD_PATH)
