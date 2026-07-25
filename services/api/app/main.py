@@ -4,9 +4,11 @@ from sqlalchemy import text
 from .db import engine
 from fastapi.staticfiles import StaticFiles
 from .routers import nodes
+from .routers import metrics
 
 app = FastAPI(title="Cortex API", version="0.1.0")
 app.include_router(nodes.router)
+app.include_router(metrics.router)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 @app.get("/health")
 def health():
@@ -17,3 +19,5 @@ def health_db():
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     return {"db": "ok"}
+
+
