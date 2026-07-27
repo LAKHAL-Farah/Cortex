@@ -6,6 +6,8 @@ from ..db import get_db
 from ..security import require_api_key
 from ..services.prometheus_sd import regenerate_file_sd
 
+from ..services.inventory_manager import add_host_to_inventory
+from ..services.ansible_runner import install_node_exporter
 
 
 import logging
@@ -36,6 +38,11 @@ def get_node(node_id: uuid.UUID, db: Session = Depends(get_db)):
 def create_node(payload: schemas.NodeCreate, db: Session = Depends(get_db)):
     try:
         node = crud.create_node(db, payload)
+        add_host_to_inventory(node.hostname, node.ip_address, node.role)
+        success = install_node_exporter(node.hostname)
+        if success:
+            regenerate_file_sd(db)
+
     except crud.DuplicateNodeError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     regenerate_file_sd(db)
