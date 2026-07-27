@@ -1,11 +1,17 @@
+import os
 from pathlib import Path
+from .ansible_runner import ANSIBLE_DIR 
 
-INVENTORY_PATH = Path(__file__).resolve().parents[4] / "infra" / "ansible" / "inventory" / "hosts.ini"
+
+INVENTORY_PATH = Path(
+    os.environ.get("CORTEX_INVENTORY_PATH") or (ANSIBLE_DIR / "inventory" / "hosts.ini")
+)
 
 GROUP_BY_ROLE = {
     "controller": "controllers",
     "compute": "computes",
     "storage": "storages",
+    "monitoring": "monitoring",   # matches the [monitoring:children] group in hosts.ini
 }
 
 def add_host_to_inventory(hostname: str, ip: str, role: str) -> None:

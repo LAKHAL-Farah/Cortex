@@ -1,20 +1,14 @@
+import logging
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+
 from .. import crud, schemas
 from ..db import get_db
 from ..security import require_api_key
 from ..services.prometheus_sd import regenerate_file_sd
-
 from ..services.inventory_manager import add_host_to_inventory
 from ..services.ansible_runner import install_node_exporter
-
-
-import logging
-from .. import crud, schemas
-from ..db import get_db
-from ..security import require_api_key
-from ..services.prometheus_sd import regenerate_file_sd
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/nodes", tags=["nodes"])
@@ -38,14 +32,15 @@ def get_node(node_id: uuid.UUID, db: Session = Depends(get_db)):
 def create_node(payload: schemas.NodeCreate, db: Session = Depends(get_db)):
     try:
         node = crud.create_node(db, payload)
-        add_host_to_inventory(node.hostname, node.ip_address, node.role)
-        success = install_node_exporter(node.hostname)
-        if success:
-            regenerate_file_sd(db)
-
     except crud.DuplicateNodeError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    regenerate_file_sd(db)
+
+    add_host_to_inventory(node.hostname, node.ip_address, node.role)
+    success = install_node_exporter(node.hostname)
+    if success:
+        regenerate_file_sd(db)
+    else:
+        logger.error("node_exporter install failed for %s; not added to Prometheus targets", node.hostname)
     return node
 
 

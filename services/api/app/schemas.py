@@ -28,8 +28,9 @@ class NodeBase(BaseModel):
     @classmethod
     def ip_must_be_in_private_subnet(cls, v: str) -> str:
         addr = ip_address(v)
-        if addr not in MANAGED_SUBNET:
-            raise ValueError(f"ip_address must be within {MANAGED_SUBNET} (private Hetzner network)")
+        if not any(addr in subnet for subnet in MANAGED_SUBNETS):
+            allowed = ", ".join(str(s) for s in MANAGED_SUBNETS)
+        raise ValueError(f"ip_address must be within one of: {allowed}")
         return v
 
 
@@ -53,12 +54,3 @@ class NodeOut(NodeBase):
 
 
 
-
-@field_validator("ip_address")
-@classmethod
-def ip_must_be_in_private_subnet(cls, v: str) -> str:
-    addr = ip_address(v)
-    if not any(addr in subnet for subnet in MANAGED_SUBNETS):
-        allowed = ", ".join(str(s) for s in MANAGED_SUBNETS)
-        raise ValueError(f"ip_address must be within one of: {allowed}")
-    return v

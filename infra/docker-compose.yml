@@ -17,18 +17,16 @@ services:
 
   api:
     build: ../services/api
-    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
       CORTEX_API_KEY: ${CORTEX_API_KEY}
       PROMETHEUS_FILE_SD_PATH: /file_sd/nodes.json
+      CORTEX_ANSIBLE_DIR: ${CORTEX_ANSIBLE_DIR:-/infra/ansible}
     volumes:
       - ../services/api:/app
-      - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd   # NEW
-    depends_on:
-      - postgres
-    ports:
-      - "127.0.0.1:8000:8000"
+      - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd
+      - ${CORTEX_ANSIBLE_HOST_DIR:-../infra/ansible}:/infra/ansible
+      - ${CORTEX_SSH_KEY_HOST_DIR:-./.sandbox-ssh}:/root/.ssh:ro
     networks:
       - cortex-net
 

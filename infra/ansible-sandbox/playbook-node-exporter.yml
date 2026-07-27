@@ -1,0 +1,55 @@
+- hosts: all
+  become: true
+
+  tasks:
+    - name: Créer l'utilisateur node_exporter
+      user:
+        name: node_exporter
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: Copier l'archive node_exporter depuis le controller
+      copy:
+        src: "{{ node_exporter_archive }}"
+        dest: "/tmp/{{ node_exporter_archive }}"
+    - name: Extraire node_exporter
+      unarchive:
+        src: "/tmp/{{ node_exporter_archive }}"
+        dest: /tmp
+        remote_src: true
+
+    - name: Copier le binaire
+      copy:
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+        dest: /usr/local/bin/node_exporter
+        owner: node_exporter
+        group: node_exporter
+        mode: "0755"
+        remote_src: true
+    - name: Autoriser node_exporter
+      ufw:
+        rule: allow
+        port: "9100"
+        proto: tcp
+
+    - name: Déployer le service systemd
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Prometheus Node Exporter
+          After=network.target
+
+          [Service]
+          User=node_exporter
+          ExecStart=/usr/local/bin/node_exporter --web.listen-address=:9100
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Activer et démarrer
+      systemd:
+        name: node_exporter
+        enabled: true
+        state: started
+        daemon_reload: true
