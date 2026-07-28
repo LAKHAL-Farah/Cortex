@@ -22,13 +22,17 @@ services:
       CORTEX_API_KEY: ${CORTEX_API_KEY}
       PROMETHEUS_FILE_SD_PATH: /file_sd/nodes.json
       CORTEX_ANSIBLE_DIR: ${CORTEX_ANSIBLE_DIR:-/infra/ansible}
+      ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
     volumes:
       - ../services/api:/app
       - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd
       - ${CORTEX_ANSIBLE_HOST_DIR:-../infra/ansible}:/infra/ansible
       - ${CORTEX_SSH_KEY_HOST_DIR:-./.sandbox-ssh}:/root/.ssh:ro
+    ports:
+      - "127.0.0.1:8000:8000"
     networks:
       - cortex-net
 
 volumes:
   cortex_pgdata:
+

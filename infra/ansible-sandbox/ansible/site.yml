@@ -1,0 +1,12 @@
+---
+- name: Deploy node_exporter on every node (controller, compute1/2, storage)
+  hosts: monitoring
+  become: true
+  roles:
+    - node_exporter
+
+- name: Deploy Prometheus server on the controller
+  hosts: prometheus_server
+  become: true
+  roles:
+    - prometheus

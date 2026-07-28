@@ -1,0 +1,38 @@
+[
+  {
+    "targets": [
+      "10.0.1.21:9100"
+    ],
+    "labels": {
+      "role": "compute",
+      "node": "compute1-sim"
+    }
+  },
+  {
+    "targets": [
+      "10.0.1.22:9100"
+    ],
+    "labels": {
+      "role": "compute",
+      "node": "compute2-sim"
+    }
+  },
+  {
+    "targets": [
+      "10.0.1.20:9100"
+    ],
+    "labels": {
+      "role": "controller",
+      "node": "controller-sim"
+    }
+  },
+  {
+    "targets": [
+      "10.0.2.20:9100"
+    ],
+    "labels": {
+      "role": "storage",
+      "node": "storage-sim"
+    }
+  }
+]

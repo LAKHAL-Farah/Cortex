@@ -1,0 +1,14 @@
+---
+node_exporter_version: "1.8.2"
+node_exporter_archive: "node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+node_exporter_port: 9100
+
+prometheus_version: "2.55.1"
+prometheus_port: 9090
+prometheus_scrape_interval: "20s"
+ufw_enabled: false
+
+
+prometheus_file_sd_dir: /etc/prometheus/file_sd
+prometheus_file_sd_refresh_interval: "30s"
+monitoring_network: "10.0.0.0/16"
