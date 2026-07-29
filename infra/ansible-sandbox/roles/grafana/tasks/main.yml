@@ -1,0 +1,58 @@
+---
+- name: Install prerequisites for Grafana apt repo
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - software-properties-common
+      - ca-certificates
+      - gnupg
+    state: present
+    update_cache: true
+
+- name: Add Grafana apt key
+  ansible.builtin.get_url:
+    url: https://apt.grafana.com/gpg.key
+    dest: /etc/apt/trusted.gpg.d/grafana.asc
+    mode: "0644"
+
+- name: Add Grafana apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb https://apt.grafana.com stable main"
+    state: present
+    filename: grafana
+
+- name: Install Grafana package
+  ansible.builtin.apt:
+    name: grafana
+    state: present
+    update_cache: true
+
+- name: Ensure Grafana provisioning directory exists
+  ansible.builtin.file:
+    path: /etc/grafana/provisioning/datasources
+    state: directory
+    mode: "0755"
+
+- name: Deploy Grafana datasources provisioning
+  ansible.builtin.template:
+    src: loki-datasource.yml.j2
+    dest: /etc/grafana/provisioning/datasources/datasources.yml
+    mode: "0644"
+  notify: Restart Grafana
+
+- name: Enable and start Grafana
+  ansible.builtin.systemd:
+    name: grafana-server
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait until Grafana is ready
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ grafana_http_port }}/api/health"
+    method: GET
+    status_code: 200
+  register: grafana_ready
+  retries: 15
+  delay: 2
+  until: grafana_ready.status == 200

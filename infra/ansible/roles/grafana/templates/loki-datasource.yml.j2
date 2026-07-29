@@ -1,0 +1,12 @@
+apiVersion: 1
+datasources:
+  - name: Loki
+    type: loki
+    url: "http://127.0.0.1:{{ loki_http_port }}"
+    access: proxy
+    isDefault: true
+  - name: Prometheus
+    type: prometheus
+    url: "http://127.0.0.1:{{ prometheus_port }}"
+    access: proxy
+    isDefault: false

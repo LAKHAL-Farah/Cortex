@@ -1,0 +1,5 @@
+---
+promtail_services:
+  - nova
+  - neutron
+  - libvirt

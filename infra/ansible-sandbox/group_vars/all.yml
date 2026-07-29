@@ -8,7 +8,28 @@ prometheus_port: 9090
 prometheus_scrape_interval: "20s"
 ufw_enabled: false
 
-
 prometheus_file_sd_dir: /etc/prometheus/file_sd
 prometheus_file_sd_refresh_interval: "30s"
 monitoring_network: "10.0.0.0/16"
+
+loki_version: "3.6.0"
+promtail_version: "3.6.0"
+
+loki_http_port: 3100
+promtail_http_port: 9080
+grafana_http_port: 3000
+
+loki_user: loki
+loki_group: loki
+loki_config_dir: /etc/loki
+loki_data_dir: /var/lib/loki
+
+promtail_user: promtail
+promtail_group: promtail
+promtail_config_dir: /etc/promtail
+promtail_data_dir: /var/lib/promtail
+
+loki_server_host: "{{ hostvars[groups[\"loki_server\"][0]].ansible_host }}"
+
+loki_push_url: >-
+  http://{{ loki_server_host }}:{{ loki_http_port }}/loki/api/v1/push

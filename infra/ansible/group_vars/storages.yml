@@ -1,0 +1,4 @@
+---
+promtail_services:
+  - cinder
+  

@@ -1,0 +1,15 @@
+[Unit]
+Description=Cortex Promtail log shipping agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User={{ promtail_user }}
+Group={{ promtail_group }}
+ExecStart=/usr/local/bin/promtail -config.file={{ promtail_config_dir }}/promtail.yml
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

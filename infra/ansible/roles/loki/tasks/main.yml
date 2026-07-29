@@ -1,0 +1,102 @@
+---
+- name: Install Loki system dependencies
+  ansible.builtin.apt:
+    name:
+      - unzip
+      - ca-certificates
+    state: present
+    update_cache: true
+
+- name: Create Loki system group
+  ansible.builtin.group:
+    name: "{{ loki_group }}"
+    system: true
+    state: present
+
+- name: Create Loki system user
+  ansible.builtin.user:
+    name: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    state: present
+
+- name: Create Loki directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: "0755"
+  loop:
+    - "{{ loki_config_dir }}"
+    - "{{ loki_data_dir }}"
+    - "{{ loki_data_dir }}/chunks"
+    - "{{ loki_data_dir }}/rules"
+    - "{{ loki_data_dir }}/compactor"
+
+- name: Download Loki archive
+  ansible.builtin.get_url:
+    url: "{{ loki_download_url }}"
+    dest: "{{ loki_archive_path }}"
+    mode: "0644"
+    force: false
+
+- name: Extract Loki binary
+  ansible.builtin.unarchive:
+    src: "{{ loki_archive_path }}"
+    dest: /tmp
+    remote_src: true
+    creates: "{{ loki_extracted_binary }}"
+
+- name: Install Loki binary
+  ansible.builtin.copy:
+    src: "{{ loki_extracted_binary }}"
+    dest: /usr/local/bin/loki
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart Loki
+
+- name: Deploy Loki configuration
+  ansible.builtin.template:
+    src: loki.yml.j2
+    dest: "{{ loki_config_dir }}/loki.yml"
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: "0644"
+  notify: Restart Loki
+
+- name: Deploy Loki systemd service
+  ansible.builtin.template:
+    src: loki.service.j2
+    dest: /etc/systemd/system/loki.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Loki
+
+- name: Enable and start Loki
+  ansible.builtin.systemd:
+    name: loki
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait until Loki is ready
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ loki_http_port }}/ready"
+    method: GET
+    return_content: true
+    status_code: 200
+  register: loki_ready
+  retries: 15
+  delay: 2
+  until: loki_ready.status == 200
+
+- name: Remove temporary Loki archive
+  ansible.builtin.file:
+    path: "{{ loki_archive_path }}"
+    state: absent

@@ -1,0 +1,25 @@
+[Unit]
+Description=Cortex Loki log aggregation service
+Documentation=https://grafana.com/docs/loki/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User={{ loki_user }}
+Group={{ loki_group }}
+
+ExecStart=/usr/local/bin/loki \
+  -config.file={{ loki_config_dir }}/loki.yml
+
+Restart=on-failure
+RestartSec=5s
+
+LimitNOFILE=65536
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

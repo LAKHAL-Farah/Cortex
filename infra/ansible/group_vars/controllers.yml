@@ -1,0 +1,11 @@
+---
+promtail_services:
+  - keystone
+  - glance
+  - nova
+  - neutron
+  - placement
+  - horizon
+  - haproxy
+  - mariadb
+  - rabbitmq
