@@ -30,7 +30,7 @@ class NodeBase(BaseModel):
         addr = ip_address(v)
         if not any(addr in subnet for subnet in MANAGED_SUBNETS):
             allowed = ", ".join(str(s) for s in MANAGED_SUBNETS)
-        raise ValueError(f"ip_address must be within one of: {allowed}")
+            raise ValueError(f"ip_address must be within one of: {allowed}")
         return v
 
 
