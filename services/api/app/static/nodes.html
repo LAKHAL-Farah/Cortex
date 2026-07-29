@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Cortex — Nœuds surveillés</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; }
+    form { display: grid; grid-template-columns: repeat(5, 1fr) auto; gap: 0.5rem; align-items: end; }
+    label { font-size: 0.8rem; display: block; }
+    .error { color: #b00020; margin-top: 0.5rem; }
+    button.danger { background: #b00020; color: white; border: none; padding: 0.3rem 0.6rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Nœuds surveillés</h1>
+
+  <form id="node-form">
+    <div><label>Hostname</label><input name="hostname" required pattern="^[a-z0-9][a-z0-9-]*$"></div>
+    <div><label>IP (10.0.1.0/24)</label><input name="ip_address" required placeholder="10.0.1.6"></div>
+    <div><label>Rôle</label>
+      <select name="role" required>
+        <option value="controller">controller</option>
+        <option value="compute">compute</option>
+        <option value="storage">storage</option>
+        <option value="monitoring">monitoring</option>
+      </select>
+    </div>
+    <div><label>Port exporter</label><input name="exporter_port" type="number" value="9100" required></div>
+    <div><label>API Key</label><input name="api_key" type="password" required></div>
+    <button type="submit">Ajouter</button>
+  </form>
+  <p class="error" id="form-error"></p>
+
+  <table>
+    <thead>
+      <tr><th>Hostname</th><th>IP</th><th>Rôle</th><th>Port</th><th>Actif</th><th></th></tr>
+    </thead>
+    <tbody id="node-rows"></tbody>
+  </table>
+
+  <script>
+    const API = '/api/v1/nodes';
+
+    async function loadNodes() {
+      const res = await fetch(API);
+      const nodes = await res.json();
+      const rows = document.getElementById('node-rows');
+      rows.innerHTML = '';
+      for (const n of nodes) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${n.hostname}</td>
+          <td>${n.ip_address}</td>
+          <td>${n.role}</td>
+          <td>${n.exporter_port}</td>
+          <td>${n.is_active ? '✅' : '⏸️'}</td>
+          <td><button class="danger" data-id="${n.id}">Supprimer</button></td>`;
+        tr.querySelector('button').addEventListener('click', () => deleteNode(n.id));
+        rows.appendChild(tr);
+      }
+    }
+
+    async function deleteNode(id) {
+      const apiKey = prompt('API key pour confirmer la suppression :');
+      if (!apiKey) return;
+      const res = await fetch(`${API}/${id}`, { method: 'DELETE', headers: { 'X-API-Key': apiKey } });
+      if (res.status === 204) loadNodes();
+      else alert('Échec suppression: ' + res.status);
+    }
+
+    document.getElementById('node-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errorEl = document.getElementById('form-error');
+      errorEl.textContent = '';
+      const fd = new FormData(e.target);
+      const apiKey = fd.get('api_key');
+      const body = {
+        hostname: fd.get('hostname'),
+        ip_address: fd.get('ip_address'),
+        role: fd.get('role'),
+        exporter_port: Number(fd.get('exporter_port')),
+        is_active: true,
+      };
+      const res = await fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        e.target.reset();
+        e.target.exporter_port.value = 9100;
+        loadNodes();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        errorEl.textContent = `Erreur ${res.status}: ${JSON.stringify(err.detail ?? err)}`;
+      }
+    });
+
+    loadNodes();
+  </script>
+</body>
+</html>

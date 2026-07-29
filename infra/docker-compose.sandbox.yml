@@ -1,0 +1,77 @@
+networks:
+  cortex-sandbox:
+    ipam:
+      config:
+        - subnet: 10.0.1.0/24
+    driver: bridge
+  cortex-sandbox-storage:
+    ipam:
+      config:
+        - subnet: 10.0.2.0/24
+    driver: bridge
+services:
+    # override: give api access to the fake-node networks, on top of cortex-net
+  api:
+    networks:
+      - cortex-net
+      - cortex-sandbox
+      - cortex-sandbox-storage
+  controller-sim:
+    image: geerlingguy/docker-ubuntu2204-ansible
+    hostname: controller-sim
+    privileged: true
+    cgroup: host
+    volumes:
+      - ./.sandbox-ssh/id_ed25519.pub:/root/.ssh_bootstrap/authorized_keys:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    networks:
+      cortex-sandbox:
+        ipv4_address: 10.0.1.20
+    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
+  compute1-sim:
+    image: geerlingguy/docker-ubuntu2204-ansible
+    hostname: compute1-sim
+    privileged: true
+    cgroup: host
+    volumes:
+      - ./.sandbox-ssh/id_ed25519.pub:/root/.ssh_bootstrap/authorized_keys:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    networks:
+      cortex-sandbox:
+        ipv4_address: 10.0.1.21
+    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
+  compute2-sim:
+    image: geerlingguy/docker-ubuntu2204-ansible
+    hostname: compute2-sim
+    privileged: true
+    cgroup: host
+    volumes:
+      - ./.sandbox-ssh/id_ed25519.pub:/root/.ssh_bootstrap/authorized_keys:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    networks:
+      cortex-sandbox:
+        ipv4_address: 10.0.1.22
+    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
+  storage-sim:
+    image: geerlingguy/docker-ubuntu2204-ansible
+    hostname: storage-sim
+    privileged: true
+    cgroup: host
+    volumes:
+      - ./.sandbox-ssh/id_ed25519.pub:/root/.ssh_bootstrap/authorized_keys:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    networks:
+      cortex-sandbox-storage:
+        ipv4_address: 10.0.2.20
+    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - cortex-net           # not strictly needed, but lets you curl it from the api container if useful
+      - cortex-sandbox        # to reach controller-sim / compute*-sim
+      - cortex-sandbox-storage # to reach storage-sim
