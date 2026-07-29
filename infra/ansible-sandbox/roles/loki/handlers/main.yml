@@ -1,6 +1,6 @@
 ---
-- name: Restart Grafana
+- name: Restart Loki
   ansible.builtin.systemd:
-    name: grafana-server
+    name: loki
     state: restarted
     daemon_reload: true

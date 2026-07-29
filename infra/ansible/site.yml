@@ -16,3 +16,15 @@
   become: true
   roles:
     - loki
+
+- name: Deploy Promtail on every logging agent
+  hosts: logging_agents
+  become: true
+  roles:
+    - promtail
+
+- name: Deploy Grafana on the controller
+  hosts: grafana_server
+  become: true
+  roles:
+    - grafana

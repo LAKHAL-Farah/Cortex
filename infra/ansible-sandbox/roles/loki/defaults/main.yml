@@ -1,0 +1,18 @@
+---
+loki_version: "3.6.0"
+loki_arch: "amd64"
+
+loki_user: "loki"
+loki_group: "loki"
+
+loki_http_port: 3100
+loki_bind_address: "0.0.0.0"
+
+loki_config_dir: "/etc/loki"
+loki_data_dir: "/var/lib/loki"
+
+loki_archive_path: "/tmp/loki-linux-amd64.zip"
+loki_extracted_binary: "/tmp/loki-linux-amd64"
+
+loki_download_url: >-
+  https://github.com/grafana/loki/releases/download/v{{ loki_version }}/loki-linux-{{ loki_arch }}.zip
