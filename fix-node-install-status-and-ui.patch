@@ -1,0 +1,564 @@
+diff --git a/services/api/app/routers/nodes.py b/services/api/app/routers/nodes.py
+index abefc9f..2e856cb 100644
+--- a/services/api/app/routers/nodes.py
++++ b/services/api/app/routers/nodes.py
+@@ -27,7 +27,7 @@ def get_node(node_id: uuid.UUID, db: Session = Depends(get_db)):
+     return node
+ 
+ 
+-@router.post("", response_model=schemas.NodeOut, status_code=status.HTTP_201_CREATED,
++@router.post("", response_model=schemas.NodeCreateOut, status_code=status.HTTP_201_CREATED,
+              dependencies=[Depends(require_api_key)])
+ def create_node(payload: schemas.NodeCreate, db: Session = Depends(get_db)):
+     try:
+@@ -41,7 +41,15 @@ def create_node(payload: schemas.NodeCreate, db: Session = Depends(get_db)):
+         regenerate_file_sd(db)
+     else:
+         logger.error("node_exporter install failed for %s; not added to Prometheus targets", node.hostname)
+-    return node
++
++    # The node row is created either way (it's already a managed inventory
++    # entry), but callers need to know the exporter install actually
++    # succeeded instead of finding out from server logs. Body still returns
++    # 201, with node_exporter_installed=False signalling a partial failure.
++    return schemas.NodeCreateOut(
++        **schemas.NodeOut.model_validate(node).model_dump(),
++        node_exporter_installed=success,
++    )
+ 
+ 
+ @router.put("/{node_id}", response_model=schemas.NodeOut, dependencies=[Depends(require_api_key)])
+diff --git a/services/api/app/schemas.py b/services/api/app/schemas.py
+index 6da949b..c1cdd28 100644
+--- a/services/api/app/schemas.py
++++ b/services/api/app/schemas.py
+@@ -52,5 +52,15 @@ class NodeOut(NodeBase):
+     updated_at: datetime
+ 
+ 
++class NodeCreateOut(NodeOut):
++    """Response model for POST /nodes.
++
++    Extends NodeOut with a field reporting whether the node_exporter
++    install actually succeeded, so callers don't have to dig through
++    server logs to find out (the node row is created either way).
++    """
++    node_exporter_installed: bool
++
++
+ 
+ 
+diff --git a/services/api/app/services/ansible_runner.py b/services/api/app/services/ansible_runner.py
+index 06b4b1c..33f3187 100644
+--- a/services/api/app/services/ansible_runner.py
++++ b/services/api/app/services/ansible_runner.py
+@@ -1,10 +1,20 @@
+ import os
++import re
+ import subprocess
+ import logging
+ from pathlib import Path
+ 
+ logger = logging.getLogger(__name__)
+ 
++# Ansible's own message when --limit matches nothing in the inventory at all.
++# Wording is stable across 2.x, but we don't rely on it alone since Ansible
++# does not always exit non-zero in every "matched nothing" scenario.
++NO_HOSTS_MATCHED_MARKER = "does not match any hosts"
++
++# PLAY RECAP lines look like: "hostname : ok=2 changed=1 unreachable=0 failed=0 skipped=1 ..."
++_RECAP_LINE_RE_TEMPLATE = r"^{host}\s*:\s*ok=(\d+)\s+changed=(\d+)\s+unreachable=(\d+)\s+failed=(\d+)"
++
++
+ def _default_ansible_dir() -> Path:
+     here = Path(__file__).resolve()
+     for parent in here.parents:
+@@ -15,9 +25,23 @@ def _default_ansible_dir() -> Path:
+         "Could not locate infra/ansible; set CORTEX_ANSIBLE_DIR explicitly."
+     )
+ 
++
+ ANSIBLE_DIR = Path(os.environ.get("CORTEX_ANSIBLE_DIR") or _default_ansible_dir())
+ SITE_PLAYBOOK = ANSIBLE_DIR / "site.yml"
+ 
++
++def _host_ran_in_recap(output: str, hostname: str) -> bool:
++    """Return True only if the PLAY RECAP shows this host actually ran tasks
++    (ok > 0). A host that never matched --limit simply has no recap line at
++    all, and Ansible's exit code doesn't reliably flag that case."""
++    pattern = re.compile(_RECAP_LINE_RE_TEMPLATE.format(host=re.escape(hostname)), re.MULTILINE)
++    match = pattern.search(output)
++    if not match:
++        return False
++    ok_count = int(match.group(1))
++    return ok_count > 0
++
++
+ def install_node_exporter(hostname: str) -> bool:
+     try:
+         result = subprocess.run(
+@@ -38,10 +62,31 @@ def install_node_exporter(hostname: str) -> bool:
+             text=True,
+             timeout=300,
+         )
++        combined_output = f"{result.stdout}\n{result.stderr}"
++
++        if NO_HOSTS_MATCHED_MARKER in combined_output:
++            logger.error(
++                "Ansible --limit=%s matched zero hosts in inventory; treating as failure", hostname
++            )
++            return False
++
+         if result.returncode != 0:
+             logger.error("Ansible failed for %s: %s", hostname, result.stderr)
+             return False
++
++        # Exit code alone is not trustworthy here: some Ansible versions
++        # return 0 even when --limit silently matched nothing (e.g. an
++        # inventory-group mismatch), so also confirm via the PLAY RECAP
++        # that the host actually executed tasks.
++        if not _host_ran_in_recap(result.stdout, hostname):
++            logger.error(
++                "Ansible run for %s exited 0 but host never appears in PLAY RECAP "
++                "(no tasks executed against it); treating as failure",
++                hostname,
++            )
++            return False
++
+         return True
+     except subprocess.TimeoutExpired:
+         logger.error("Ansible timed out for %s", hostname)
+-        return False
+\ No newline at end of file
++        return False
+diff --git a/services/api/app/static/nodes.html b/services/api/app/static/nodes.html
+index dcb7bb2..6d9ea76 100644
+--- a/services/api/app/static/nodes.html
++++ b/services/api/app/static/nodes.html
+@@ -2,79 +2,350 @@
+ <html lang="fr">
+ <head>
+   <meta charset="utf-8">
++  <meta name="viewport" content="width=device-width, initial-scale=1">
+   <title>Cortex — Nœuds surveillés</title>
+   <style>
+-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; }
+-    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+-    th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; }
+-    form { display: grid; grid-template-columns: repeat(5, 1fr) auto; gap: 0.5rem; align-items: end; }
+-    label { font-size: 0.8rem; display: block; }
+-    .error { color: #b00020; margin-top: 0.5rem; }
+-    button.danger { background: #b00020; color: white; border: none; padding: 0.3rem 0.6rem; cursor: pointer; }
++    :root {
++      /* ---- Notion token system (matches dashboard.html) ---- */
++      --bg:        #FFFFFF;
++      --bg-sunk:   #F7F6F3;
++      --bg-hover:  #EFEEEC;
++      --border:    #E9E9E7;
++      --text:      #37352F;
++      --text-dim:  #787774;
++      --text-faint:#9B9A97;
++
++      --gray:   #9B9A97;  --gray-bg:   rgba(155,154,151,.18);
++      --brown:  #64473A;  --brown-bg:  rgba(100,71,58,.16);
++      --orange: #D9730D;  --orange-bg: rgba(217,115,13,.16);
++      --yellow: #DFAB01;  --yellow-bg: rgba(223,171,1,.18);
++      --green:  #0F7B6C;  --green-bg:  rgba(15,123,108,.16);
++      --blue:   #0B6E99;  --blue-bg:   rgba(11,110,153,.16);
++      --purple: #6940A5;  --purple-bg: rgba(105,64,165,.16);
++      --pink:   #AD1A72;  --pink-bg:   rgba(173,26,114,.16);
++      --red:    #E03E3E;  --red-bg:    rgba(224,62,62,.16);
++
++      --radius: 6px;
++      --shadow: 0 1px 2px rgba(15,15,15,.04), 0 2px 8px rgba(15,15,15,.03);
++    }
++
++    * { box-sizing: border-box; }
++
++    body {
++      margin: 0;
++      background: var(--bg-sunk);
++      color: var(--text);
++      font: 400 14px/1.5 -apple-system, "Segoe UI", "Inter", Helvetica, Arial, sans-serif;
++      -webkit-font-smoothing: antialiased;
++    }
++
++    /* ---------- Top bar (identical to dashboard.html) ---------- */
++    .topbar {
++      position: sticky; top: 0; z-index: 5;
++      background: var(--bg);
++      border-bottom: 1px solid var(--border);
++      padding: 14px 32px;
++      display: flex; align-items: center; gap: 24px;
++      flex-wrap: wrap;
++    }
++    .topbar h1 {
++      font-size: 15px; font-weight: 600; margin: 0;
++      display: flex; align-items: center; gap: 8px;
++    }
++    .topbar h1 .icon {
++      width: 20px; height: 20px; border-radius: 5px;
++      background: linear-gradient(135deg, var(--purple), var(--blue));
++      display: inline-block;
++    }
++    .topbar nav { display: flex; gap: 4px; margin-left: 4px; }
++    .topbar nav a {
++      font-size: 13px; color: var(--text-dim); text-decoration: none;
++      padding: 5px 10px; border-radius: var(--radius);
++    }
++    .topbar nav a:hover { background: var(--bg-hover); color: var(--text); }
++    .topbar nav a.active { background: var(--bg-hover); color: var(--text); font-weight: 500; }
++
++    .summary { display: flex; gap: 22px; margin-left: auto; }
++    .summary-item { text-align: right; }
++    .summary-item .val { font-size: 15px; font-weight: 600; }
++    .summary-item .lbl { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; }
++    .summary-item .val.green { color: var(--green); }
++    .summary-item .val.red { color: var(--red); }
++
++    /* ---------- Layout ---------- */
++    main { max-width: 1400px; margin: 0 auto; padding: 28px 32px 60px; }
++
++    h2.section-title {
++      font-size: 13px; font-weight: 600; color: var(--text-dim);
++      text-transform: uppercase; letter-spacing: .05em;
++      margin: 0 0 12px;
++    }
++
++    /* ---------- Form card ---------- */
++    .card {
++      background: var(--bg);
++      border: 1px solid var(--border);
++      border-radius: var(--radius);
++      box-shadow: var(--shadow);
++      overflow: hidden;
++    }
++    .form-card { padding: 18px 20px 20px; margin-bottom: 24px; }
++
++    form#node-form {
++      display: grid;
++      grid-template-columns: repeat(5, 1fr) auto;
++      gap: 12px;
++      align-items: end;
++    }
++    .field label {
++      font-size: 11px; font-weight: 600; color: var(--text-faint);
++      text-transform: uppercase; letter-spacing: .04em;
++      display: block; margin-bottom: 5px;
++    }
++    .field input, .field select {
++      width: 100%;
++      font: inherit;
++      font-size: 13px;
++      padding: 7px 9px;
++      border: 1px solid var(--border);
++      border-radius: var(--radius);
++      background: var(--bg);
++      color: var(--text);
++    }
++    .field input:focus, .field select:focus {
++      outline: none;
++      border-color: var(--blue);
++      box-shadow: 0 0 0 2px var(--blue-bg);
++    }
++
++    button {
++      font: inherit; font-size: 13px; font-weight: 600;
++      cursor: pointer; border: none; border-radius: var(--radius);
++    }
++    button.primary {
++      background: var(--text); color: var(--bg);
++      padding: 8px 16px;
++      white-space: nowrap;
++    }
++    button.primary:hover { background: #000; }
++    button.danger {
++      background: var(--red-bg); color: var(--red);
++      padding: 5px 10px; font-size: 12px;
++    }
++    button.danger:hover { background: var(--red); color: #fff; }
++
++    .error {
++      color: var(--red); margin: 10px 0 0; font-size: 12.5px;
++      display: none;
++    }
++    .error.show { display: block; }
++
++    /* ---------- Nodes table ---------- */
++    .table-card { overflow-x: auto; }
++    table { width: 100%; border-collapse: collapse; font-size: 13px; }
++    thead th {
++      text-align: left;
++      font-size: 10.5px; font-weight: 600; color: var(--text-faint);
++      text-transform: uppercase; letter-spacing: .05em;
++      padding: 10px 14px;
++      background: var(--bg-sunk);
++      border-bottom: 1px solid var(--border);
++      white-space: nowrap;
++    }
++    tbody td {
++      padding: 10px 14px;
++      border-bottom: 1px solid var(--border);
++      vertical-align: middle;
++    }
++    tbody tr:last-child td { border-bottom: none; }
++    tbody tr:hover { background: var(--bg-hover); }
++
++    .hostname { font-weight: 600; }
++    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; color: var(--text-dim); }
++
++    .pill {
++      font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px;
++      white-space: nowrap; text-transform: capitalize; display: inline-block;
++    }
++
++    .status-line { display: flex; align-items: center; gap: 6px; }
++    .status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
++
++    .empty-row td {
++      text-align: center; padding: 40px 20px; color: var(--text-dim);
++    }
+   </style>
+ </head>
+ <body>
+-  <h1>Nœuds surveillés</h1>
+-  <p><a href="/ui/dashboard.html">→ Voir le dashboard en direct</a></p>
+-
+-  <form id="node-form">
+-    <div><label>Hostname</label><input name="hostname" required pattern="^[a-z0-9][a-z0-9-]*$"></div>
+-    <div><label>IP (10.0.1.0/24)</label><input name="ip_address" required placeholder="10.0.1.6"></div>
+-    <div><label>Rôle</label>
+-      <select name="role" required>
+-        <option value="controller">controller</option>
+-        <option value="compute">compute</option>
+-        <option value="storage">storage</option>
+-        <option value="monitoring">monitoring</option>
+-      </select>
++
++  <div class="topbar">
++    <h1><span class="icon"></span>Cortex</h1>
++    <nav>
++      <a href="/ui/dashboard.html">Dashboard</a>
++      <a href="/ui/nodes.html" class="active">Nœuds</a>
++    </nav>
++    <div class="summary">
++      <div class="summary-item">
++        <div class="val" id="sum-total">–</div>
++        <div class="lbl">Nœuds</div>
++      </div>
++      <div class="summary-item">
++        <div class="val green" id="sum-installed">–</div>
++        <div class="lbl">Exporter OK</div>
++      </div>
++      <div class="summary-item">
++        <div class="val red" id="sum-failed">–</div>
++        <div class="lbl">Exporter échoué</div>
++      </div>
+     </div>
+-    <div><label>Port exporter</label><input name="exporter_port" type="number" value="9100" required></div>
+-    <div><label>API Key</label><input name="api_key" type="password" required></div>
+-    <button type="submit">Ajouter</button>
+-  </form>
+-  <p class="error" id="form-error"></p>
+-
+-  <table>
+-    <thead>
+-      <tr><th>Hostname</th><th>IP</th><th>Rôle</th><th>Port</th><th>Actif</th><th></th></tr>
+-    </thead>
+-    <tbody id="node-rows"></tbody>
+-  </table>
++  </div>
++
++  <main>
++    <h2 class="section-title">Ajouter un nœud</h2>
++    <div class="card form-card">
++      <form id="node-form">
++        <div class="field">
++          <label>Hostname</label>
++          <input name="hostname" required pattern="^[a-z0-9][a-z0-9-]*$" placeholder="compute3">
++        </div>
++        <div class="field">
++          <label>IP (10.0.1.0/24, 10.0.2.0/24)</label>
++          <input name="ip_address" required placeholder="10.0.1.6">
++        </div>
++        <div class="field">
++          <label>Rôle</label>
++          <select name="role" required>
++            <option value="controller">controller</option>
++            <option value="compute" selected>compute</option>
++            <option value="storage">storage</option>
++            <option value="monitoring">monitoring</option>
++          </select>
++        </div>
++        <div class="field">
++          <label>Port exporter</label>
++          <input name="exporter_port" type="number" value="9100" required>
++        </div>
++        <div class="field">
++          <label>API Key</label>
++          <input name="api_key" type="password" required>
++        </div>
++        <button type="submit" class="primary">Ajouter</button>
++      </form>
++      <p class="error" id="form-error"></p>
++    </div>
++
++    <h2 class="section-title">Nœuds enregistrés</h2>
++    <div class="card table-card">
++      <table>
++        <thead>
++          <tr>
++            <th>Hostname</th>
++            <th>IP</th>
++            <th>Rôle</th>
++            <th>Port</th>
++            <th>Actif</th>
++            <th>Node exporter</th>
++            <th></th>
++          </tr>
++        </thead>
++        <tbody id="node-rows">
++          <tr class="empty-row"><td colspan="7">Chargement…</td></tr>
++        </tbody>
++      </table>
++    </div>
++  </main>
+ 
+   <script>
+     const API = '/api/v1/nodes';
+ 
++    // Undefined here just means "unknown" (e.g. an older row, or GET /nodes
++    // which doesn't carry install status at all) -- render that distinctly
++    // from a known success/failure instead of defaulting to "OK".
++    const INSTALL_PILL = {
++      true:      { label: 'Installé',  fg: 'var(--green)',  bg: 'var(--green-bg)'  },
++      false:     { label: 'Échec',     fg: 'var(--red)',    bg: 'var(--red-bg)'    },
++      undefined: { label: 'Inconnu',   fg: 'var(--gray)',   bg: 'var(--gray-bg)'   },
++    };
++
++    const ROLE_COLOR = {
++      controller: { fg: 'var(--purple)', bg: 'var(--purple-bg)' },
++      compute:    { fg: 'var(--blue)',   bg: 'var(--blue-bg)'   },
++      storage:    { fg: 'var(--orange)', bg: 'var(--orange-bg)' },
++      monitoring: { fg: 'var(--brown)',  bg: 'var(--brown-bg)'  },
++    };
++
++    // Install status isn't persisted server-side (GET /nodes doesn't know
++    // whether the exporter install succeeded for existing rows), so we only
++    // track it for nodes created in this browser session, keyed by node id.
++    const installStatusById = {};
++
++    function rowTemplate(n) {
++      const role = ROLE_COLOR[n.role] || { fg: 'var(--gray)', bg: 'var(--gray-bg)' };
++      const key = installStatusById.hasOwnProperty(n.id) ? installStatusById[n.id] : undefined;
++      const install = INSTALL_PILL[key];
++
++      return `
++        <tr data-id="${n.id}">
++          <td class="hostname">${n.hostname}</td>
++          <td class="mono">${n.ip_address}</td>
++          <td><span class="pill" style="color:${role.fg};background:${role.bg}">${n.role}</span></td>
++          <td class="mono">${n.exporter_port}</td>
++          <td>
++            <span class="status-line">
++              <span class="status-dot" style="background:${n.is_active ? 'var(--green)' : 'var(--gray)'}"></span>
++              ${n.is_active ? 'Actif' : 'Inactif'}
++            </span>
++          </td>
++          <td><span class="pill" style="color:${install.fg};background:${install.bg}">${install.label}</span></td>
++          <td><button class="danger" data-id="${n.id}">Supprimer</button></td>
++        </tr>`;
++    }
++
+     async function loadNodes() {
+-      const res = await fetch(API);
+-      const nodes = await res.json();
+       const rows = document.getElementById('node-rows');
+-      rows.innerHTML = '';
+-      for (const n of nodes) {
+-        const tr = document.createElement('tr');
+-        tr.innerHTML = `
+-          <td>${n.hostname}</td>
+-          <td>${n.ip_address}</td>
+-          <td>${n.role}</td>
+-          <td>${n.exporter_port}</td>
+-          <td>${n.is_active ? '✅' : '⏸️'}</td>
+-          <td><button class="danger" data-id="${n.id}">Supprimer</button></td>`;
+-        tr.querySelector('button').addEventListener('click', () => deleteNode(n.id));
+-        rows.appendChild(tr);
++      let nodes;
++      try {
++        const res = await fetch(API);
++        if (!res.ok) throw new Error(res.status);
++        nodes = await res.json();
++      } catch (err) {
++        rows.innerHTML = `<tr class="empty-row"><td colspan="7">Échec de chargement des nœuds (${err.message})</td></tr>`;
++        return;
+       }
++
++      document.getElementById('sum-total').textContent = nodes.length;
++      const known = nodes.filter(n => installStatusById.hasOwnProperty(n.id));
++      document.getElementById('sum-installed').textContent = known.filter(n => installStatusById[n.id] === true).length;
++      document.getElementById('sum-failed').textContent = known.filter(n => installStatusById[n.id] === false).length;
++
++      if (!nodes.length) {
++        rows.innerHTML = '<tr class="empty-row"><td colspan="7">Aucun nœud enregistré. Ajoutez-en un ci-dessus.</td></tr>';
++        return;
++      }
++
++      rows.innerHTML = nodes.map(rowTemplate).join('');
++      rows.querySelectorAll('button.danger').forEach(btn => {
++        btn.addEventListener('click', () => deleteNode(btn.dataset.id));
++      });
+     }
+ 
+     async function deleteNode(id) {
+       const apiKey = prompt('API key pour confirmer la suppression :');
+       if (!apiKey) return;
+       const res = await fetch(`${API}/${id}`, { method: 'DELETE', headers: { 'X-API-Key': apiKey } });
+-      if (res.status === 204) loadNodes();
+-      else alert('Échec suppression: ' + res.status);
++      if (res.status === 204) {
++        delete installStatusById[id];
++        loadNodes();
++      } else {
++        alert('Échec suppression: ' + res.status);
++      }
+     }
+ 
+     document.getElementById('node-form').addEventListener('submit', async (e) => {
+       e.preventDefault();
+       const errorEl = document.getElementById('form-error');
+       errorEl.textContent = '';
++      errorEl.classList.remove('show');
+       const fd = new FormData(e.target);
+       const apiKey = fd.get('api_key');
+       const body = {
+@@ -89,13 +360,25 @@
+         headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+         body: JSON.stringify(body),
+       });
++      const payload = await res.json().catch(() => ({}));
++
+       if (res.ok) {
+         e.target.reset();
+         e.target.exporter_port.value = 9100;
++        e.target.role.value = 'compute';
++
++        if (payload.id) {
++          installStatusById[payload.id] = !!payload.node_exporter_installed;
++        }
++
++        if (payload.node_exporter_installed === false) {
++          errorEl.textContent = `Le nœud "${payload.hostname}" a été enregistré, mais l'installation de node_exporter a échoué. Il n'apparaîtra pas dans le dashboard tant que ce n'est pas résolu (voir les logs serveur).`;
++          errorEl.classList.add('show');
++        }
+         loadNodes();
+       } else {
+-        const err = await res.json().catch(() => ({}));
+-        errorEl.textContent = `Erreur ${res.status}: ${JSON.stringify(err.detail ?? err)}`;
++        errorEl.textContent = `Erreur ${res.status}: ${JSON.stringify(payload.detail ?? payload)}`;
++        errorEl.classList.add('show');
+       }
+     });
+ 
