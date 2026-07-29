@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cortex — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    /* ---- Notion token system ---- */
+    --bg:        #FFFFFF;
+    --bg-sunk:   #F7F6F3;   /* Notion's page/card off-white */
+    --bg-hover:  #EFEEEC;
+    --border:    #E9E9E7;
+    --text:      #37352F;  /* Notion body text */
+    --text-dim:  #787774;  /* Notion secondary text */
+    --text-faint:#9B9A97;
+
+    /* Notion tag/label colors, used exactly as Notion uses them */
+    --gray:   #9B9A97;  --gray-bg:   rgba(155,154,151,.18);
+    --brown:  #64473A;  --brown-bg:  rgba(100,71,58,.16);
+    --orange: #D9730D;  --orange-bg: rgba(217,115,13,.16);
+    --yellow: #DFAB01;  --yellow-bg: rgba(223,171,1,.18);
+    --green:  #0F7B6C;  --green-bg:  rgba(15,123,108,.16);
+    --blue:   #0B6E99;  --blue-bg:   rgba(11,110,153,.16);
+    --purple: #6940A5;  --purple-bg: rgba(105,64,165,.16);
+    --pink:   #AD1A72;  --pink-bg:   rgba(173,26,114,.16);
+    --red:    #E03E3E;  --red-bg:    rgba(224,62,62,.16);
+
+    --radius: 6px;
+    --shadow: 0 1px 2px rgba(15,15,15,.04), 0 2px 8px rgba(15,15,15,.03);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg-sunk);
+    color: var(--text);
+    font: 400 14px/1.5 -apple-system, "Segoe UI", "Inter", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- Top bar ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 5;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 32px;
+    display: flex; align-items: center; gap: 24px;
+    flex-wrap: wrap;
+  }
+  .topbar h1 {
+    font-size: 15px; font-weight: 600; margin: 0;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .topbar h1 .icon {
+    width: 20px; height: 20px; border-radius: 5px;
+    background: linear-gradient(135deg, var(--purple), var(--blue));
+    display: inline-block;
+  }
+  .topbar nav { display: flex; gap: 4px; margin-left: 4px; }
+  .topbar nav a {
+    font-size: 13px; color: var(--text-dim); text-decoration: none;
+    padding: 5px 10px; border-radius: var(--radius);
+  }
+  .topbar nav a:hover { background: var(--bg-hover); color: var(--text); }
+  .topbar nav a.active { background: var(--bg-hover); color: var(--text); font-weight: 500; }
+
+  .summary { display: flex; gap: 22px; margin-left: auto; }
+  .summary-item { text-align: right; }
+  .summary-item .val { font-size: 15px; font-weight: 600; }
+  .summary-item .lbl { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; }
+  .summary-item .val.green { color: var(--green); }
+  .summary-item .val.red { color: var(--red); }
+
+  .pulse-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green); display: inline-block; margin-right: 6px;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .pulse-dot { animation: none; } }
+
+  /* ---------- Layout ---------- */
+  main { max-width: 1400px; margin: 0 auto; padding: 28px 32px 60px; }
+
+  .empty {
+    text-align: center; padding: 90px 20px; color: var(--text-dim);
+  }
+  .empty .glyph { font-size: 28px; margin-bottom: 10px; }
+  .empty a { color: var(--blue); text-decoration: none; }
+  .empty a:hover { text-decoration: underline; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+  }
+
+  /* ---------- Card ---------- */
+  .card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    transition: box-shadow .15s ease;
+  }
+  .card:hover { box-shadow: 0 1px 3px rgba(15,15,15,.06), 0 4px 14px rgba(15,15,15,.06); }
+
+  .accent { height: 3px; width: 100%; }
+
+  .card-head {
+    padding: 14px 16px 10px;
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 8px;
+  }
+  .card-head h2 { font-size: 14px; font-weight: 600; margin: 0; }
+  .card-head .instance { font-size: 12px; color: var(--text-faint); margin-top: 2px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+  .pill {
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px;
+    white-space: nowrap; text-transform: capitalize;
+  }
+  .pill-row { display: flex; gap: 6px; align-items: center; }
+
+  .status-line {
+    padding: 0 16px 12px;
+    display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-dim);
+  }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+  /* ---------- Sparkline stats ---------- */
+  .stat-row {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid var(--border);
+  }
+  .stat {
+    padding: 10px 14px 6px;
+    border-right: 1px solid var(--border);
+  }
+  .stat:last-child { border-right: none; }
+  .stat .num { font-size: 19px; font-weight: 600; line-height: 1.2; }
+  .stat .num .unit { font-size: 11px; font-weight: 500; color: var(--text-faint); }
+  .stat .label { font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
+  .stat canvas { width: 100% !important; height: 30px !important; margin-top: 2px; }
+
+  /* ---------- Secondary metrics table ---------- */
+  .meta-grid {
+    display: grid; grid-template-columns: repeat(2, 1fr);
+    gap: 0; border-top: 1px solid var(--border);
+    background: var(--bg-sunk);
+  }
+  .meta-cell {
+    padding: 8px 14px;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .meta-cell:nth-child(2n) { border-right: none; }
+  .meta-cell .label { font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; }
+  .meta-cell .value { font-size: 12.5px; font-weight: 500; margin-top: 1px; }
+
+  footer.note {
+    text-align: center; color: var(--text-faint); font-size: 12px; padding: 24px 0 4px;
+  }
+</style>
+</head>
+<body>
+
+  <div class="topbar">
+    <h1><span class="icon"></span>Cortex</h1>
+    <nav>
+      <a href="/ui/dashboard.html" class="active">Dashboard</a>
+      <a href="/ui/nodes.html">Nœuds</a>
+    </nav>
+    <div class="summary">
+      <div class="summary-item">
+        <div class="val" id="sum-total">–</div>
+        <div class="lbl">Nodes</div>
+      </div>
+      <div class="summary-item">
+        <div class="val green" id="sum-up">–</div>
+        <div class="lbl">Up</div>
+      </div>
+      <div class="summary-item">
+        <div class="val red" id="sum-down">–</div>
+        <div class="lbl">Down</div>
+      </div>
+      <div class="summary-item">
+        <div class="val"><span class="pulse-dot"></span><span id="sum-updated">–</span></div>
+        <div class="lbl">Updated</div>
+      </div>
+    </div>
+  </div>
+
+  <main>
+    <div id="empty" class="empty" style="display:none">
+      <div class="glyph">◌</div>
+      <div>Aucun nœud actif pour le moment.</div>
+      <div><a href="/ui/nodes.html">Ajouter un nœud →</a></div>
+    </div>
+    <div class="grid" id="grid"></div>
+    <footer class="note" id="footnote"></footer>
+  </main>
+
+<script>
+const METRICS_URL = '/metrics';
+const POLL_MS = 12000;   // matches Prometheus scrape cadence — no point polling faster
+const HISTORY_LEN = 30;  // points kept per node per metric, in-memory only
+
+// role -> Notion tag color
+const ROLE_COLOR = {
+  controller: { fg: 'var(--purple)', bg: 'var(--purple-bg)' },
+  compute:    { fg: 'var(--blue)',   bg: 'var(--blue-bg)'   },
+  storage:    { fg: 'var(--orange)', bg: 'var(--orange-bg)' },
+  monitoring: { fg: 'var(--brown)',  bg: 'var(--brown-bg)'  },
+  unknown:    { fg: 'var(--gray)',   bg: 'var(--gray-bg)'   },
+};
+const HEALTH_COLOR = {
+  healthy:  { fg: 'var(--green)',  bg: 'var(--green-bg)',  dot: 'var(--green)'  },
+  warning:  { fg: 'var(--yellow)', bg: 'var(--yellow-bg)', dot: 'var(--yellow)' },
+  critical: { fg: 'var(--red)',    bg: 'var(--red-bg)',    dot: 'var(--red)'    },
+};
+
+// in-memory time-series history, keyed by instance, then by metric name
+const history = {};   // { [instance]: { cpu_percent: [...nums], memory_percent: [...], disk_percent: [...] } }
+const charts = {};     // { [instance+metric]: Chart instance }
+
+function pushHistory(instance, metric, value) {
+  history[instance] = history[instance] || {};
+  const arr = history[instance][metric] = history[instance][metric] || [];
+  arr.push(value);
+  if (arr.length > HISTORY_LEN) arr.shift();
+  return arr;
+}
+
+function sparkline(canvas, data, colorVar) {
+  const color = getComputedStyle(document.documentElement).getPropertyValue(colorVar.replace('var(', '').replace(')', '')).trim() || '#0F7B6C';
+  return new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: data.map((_, i) => i),
+      datasets: [{
+        data,
+        borderColor: color,
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.35,
+        fill: true,
+        backgroundColor: color + '1A',
+      }],
+    },
+    options: {
+      responsive: false,
+      animation: false,
+      scales: { x: { display: false }, y: { display: false, min: 0, max: 100 } },
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      elements: { line: { capBezierPoints: true } },
+    },
+  });
+}
+
+function cardTemplate(n) {
+  const role = ROLE_COLOR[n.role] || ROLE_COLOR.unknown;
+  const health = HEALTH_COLOR[n.health] || HEALTH_COLOR.healthy;
+  const isUp = n.status === 'up';
+
+  return `
+    <div class="card" data-instance="${n.instance}">
+      <div class="accent" style="background:${role.fg}"></div>
+      <div class="card-head">
+        <div>
+          <h2>${n.node}</h2>
+          <div class="instance">${n.instance}</div>
+        </div>
+        <div class="pill-row">
+          <span class="pill" style="color:${role.fg};background:${role.bg}">${n.role}</span>
+        </div>
+      </div>
+      <div class="status-line">
+        <span class="status-dot" style="background:${isUp ? health.dot : 'var(--red)'}"></span>
+        ${isUp ? 'En ligne' : 'Hors ligne'}
+        <span class="pill" style="color:${health.fg};background:${health.bg};margin-left:auto">${n.health}</span>
+      </div>
+      <div class="stat-row">
+        <div class="stat">
+          <div class="label">CPU</div>
+          <div class="num">${n.cpu_percent}<span class="unit">%</span></div>
+          <canvas width="90" height="30" data-metric="cpu_percent"></canvas>
+        </div>
+        <div class="stat">
+          <div class="label">Mémoire</div>
+          <div class="num">${n.memory_percent}<span class="unit">%</span></div>
+          <canvas width="90" height="30" data-metric="memory_percent"></canvas>
+        </div>
+        <div class="stat">
+          <div class="label">Disque</div>
+          <div class="num">${n.disk_percent}<span class="unit">%</span></div>
+          <canvas width="90" height="30" data-metric="disk_percent"></canvas>
+        </div>
+      </div>
+      <div class="meta-grid">
+        <div class="meta-cell"><div class="label">Load (1/5/15)</div><div class="value">${n.load1} / ${n.load5} / ${n.load15}</div></div>
+        <div class="meta-cell"><div class="label">Uptime</div><div class="value">${n.uptime}</div></div>
+        <div class="meta-cell"><div class="label">Disque R/W</div><div class="value">${n.disk_read} · ${n.disk_write}</div></div>
+        <div class="meta-cell"><div class="label">Réseau RX/TX</div><div class="value">${n.network_rx} · ${n.network_tx}</div></div>
+        <div class="meta-cell"><div class="label">Processus actifs</div><div class="value">${n.procs_running}</div></div>
+        <div class="meta-cell"><div class="label">Processus bloqués</div><div class="value">${n.procs_blocked}</div></div>
+      </div>
+    </div>`;
+}
+
+const SPARK_COLOR = { cpu_percent: 'var(--blue)', memory_percent: 'var(--purple)', disk_percent: 'var(--orange)' };
+
+async function poll() {
+  let nodes;
+  try {
+    const res = await fetch(METRICS_URL);
+    if (!res.ok) throw new Error(res.status);
+    nodes = await res.json();
+  } catch (err) {
+    document.getElementById('footnote').textContent = `Échec de récupération des métriques (${err.message}). Nouvelle tentative dans ${POLL_MS / 1000}s…`;
+    return;
+  }
+
+  const grid = document.getElementById('grid');
+  const empty = document.getElementById('empty');
+
+  document.getElementById('sum-total').textContent = nodes.length;
+  document.getElementById('sum-up').textContent = nodes.filter(n => n.status === 'up').length;
+  document.getElementById('sum-down').textContent = nodes.filter(n => n.status !== 'up').length;
+  document.getElementById('sum-updated').textContent = new Date().toLocaleTimeString('fr-FR');
+  document.getElementById('footnote').textContent = `Actualisation automatique toutes les ${POLL_MS / 1000}s · ${HISTORY_LEN} points conservés en mémoire (perdus au rechargement)`;
+
+  if (!nodes.length) {
+    grid.innerHTML = '';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+
+  const seen = new Set(nodes.map(n => n.instance));
+  // remove cards for nodes no longer present
+  [...grid.children].forEach(card => {
+    if (!seen.has(card.dataset.instance)) {
+      card.remove();
+      delete history[card.dataset.instance];
+    }
+  });
+
+  for (const n of nodes) {
+    let card = grid.querySelector(`[data-instance="${n.instance}"]`);
+    if (!card) {
+      grid.insertAdjacentHTML('beforeend', cardTemplate(n));
+      card = grid.querySelector(`[data-instance="${n.instance}"]`);
+    } else {
+      card.outerHTML = cardTemplate(n);
+      card = grid.querySelector(`[data-instance="${n.instance}"]`);
+    }
+
+    ['cpu_percent', 'memory_percent', 'disk_percent'].forEach(metric => {
+      const arr = pushHistory(n.instance, metric, n[metric]);
+      const canvas = card.querySelector(`canvas[data-metric="${metric}"]`);
+      const key = n.instance + ':' + metric;
+      if (charts[key]) charts[key].destroy();
+      charts[key] = sparkline(canvas, arr, SPARK_COLOR[metric]);
+    });
+  }
+}
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

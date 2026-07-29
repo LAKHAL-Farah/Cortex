@@ -12,6 +12,8 @@ networks:
 services:
     # override: give api access to the fake-node networks, on top of cortex-net
   api:
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090/api/v1/query
     networks:
       - cortex-net
       - cortex-sandbox
