@@ -10,3 +10,9 @@
   become: true
   roles:
     - prometheus
+
+- name: Deploy Loki on the logging controller
+  hosts: loki_server
+  become: true
+  roles:
+    - loki
