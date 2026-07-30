@@ -1,0 +1,2 @@
+# seconds between fake log lines per service, per host
+log_simulator_interval: 5

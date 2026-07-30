@@ -1,0 +1,39 @@
+#!/bin/bash
+# Cortex sandbox log simulator -- SANDBOX ONLY.
+# Writes fake but plausible log lines into the same /var/log/kolla/<service>/
+# paths Promtail is already configured to tail on this host, so the log
+# pipeline has real data to ship without needing actual OpenStack services.
+{% raw %}
+set -u
+
+LEVELS=(INFO INFO INFO WARNING ERROR DEBUG)
+MESSAGES=(
+  "request completed successfully"
+  "handling incoming request"
+  "connection established"
+  "health check passed"
+  "cache miss, fetching from backend"
+  "retrying operation after transient error"
+  "processed batch of items"
+)
+{% endraw %}
+SERVICES=({{ promtail_services | join(' ') }})
+HOSTNAME_LABEL="{{ inventory_hostname }}"
+SLEEP_INTERVAL={{ log_simulator_interval }}
+{% raw %}
+n_levels=${#LEVELS[@]}
+n_messages=${#MESSAGES[@]}
+
+while true; do
+  for svc in "${SERVICES[@]}"; do
+    mkdir -p "/var/log/kolla/${svc}"
+    level=${LEVELS[$((RANDOM % n_levels))]}
+    msg=${MESSAGES[$((RANDOM % n_messages))]}
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+    req_id=$(printf '%08x' $RANDOM$RANDOM)
+    echo "${ts} ${level} [${svc}] ${HOSTNAME_LABEL} req_id=${req_id} - ${msg}" \
+      >> "/var/log/kolla/${svc}/${svc}.log"
+  done
+  sleep "$SLEEP_INTERVAL"
+done
+{% endraw %}

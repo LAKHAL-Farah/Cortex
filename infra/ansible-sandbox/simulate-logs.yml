@@ -1,0 +1,16 @@
+---
+# SANDBOX ONLY. Deploys a background generator on every logging_agents host
+# that continuously writes fake log lines into the same /var/log/kolla/<service>/
+# paths Promtail already scrapes for that host's role, so the log pipeline
+# has real per-service traffic to exchange without real OpenStack services
+# running. Deliberately kept out of site.yml so it's never run against
+# real infra by accident.
+#
+# Run:   ansible-playbook simulate-logs.yml
+# Stop:  ansible logging_agents -b -m systemd -a "name=log-simulator state=stopped"
+
+- name: Deploy fake per-service log generator
+  hosts: logging_agents
+  become: true
+  roles:
+    - log_simulator

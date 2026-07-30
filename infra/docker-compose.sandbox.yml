@@ -70,6 +70,8 @@ services:
       - ./.sandbox-ssh/id_ed25519.pub:/root/.ssh_bootstrap/authorized_keys:ro
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     networks:
+      cortex-sandbox:
+        ipv4_address: 10.0.1.23   # new address, gives storage-sim a route to controller-sim/loki
       cortex-sandbox-storage:
         ipv4_address: 10.0.2.20
     command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]

@@ -1,0 +1,27 @@
+- name: Create per-service kolla log directories
+  ansible.builtin.file:
+    path: "/var/log/kolla/{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ promtail_services }}"
+
+- name: Deploy fake log generator script
+  ansible.builtin.template:
+    src: fake_service_logs.sh.j2
+    dest: /usr/local/bin/fake_service_logs.sh
+    mode: "0755"
+  notify: Restart log simulator
+
+- name: Deploy log simulator systemd unit
+  ansible.builtin.template:
+    src: log-simulator.service.j2
+    dest: /etc/systemd/system/log-simulator.service
+    mode: "0644"
+  notify: Restart log simulator
+
+- name: Enable and start log simulator
+  ansible.builtin.systemd:
+    name: log-simulator
+    enabled: true
+    state: started
+    daemon_reload: true
