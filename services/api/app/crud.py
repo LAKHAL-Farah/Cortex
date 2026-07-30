@@ -44,3 +44,9 @@ def update_node(db: Session, node: models.Node, payload: schemas.NodeUpdate) -> 
 def delete_node(db: Session, node: models.Node) -> None:
     db.delete(node)
     db.commit()
+
+def set_node_exporter_installed(db: Session, node: models.Node, installed: bool) -> models.Node:
+    node.node_exporter_installed = installed
+    db.commit()
+    db.refresh(node)
+    return node

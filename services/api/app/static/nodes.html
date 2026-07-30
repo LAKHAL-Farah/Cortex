@@ -133,6 +133,13 @@
       padding: 5px 10px; font-size: 12px;
     }
     button.danger:hover { background: var(--red); color: #fff; }
+    button.secondary {
+      background: var(--blue-bg); color: var(--blue);
+      padding: 5px 10px; font-size: 12px;
+      margin-right: 6px;
+    }
+    button.secondary:hover { background: var(--blue); color: #fff; }
+    button.secondary:disabled { opacity: .5; cursor: default; }
 
     .error {
       color: var(--red); margin: 10px 0 0; font-size: 12.5px;
@@ -258,13 +265,16 @@
   <script>
     const API = '/api/v1/nodes';
 
-    // Undefined here just means "unknown" (e.g. an older row, or GET /nodes
-    // which doesn't carry install status at all) -- render that distinctly
-    // from a known success/failure instead of defaulting to "OK".
+    // null/undefined = unknown (row predates this field, or install was
+    // never attempted for it) -- render that distinctly from a known
+    // success/failure rather than defaulting to "OK". This comes straight
+    // from the API's persisted node_exporter_installed column now, so it's
+    // accurate on every load: page reload, revisiting the tab, another
+    // device, doesn't matter.
     const INSTALL_PILL = {
-      true:      { label: 'Installé',  fg: 'var(--green)',  bg: 'var(--green-bg)'  },
-      false:     { label: 'Échec',     fg: 'var(--red)',    bg: 'var(--red-bg)'    },
-      undefined: { label: 'Inconnu',   fg: 'var(--gray)',   bg: 'var(--gray-bg)'   },
+      true:  { label: 'Installé', fg: 'var(--green)', bg: 'var(--green-bg)' },
+      false: { label: 'Échec',    fg: 'var(--red)',   bg: 'var(--red-bg)'   },
+      null:  { label: 'Inconnu',  fg: 'var(--gray)',  bg: 'var(--gray-bg)'  },
     };
 
     const ROLE_COLOR = {
@@ -274,14 +284,11 @@
       monitoring: { fg: 'var(--brown)',  bg: 'var(--brown-bg)'  },
     };
 
-    // Install status isn't persisted server-side (GET /nodes doesn't know
-    // whether the exporter install succeeded for existing rows), so we only
-    // track it for nodes created in this browser session, keyed by node id.
-    const installStatusById = {};
-
     function rowTemplate(n) {
       const role = ROLE_COLOR[n.role] || { fg: 'var(--gray)', bg: 'var(--gray-bg)' };
-      const key = installStatusById.hasOwnProperty(n.id) ? installStatusById[n.id] : undefined;
+      const key = (n.node_exporter_installed === true || n.node_exporter_installed === false)
+        ? n.node_exporter_installed
+        : null;
       const install = INSTALL_PILL[key];
 
       return `
@@ -297,7 +304,10 @@
             </span>
           </td>
           <td><span class="pill" style="color:${install.fg};background:${install.bg}">${install.label}</span></td>
-          <td><button class="danger" data-id="${n.id}">Supprimer</button></td>
+          <td style="white-space:nowrap">
+            <button class="secondary" data-verify-id="${n.id}">Vérifier</button>
+            <button class="danger" data-id="${n.id}">Supprimer</button>
+          </td>
         </tr>`;
     }
 
@@ -314,9 +324,8 @@
       }
 
       document.getElementById('sum-total').textContent = nodes.length;
-      const known = nodes.filter(n => installStatusById.hasOwnProperty(n.id));
-      document.getElementById('sum-installed').textContent = known.filter(n => installStatusById[n.id] === true).length;
-      document.getElementById('sum-failed').textContent = known.filter(n => installStatusById[n.id] === false).length;
+      document.getElementById('sum-installed').textContent = nodes.filter(n => n.node_exporter_installed === true).length;
+      document.getElementById('sum-failed').textContent = nodes.filter(n => n.node_exporter_installed === false).length;
 
       if (!nodes.length) {
         rows.innerHTML = '<tr class="empty-row"><td colspan="7">Aucun nœud enregistré. Ajoutez-en un ci-dessus.</td></tr>';
@@ -327,6 +336,33 @@
       rows.querySelectorAll('button.danger').forEach(btn => {
         btn.addEventListener('click', () => deleteNode(btn.dataset.id));
       });
+      rows.querySelectorAll('button.secondary').forEach(btn => {
+        btn.addEventListener('click', () => verifyNode(btn.dataset.verifyId, btn));
+      });
+    }
+
+    async function verifyNode(id, btn) {
+      const apiKey = prompt('API key pour relancer la vérification :');
+      if (!apiKey) return;
+      btn.disabled = true;
+      btn.textContent = '…';
+      try {
+        const res = await fetch(`${API}/${id}/exporter-check`, {
+          method: 'POST',
+          headers: { 'X-API-Key': apiKey },
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          alert(`Échec vérification: ${res.status} ${JSON.stringify(payload.detail ?? payload)}`);
+          return;
+        }
+        await loadNodes();
+      } catch (err) {
+        alert('Échec vérification: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Vérifier';
+      }
     }
 
     async function deleteNode(id) {
@@ -334,7 +370,6 @@
       if (!apiKey) return;
       const res = await fetch(`${API}/${id}`, { method: 'DELETE', headers: { 'X-API-Key': apiKey } });
       if (res.status === 204) {
-        delete installStatusById[id];
         loadNodes();
       } else {
         alert('Échec suppression: ' + res.status);
@@ -366,10 +401,6 @@
         e.target.reset();
         e.target.exporter_port.value = 9100;
         e.target.role.value = 'compute';
-
-        if (payload.id) {
-          installStatusById[payload.id] = !!payload.node_exporter_installed;
-        }
 
         if (payload.node_exporter_installed === false) {
           errorEl.textContent = `Le nœud "${payload.hostname}" a été enregistré, mais l'installation de node_exporter a échoué. Il n'apparaîtra pas dans le dashboard tant que ce n'est pas résolu (voir les logs serveur).`;

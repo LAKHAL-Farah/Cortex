@@ -23,7 +23,7 @@ class NodeBase(BaseModel):
     role: NodeRole
     exporter_port: int = Field(default=9100, ge=1, le=65535)
     is_active: bool = True
-
+    node_exporter_installed: bool | None = None
     @field_validator("ip_address")
     @classmethod
     def ip_must_be_in_private_subnet(cls, v: str) -> str:

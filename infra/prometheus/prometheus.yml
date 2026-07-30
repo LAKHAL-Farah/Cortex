@@ -7,4 +7,4 @@ scrape_configs:
     file_sd_configs:
       - files:
           - /file_sd/nodes.json
-        refresh_interval: 30s
+        refresh_interval: 5s
