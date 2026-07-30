@@ -32,6 +32,17 @@ services:
       - "127.0.0.1:8000:8000"
     networks:
       - cortex-net
+  web:
+    build: ../services/web
+    environment:
+      CORTEX_API_URL: http://api:8000
+      CORTEX_API_KEY: ${CORTEX_API_KEY}
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - api
+    networks:
+      - cortex-net
 
 volumes:
   cortex_pgdata:

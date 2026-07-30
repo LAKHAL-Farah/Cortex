@@ -25,6 +25,12 @@ def install_node_exporter(hostname: str) -> bool:
                 "ansible-playbook",
                 str(SITE_PLAYBOOK),
                 "--limit", hostname,
+                # This endpoint only ever installs node_exporter. Without this, registering
+                # controller-sim (a member of both `monitoring` and `prometheus_server`) also
+                # runs the prometheus play against it -- a heavyweight, internet-dependent
+                # install that duplicates the Prometheus already running as its own container
+                # in the sandbox, and whose failure silently aborted file_sd regeneration too.
+                "--skip-tags", "prometheus_server_install",
                 "-i", str(ANSIBLE_DIR / "inventory" / "hosts.ini"),
             ],
             cwd=ANSIBLE_DIR,

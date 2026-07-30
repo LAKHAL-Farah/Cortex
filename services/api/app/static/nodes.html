@@ -2,63 +2,366 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cortex — Nœuds surveillés</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; }
-    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-    th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; }
-    form { display: grid; grid-template-columns: repeat(5, 1fr) auto; gap: 0.5rem; align-items: end; }
-    label { font-size: 0.8rem; display: block; }
-    .error { color: #b00020; margin-top: 0.5rem; }
-    button.danger { background: #b00020; color: white; border: none; padding: 0.3rem 0.6rem; cursor: pointer; }
+    :root {
+      /* ---- Notion token system (matches dashboard.html) ---- */
+      --bg:        #FFFFFF;
+      --bg-sunk:   #F7F6F3;
+      --bg-hover:  #EFEEEC;
+      --border:    #E9E9E7;
+      --text:      #37352F;
+      --text-dim:  #787774;
+      --text-faint:#9B9A97;
+
+      --gray:   #9B9A97;  --gray-bg:   rgba(155,154,151,.18);
+      --brown:  #64473A;  --brown-bg:  rgba(100,71,58,.16);
+      --orange: #D9730D;  --orange-bg: rgba(217,115,13,.16);
+      --yellow: #DFAB01;  --yellow-bg: rgba(223,171,1,.18);
+      --green:  #0F7B6C;  --green-bg:  rgba(15,123,108,.16);
+      --blue:   #0B6E99;  --blue-bg:   rgba(11,110,153,.16);
+      --purple: #6940A5;  --purple-bg: rgba(105,64,165,.16);
+      --pink:   #AD1A72;  --pink-bg:   rgba(173,26,114,.16);
+      --red:    #E03E3E;  --red-bg:    rgba(224,62,62,.16);
+
+      --radius: 6px;
+      --shadow: 0 1px 2px rgba(15,15,15,.04), 0 2px 8px rgba(15,15,15,.03);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg-sunk);
+      color: var(--text);
+      font: 400 14px/1.5 -apple-system, "Segoe UI", "Inter", Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ---------- Top bar (identical to dashboard.html) ---------- */
+    .topbar {
+      position: sticky; top: 0; z-index: 5;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 32px;
+      display: flex; align-items: center; gap: 24px;
+      flex-wrap: wrap;
+    }
+    .topbar h1 {
+      font-size: 15px; font-weight: 600; margin: 0;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .topbar h1 .icon {
+      width: 20px; height: 20px; border-radius: 5px;
+      background: linear-gradient(135deg, var(--purple), var(--blue));
+      display: inline-block;
+    }
+    .topbar nav { display: flex; gap: 4px; margin-left: 4px; }
+    .topbar nav a {
+      font-size: 13px; color: var(--text-dim); text-decoration: none;
+      padding: 5px 10px; border-radius: var(--radius);
+    }
+    .topbar nav a:hover { background: var(--bg-hover); color: var(--text); }
+    .topbar nav a.active { background: var(--bg-hover); color: var(--text); font-weight: 500; }
+
+    .summary { display: flex; gap: 22px; margin-left: auto; }
+    .summary-item { text-align: right; }
+    .summary-item .val { font-size: 15px; font-weight: 600; }
+    .summary-item .lbl { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; }
+    .summary-item .val.green { color: var(--green); }
+    .summary-item .val.red { color: var(--red); }
+
+    /* ---------- Layout ---------- */
+    main { max-width: 1400px; margin: 0 auto; padding: 28px 32px 60px; }
+
+    h2.section-title {
+      font-size: 13px; font-weight: 600; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: .05em;
+      margin: 0 0 12px;
+    }
+
+    /* ---------- Form card ---------- */
+    .card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .form-card { padding: 18px 20px 20px; margin-bottom: 24px; }
+
+    form#node-form {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr) auto;
+      gap: 12px;
+      align-items: end;
+    }
+    .field label {
+      font-size: 11px; font-weight: 600; color: var(--text-faint);
+      text-transform: uppercase; letter-spacing: .04em;
+      display: block; margin-bottom: 5px;
+    }
+    .field input, .field select {
+      width: 100%;
+      font: inherit;
+      font-size: 13px;
+      padding: 7px 9px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg);
+      color: var(--text);
+    }
+    .field input:focus, .field select:focus {
+      outline: none;
+      border-color: var(--blue);
+      box-shadow: 0 0 0 2px var(--blue-bg);
+    }
+
+    button {
+      font: inherit; font-size: 13px; font-weight: 600;
+      cursor: pointer; border: none; border-radius: var(--radius);
+    }
+    button.primary {
+      background: var(--text); color: var(--bg);
+      padding: 8px 16px;
+      white-space: nowrap;
+    }
+    button.primary:hover { background: #000; }
+    button.danger {
+      background: var(--red-bg); color: var(--red);
+      padding: 5px 10px; font-size: 12px;
+    }
+    button.danger:hover { background: var(--red); color: #fff; }
+    button.secondary {
+      background: var(--blue-bg); color: var(--blue);
+      padding: 5px 10px; font-size: 12px;
+      margin-right: 6px;
+    }
+    button.secondary:hover { background: var(--blue); color: #fff; }
+    button.secondary:disabled { opacity: .5; cursor: default; }
+
+    .error {
+      color: var(--red); margin: 10px 0 0; font-size: 12.5px;
+      display: none;
+    }
+    .error.show { display: block; }
+
+    /* ---------- Nodes table ---------- */
+    .table-card { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th {
+      text-align: left;
+      font-size: 10.5px; font-weight: 600; color: var(--text-faint);
+      text-transform: uppercase; letter-spacing: .05em;
+      padding: 10px 14px;
+      background: var(--bg-sunk);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    tbody td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: var(--bg-hover); }
+
+    .hostname { font-weight: 600; }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; color: var(--text-dim); }
+
+    .pill {
+      font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px;
+      white-space: nowrap; text-transform: capitalize; display: inline-block;
+    }
+
+    .status-line { display: flex; align-items: center; gap: 6px; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+    .empty-row td {
+      text-align: center; padding: 40px 20px; color: var(--text-dim);
+    }
   </style>
 </head>
 <body>
-  <h1>Nœuds surveillés</h1>
 
-  <form id="node-form">
-    <div><label>Hostname</label><input name="hostname" required pattern="^[a-z0-9][a-z0-9-]*$"></div>
-    <div><label>IP (10.0.1.0/24)</label><input name="ip_address" required placeholder="10.0.1.6"></div>
-    <div><label>Rôle</label>
-      <select name="role" required>
-        <option value="controller">controller</option>
-        <option value="compute">compute</option>
-        <option value="storage">storage</option>
-        <option value="monitoring">monitoring</option>
-      </select>
+  <div class="topbar">
+    <h1><span class="icon"></span>Cortex</h1>
+    <nav>
+      <a href="/ui/dashboard.html">Dashboard</a>
+      <a href="/ui/nodes.html" class="active">Nœuds</a>
+    </nav>
+    <div class="summary">
+      <div class="summary-item">
+        <div class="val" id="sum-total">–</div>
+        <div class="lbl">Nœuds</div>
+      </div>
+      <div class="summary-item">
+        <div class="val green" id="sum-installed">–</div>
+        <div class="lbl">Exporter OK</div>
+      </div>
+      <div class="summary-item">
+        <div class="val red" id="sum-failed">–</div>
+        <div class="lbl">Exporter échoué</div>
+      </div>
     </div>
-    <div><label>Port exporter</label><input name="exporter_port" type="number" value="9100" required></div>
-    <div><label>API Key</label><input name="api_key" type="password" required></div>
-    <button type="submit">Ajouter</button>
-  </form>
-  <p class="error" id="form-error"></p>
+  </div>
 
-  <table>
-    <thead>
-      <tr><th>Hostname</th><th>IP</th><th>Rôle</th><th>Port</th><th>Actif</th><th></th></tr>
-    </thead>
-    <tbody id="node-rows"></tbody>
-  </table>
+  <main>
+    <h2 class="section-title">Ajouter un nœud</h2>
+    <div class="card form-card">
+      <form id="node-form">
+        <div class="field">
+          <label>Hostname</label>
+          <input name="hostname" required pattern="^[a-z0-9][a-z0-9-]*$" placeholder="compute3">
+        </div>
+        <div class="field">
+          <label>IP (10.0.1.0/24, 10.0.2.0/24)</label>
+          <input name="ip_address" required placeholder="10.0.1.6">
+        </div>
+        <div class="field">
+          <label>Rôle</label>
+          <select name="role" required>
+            <option value="controller">controller</option>
+            <option value="compute" selected>compute</option>
+            <option value="storage">storage</option>
+            <option value="monitoring">monitoring</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Port exporter</label>
+          <input name="exporter_port" type="number" value="9100" required>
+        </div>
+        <div class="field">
+          <label>API Key</label>
+          <input name="api_key" type="password" required>
+        </div>
+        <button type="submit" class="primary">Ajouter</button>
+      </form>
+      <p class="error" id="form-error"></p>
+    </div>
+
+    <h2 class="section-title">Nœuds enregistrés</h2>
+    <div class="card table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Hostname</th>
+            <th>IP</th>
+            <th>Rôle</th>
+            <th>Port</th>
+            <th>Actif</th>
+            <th>Node exporter</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="node-rows">
+          <tr class="empty-row"><td colspan="7">Chargement…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
 
   <script>
     const API = '/api/v1/nodes';
 
+    // null/undefined = unknown (row predates this field, or install was
+    // never attempted for it) -- render that distinctly from a known
+    // success/failure rather than defaulting to "OK". This comes straight
+    // from the API's persisted node_exporter_installed column now, so it's
+    // accurate on every load: page reload, revisiting the tab, another
+    // device, doesn't matter.
+    const INSTALL_PILL = {
+      true:  { label: 'Installé', fg: 'var(--green)', bg: 'var(--green-bg)' },
+      false: { label: 'Échec',    fg: 'var(--red)',   bg: 'var(--red-bg)'   },
+      null:  { label: 'Inconnu',  fg: 'var(--gray)',  bg: 'var(--gray-bg)'  },
+    };
+
+    const ROLE_COLOR = {
+      controller: { fg: 'var(--purple)', bg: 'var(--purple-bg)' },
+      compute:    { fg: 'var(--blue)',   bg: 'var(--blue-bg)'   },
+      storage:    { fg: 'var(--orange)', bg: 'var(--orange-bg)' },
+      monitoring: { fg: 'var(--brown)',  bg: 'var(--brown-bg)'  },
+    };
+
+    function rowTemplate(n) {
+      const role = ROLE_COLOR[n.role] || { fg: 'var(--gray)', bg: 'var(--gray-bg)' };
+      const key = (n.node_exporter_installed === true || n.node_exporter_installed === false)
+        ? n.node_exporter_installed
+        : null;
+      const install = INSTALL_PILL[key];
+
+      return `
+        <tr data-id="${n.id}">
+          <td class="hostname">${n.hostname}</td>
+          <td class="mono">${n.ip_address}</td>
+          <td><span class="pill" style="color:${role.fg};background:${role.bg}">${n.role}</span></td>
+          <td class="mono">${n.exporter_port}</td>
+          <td>
+            <span class="status-line">
+              <span class="status-dot" style="background:${n.is_active ? 'var(--green)' : 'var(--gray)'}"></span>
+              ${n.is_active ? 'Actif' : 'Inactif'}
+            </span>
+          </td>
+          <td><span class="pill" style="color:${install.fg};background:${install.bg}">${install.label}</span></td>
+          <td style="white-space:nowrap">
+            <button class="secondary" data-verify-id="${n.id}">Vérifier</button>
+            <button class="danger" data-id="${n.id}">Supprimer</button>
+          </td>
+        </tr>`;
+    }
+
     async function loadNodes() {
-      const res = await fetch(API);
-      const nodes = await res.json();
       const rows = document.getElementById('node-rows');
-      rows.innerHTML = '';
-      for (const n of nodes) {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${n.hostname}</td>
-          <td>${n.ip_address}</td>
-          <td>${n.role}</td>
-          <td>${n.exporter_port}</td>
-          <td>${n.is_active ? '✅' : '⏸️'}</td>
-          <td><button class="danger" data-id="${n.id}">Supprimer</button></td>`;
-        tr.querySelector('button').addEventListener('click', () => deleteNode(n.id));
-        rows.appendChild(tr);
+      let nodes;
+      try {
+        const res = await fetch(API);
+        if (!res.ok) throw new Error(res.status);
+        nodes = await res.json();
+      } catch (err) {
+        rows.innerHTML = `<tr class="empty-row"><td colspan="7">Échec de chargement des nœuds (${err.message})</td></tr>`;
+        return;
+      }
+
+      document.getElementById('sum-total').textContent = nodes.length;
+      document.getElementById('sum-installed').textContent = nodes.filter(n => n.node_exporter_installed === true).length;
+      document.getElementById('sum-failed').textContent = nodes.filter(n => n.node_exporter_installed === false).length;
+
+      if (!nodes.length) {
+        rows.innerHTML = '<tr class="empty-row"><td colspan="7">Aucun nœud enregistré. Ajoutez-en un ci-dessus.</td></tr>';
+        return;
+      }
+
+      rows.innerHTML = nodes.map(rowTemplate).join('');
+      rows.querySelectorAll('button.danger').forEach(btn => {
+        btn.addEventListener('click', () => deleteNode(btn.dataset.id));
+      });
+      rows.querySelectorAll('button.secondary').forEach(btn => {
+        btn.addEventListener('click', () => verifyNode(btn.dataset.verifyId, btn));
+      });
+    }
+
+    async function verifyNode(id, btn) {
+      const apiKey = prompt('API key pour relancer la vérification :');
+      if (!apiKey) return;
+      btn.disabled = true;
+      btn.textContent = '…';
+      try {
+        const res = await fetch(`${API}/${id}/exporter-check`, {
+          method: 'POST',
+          headers: { 'X-API-Key': apiKey },
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          alert(`Échec vérification: ${res.status} ${JSON.stringify(payload.detail ?? payload)}`);
+          return;
+        }
+        await loadNodes();
+      } catch (err) {
+        alert('Échec vérification: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Vérifier';
       }
     }
 
@@ -66,14 +369,18 @@
       const apiKey = prompt('API key pour confirmer la suppression :');
       if (!apiKey) return;
       const res = await fetch(`${API}/${id}`, { method: 'DELETE', headers: { 'X-API-Key': apiKey } });
-      if (res.status === 204) loadNodes();
-      else alert('Échec suppression: ' + res.status);
+      if (res.status === 204) {
+        loadNodes();
+      } else {
+        alert('Échec suppression: ' + res.status);
+      }
     }
 
     document.getElementById('node-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const errorEl = document.getElementById('form-error');
       errorEl.textContent = '';
+      errorEl.classList.remove('show');
       const fd = new FormData(e.target);
       const apiKey = fd.get('api_key');
       const body = {
@@ -88,13 +395,21 @@
         headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
         body: JSON.stringify(body),
       });
+      const payload = await res.json().catch(() => ({}));
+
       if (res.ok) {
         e.target.reset();
         e.target.exporter_port.value = 9100;
+        e.target.role.value = 'compute';
+
+        if (payload.node_exporter_installed === false) {
+          errorEl.textContent = `Le nœud "${payload.hostname}" a été enregistré, mais l'installation de node_exporter a échoué. Il n'apparaîtra pas dans le dashboard tant que ce n'est pas résolu (voir les logs serveur).`;
+          errorEl.classList.add('show');
+        }
         loadNodes();
       } else {
-        const err = await res.json().catch(() => ({}));
-        errorEl.textContent = `Erreur ${res.status}: ${JSON.stringify(err.detail ?? err)}`;
+        errorEl.textContent = `Erreur ${res.status}: ${JSON.stringify(payload.detail ?? payload)}`;
+        errorEl.classList.add('show');
       }
     });
 

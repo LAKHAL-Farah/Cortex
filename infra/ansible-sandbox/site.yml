@@ -8,6 +8,7 @@
 - name: Deploy Prometheus server on the controller
   hosts: prometheus_server
   become: true
+  tags: [prometheus_server_install]
   roles:
     - prometheus
 

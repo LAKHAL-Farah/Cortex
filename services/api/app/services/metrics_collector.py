@@ -1,4 +1,18 @@
-from app.services.prometheus_client import query
+from app.services.prometheus_client import query, query_range
+import logging
+
+logger = logging.getLogger(__name__)
+
+import time
+
+METRIC_QUERIES = {
+    "cpu_percent":    '100 - (avg by(instance) (rate(node_cpu_seconds_total{{mode="idle"}}[5m])) * 100)',
+    "memory_percent": '100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)',
+    "disk_percent":   '100 * (1 - node_filesystem_avail_bytes{{mountpoint="/"}} / node_filesystem_size_bytes{{mountpoint="/"}})',
+    "network_rx":     'sum by(instance) (rate(node_network_receive_bytes_total{{device!="lo"}}[5m]))',
+    "network_tx":     'sum by(instance) (rate(node_network_transmit_bytes_total{{device!="lo"}}[5m]))',
+    "load1":          'node_load1',
+}
 
 
 # ---------- Helpers ----------
@@ -209,3 +223,32 @@ def collect_metrics():
         })
 
     return nodes
+
+
+
+
+def get_history(instance: str, minutes: int = 60, step: str = "15s"):
+    end = time.time()
+    start = end - minutes * 60
+    out = {}
+    for name, promql in METRIC_QUERIES.items():
+        scoped = f'({promql}){{instance="{instance}"}}' if "{{instance" not in promql else promql
+        try:
+            results = query_range(scoped, start, end, step)
+            series = []
+            if results:
+                if len(results) == 1:
+                    series = results[0].get("values", [])
+                else:
+                    for result in results:
+                        if result.get("metric", {}).get("instance") == instance:
+                            series = result.get("values", [])
+                            break
+                    if not series:
+                        series = results[0].get("values", [])
+        except Exception:
+            logger.exception("failed to fetch history for %s (metric=%s)", instance, name)
+            series = []
+
+        out[name] = [{"t": int(float(ts)), "v": round(float(v), 2)} for ts, v in series]
+    return out

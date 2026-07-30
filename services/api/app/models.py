@@ -53,6 +53,12 @@ class Node(Base):
         nullable=False,
     )
 
+    node_exporter_installed: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        default=None,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
