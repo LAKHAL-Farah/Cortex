@@ -1,4 +1,7 @@
-from app.services.prometheus_client import query
+from app.services.prometheus_client import query, query_range
+import logging
+
+logger = logging.getLogger(__name__)
 
 import time
 
@@ -230,7 +233,22 @@ def get_history(instance: str, minutes: int = 60, step: str = "15s"):
     out = {}
     for name, promql in METRIC_QUERIES.items():
         scoped = f'({promql}){{instance="{instance}"}}' if "{{instance" not in promql else promql
-        results = query_range(scoped, start, end, step)
-        series = results[0]["values"] if results else []
+        try:
+            results = query_range(scoped, start, end, step)
+            series = []
+            if results:
+                if len(results) == 1:
+                    series = results[0].get("values", [])
+                else:
+                    for result in results:
+                        if result.get("metric", {}).get("instance") == instance:
+                            series = result.get("values", [])
+                            break
+                    if not series:
+                        series = results[0].get("values", [])
+        except Exception:
+            logger.exception("failed to fetch history for %s (metric=%s)", instance, name)
+            series = []
+
         out[name] = [{"t": int(float(ts)), "v": round(float(v), 2)} for ts, v in series]
     return out
