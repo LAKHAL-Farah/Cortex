@@ -1,26 +1,61 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Notion light */
+  --bg: #FFFFFF;
+  --bg-sunk: #F7F6F3;
+  --bg-hover: #EFEEEC;
+  --border: #E9E9E7;
+  --text: #37352F;
+  --text-dim: #787774;
+  --text-faint: #9B9A97;
+
+  --gray: #9B9A97;    --gray-bg: rgba(155,154,151,.18);
+  --blue: #0B6E99;    --blue-bg: rgba(11,110,153,.16);
+  --purple: #6940A5;  --purple-bg: rgba(105,64,165,.16);
+  --orange: #D9730D;  --orange-bg: rgba(217,115,13,.16);
+  --brown: #64473A;   --brown-bg: rgba(100,71,58,.16);
+  --green: #0F7B6C;   --green-bg: rgba(15,123,108,.16);
+  --yellow: #DFAB01;  --yellow-bg: rgba(223,171,1,.18);
+  --red: #E03E3E;     --red-bg: rgba(224,62,62,.16);
+
+  --radius: 6px;
+  --shadow: 0 1px 2px rgba(15,15,15,.04), 0 2px 8px rgba(15,15,15,.03);
+}
+
+.dark {
+  /* Notion dark ("dark mode" workspace values) */
+  --bg: #191919;
+  --bg-sunk: #202020;
+  --bg-hover: #2A2A2A;
+  --border: #2F2F2F;
+  --text: #E9E9E7;
+  --text-dim: #9B9A97;
+  --text-faint: #6F6E69;
+
+  --blue: #4FA8D8;    --blue-bg: rgba(79,168,216,.16);
+  --purple: #9B7FD4;  --purple-bg: rgba(155,127,212,.16);
+  --orange: #E8A33D;  --orange-bg: rgba(232,163,61,.16);
+  --green: #4DAB9A;   --green-bg: rgba(77,171,154,.16);
+  --red: #E86363;     --red-bg: rgba(232,99,99,.16);
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 2px 8px rgba(0,0,0,.24);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-bg: var(--bg);
+  --color-bg-sunk: var(--bg-sunk);
+  --color-bg-hover: var(--bg-hover);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-text-dim: var(--text-dim);
+  --color-text-faint: var(--text-faint);
+  --color-accent-blue: var(--blue);
+  --color-accent-purple: var(--purple);
+  --color-accent-orange: var(--orange);
+  --color-accent-green: var(--green);
+  --color-accent-red: var(--red);
+  --radius-card: var(--radius);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
-}
+body { background: var(--bg-sunk); color: var(--text); }
