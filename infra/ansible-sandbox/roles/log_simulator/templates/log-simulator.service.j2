@@ -1,0 +1,12 @@
+[Unit]
+Description=Cortex sandbox fake per-service log generator (SANDBOX ONLY)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fake_service_logs.sh
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

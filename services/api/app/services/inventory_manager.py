@@ -32,3 +32,26 @@ def add_host_to_inventory(hostname: str, ip: str, role: str) -> None:
     idx = content.index(marker) + len(marker)
     new_content = content[:idx] + line + content[idx:]
     INVENTORY_PATH.write_text(new_content)
+
+
+
+def remove_host_from_inventory(hostname: str) -> None:
+    """Strip every inventory line for this host, from every group it's in.
+
+    Matches on the leading token only (the hostname column), so this also
+    cleans up any duplicate/stray lines for the same host across groups --
+    not just the single line add_host_to_inventory would have written.
+    """
+    content = INVENTORY_PATH.read_text()
+    kept_lines = []
+    removed = False
+    for raw_line in content.splitlines(keepends=True):
+        stripped = raw_line.strip()
+        first_token = stripped.split(" ", 1)[0] if stripped else ""
+        if first_token == hostname and not stripped.startswith("["):
+            removed = True
+            continue
+        kept_lines.append(raw_line)
+
+    if removed:
+        INVENTORY_PATH.write_text("".join(kept_lines))
