@@ -25,7 +25,11 @@ export default function Sparkline({ id, value, color }: { id: string; value: num
       const y = height - (v / max) * height;
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     });
-    ctx.strokeStyle = color;
+    const resolvedColor = color.trim().startsWith("var(")
+      ? getComputedStyle(document.documentElement).getPropertyValue(color.trim().slice(4, -1)).trim() || "#E15B3C"
+      : color;
+
+    ctx.strokeStyle = resolvedColor;
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }, [value, id, color]);

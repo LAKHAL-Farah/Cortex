@@ -1,17 +1,18 @@
 "use client";
 
-import useSWR from "swr";
 import NodeForm from "@/components/NodeForm";
 import NodeTable from "@/components/NodeTable";
-import type { DashboardNode } from "@/lib/types";
-
-const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 export default function NodesPage() {
   return (
-    <main className="max-w-5xl mx-auto p-6 space-y-8">
-      <h1 className="text-xl font-semibold">Nodes</h1>
-      <NodeForm />
+    <main className="grid gap-4">
+      <div className="panel flex items-center justify-between gap-3 p-5">
+        <div>
+          <div className="eyebrow">Infrastructure</div>
+          <h1 className="font-display mt-1 text-lg font-semibold text-color-text">Nodes</h1>
+        </div>
+        <NodeForm />
+      </div>
       <NodeTable />
     </main>
   );

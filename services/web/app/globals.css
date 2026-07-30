@@ -1,57 +1,115 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700&family=IBM+Plex+Mono:wght@500;600&display=swap");
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --bg: #F8FAFC;
+  --font-display: "Sora", "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  /* per-role accent, used on node cards */
+  --role-controller: #6D6AF0;
+  --role-controller-soft: rgba(109,106,240,0.1);
+  --role-compute: #E15B3C;
+  --role-compute-soft: rgba(225,91,60,0.1);
+  --role-storage: #2F9E68;
+  --role-storage-soft: rgba(47,158,104,0.1);
+  --role-monitoring: #C98A1D;
+  --role-monitoring-soft: rgba(201,138,29,0.1);
+
+  /* canvas = app shell background, surface = panels sitting on it */
+  --bg: #FFFFFF;
+  --canvas: #F5F6F8;
   --card-bg: #FFFFFF;
   --surface: #FFFFFF;
-  --border: #ECECEC;
-  --text: #111827;
-  --text-dim: #4B5563;
+  --border: #E3E6EA;
+  --border-soft: #ECEEF1;
+  --text: #16181D;
+  --text-dim: #4A4F57;
   --text-faint: #6B7280;
-  --text-muted: #9CA3AF;
-  --accent: #F97316;
-  --accent-soft: rgba(249,115,22,0.12);
-  --shadow: 0 2px 8px rgba(0,0,0,0.04);
-  --shadow-hover: 0 8px 24px rgba(0,0,0,0.08);
-  --radius-card: 16px;
-  --radius-input: 12px;
-  --radius-btn: 12px;
+  --text-muted: #9AA1A9;
+
+  /* single restrained accent — used sparingly, not on every element */
+  --accent: #E15B3C;
+  --accent-strong: #C64B2E;
+  --accent-soft: rgba(225,91,60,0.09);
+
+  /* status language, used consistently instead of arbitrary chart colors */
+  --ok: #2F9E68;
+  --ok-soft: rgba(47,158,104,0.1);
+  --warn: #C98A1D;
+  --warn-soft: rgba(201,138,29,0.1);
+  --crit: #D64545;
+  --crit-soft: rgba(214,69,69,0.1);
+  --neutral: #8A93A6;
+  --neutral-soft: rgba(138,147,166,0.1);
+
+  /* data-viz palette, muted/consistent (not rainbow) */
+  --chart-1: #E15B3C;
+  --chart-2: #3B7EC4;
+  --chart-3: #2F9E68;
+  --chart-4: #8B7FE0;
+  --chart-5: #C98A1D;
+
+  --shadow: 0 1px 2px rgba(15,23,42,0.04);
+  --shadow-hover: 0 4px 12px rgba(15,23,42,0.07);
+  --radius-panel: 8px;
+  --radius-control: 6px;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
 
 .dark {
-  --bg: #0B1120;
-  --card-bg: rgba(15,15,17,0.95);
-  --surface: rgba(18,20,28,0.96);
-  --border: rgba(148,163,184,0.16);
-  --text: #F8FAFC;
-  --text-dim: #CBD5E1;
-  --text-faint: #94A3B8;
-  --text-muted: #A5B4FC;
-  --accent: #FB923C;
-  --accent-soft: rgba(251,146,60,0.12);
-  --shadow: 0 2px 8px rgba(0,0,0,0.14);
-  --shadow-hover: 0 8px 24px rgba(0,0,0,0.18);
+  --bg: #0D0F13;
+  --canvas: #0D0F13;
+  --card-bg: #15171C;
+  --surface: #15171C;
+  --border: #262930;
+  --border-soft: #1E2026;
+  --text: #EDEEF0;
+  --text-dim: #C2C6CC;
+  --text-faint: #8B909A;
+  --text-muted: #676C76;
+
+  --accent: #E97757;
+  --accent-strong: #F08A6C;
+  --accent-soft: rgba(233,119,87,0.14);
+
+  --ok: #3EB981;
+  --ok-soft: rgba(62,185,129,0.14);
+  --warn: #D9A536;
+  --warn-soft: rgba(217,165,54,0.14);
+  --crit: #E5686B;
+  --crit-soft: rgba(229,104,107,0.14);
+  --neutral: #8A93A6;
+  --neutral-soft: rgba(138,147,166,0.14);
+
+  --chart-1: #E97757;
+  --chart-2: #5B9BD9;
+  --chart-3: #3EB981;
+  --chart-4: #A79BEF;
+  --chart-5: #D9A536;
+
+  --shadow: 0 1px 2px rgba(0,0,0,0.24);
+  --shadow-hover: 0 4px 14px rgba(0,0,0,0.32);
 }
 
 @theme inline {
   --color-bg: var(--bg);
+  --color-canvas: var(--canvas);
   --color-bg-sunk: var(--card-bg);
-  --color-bg-hover: rgba(15,23,42,0.04);
+  --color-bg-hover: rgba(15,23,42,0.035);
   --color-border: var(--border);
+  --color-border-soft: var(--border-soft);
   --color-text: var(--text);
   --color-text-dim: var(--text-dim);
   --color-text-faint: var(--text-faint);
   --color-text-muted: var(--text-muted);
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
-  --radius-card: var(--radius-card);
+  --radius-card: var(--radius-panel);
 }
 
 * {
   box-sizing: border-box;
-  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 html {
@@ -59,19 +117,63 @@ html {
 }
 
 ::selection {
-  background: rgba(249,115,22,0.16);
+  background: var(--accent-soft);
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  background: radial-gradient(circle at top left, rgba(249,115,22,0.08), transparent 25%), var(--bg);
+  background: var(--canvas);
   color: var(--text);
   font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   font-feature-settings: "cv02" 1, "cv03" 1, "ss01" 1;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* shared panel treatment — one definition instead of repeating
+   rounded-[20px]/shadow arbitrary values in every component */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow);
+}
+
+.panel-interactive {
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.panel-interactive:hover {
+  border-color: color-mix(in srgb, var(--border) 60%, var(--text-muted));
+  box-shadow: var(--shadow-hover);
+}
+
+.eyebrow {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.stat-figure {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
 }
 
 button,

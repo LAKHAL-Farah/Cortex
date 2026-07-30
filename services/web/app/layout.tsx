@@ -25,13 +25,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
 
-      <body className="min-h-screen bg-bg text-color-text">
-        <div className="grid min-h-screen grid-cols-[250px_1fr] gap-6 px-6 py-6 lg:px-8 lg:py-8">
+      <body className="min-h-screen bg-canvas text-color-text">
+        <div className="grid min-h-screen grid-cols-[224px_1fr] gap-4 p-4">
           <Sidebar />
           <div className="min-h-screen">
             <div className="mx-auto max-w-[1600px]">
               <Header />
-              <main className="mt-6">{children}</main>
+              <main className="mt-5">{children}</main>
             </div>
           </div>
         </div>

@@ -4,49 +4,42 @@ export default function RadialProgressCard({
   label,
   value,
   description,
-  accentColor = "#F97316",
+  accentColor = "var(--accent)",
 }: {
   label: string;
   value: number;
   description: string;
   accentColor?: string;
 }) {
-  const circumference = 2 * Math.PI * 46;
+  const circumference = 2 * Math.PI * 42;
   const offset = circumference - (value / 100) * circumference;
 
   return (
-    <div className="rounded-[20px] border border-[#ECECEC] bg-white p-6 shadow-[0_2px_8px_rgba(0,0,0,0.04)]">
+    <div className="panel p-6">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <div className="text-xs uppercase tracking-[0.24em] text-text-faint">{label}</div>
-          <div className="mt-4 text-3xl font-semibold text-color-text">{value}%</div>
-          <p className="mt-2 text-sm leading-6 text-text-dim">{description}</p>
+          <div className="eyebrow">{label}</div>
+          <div className="stat-figure mt-3 text-2xl text-color-text">{value}%</div>
+          <p className="mt-2 text-sm leading-6 text-text-faint">{description}</p>
         </div>
-        <div className="relative h-[120px] w-[120px]">
-          <svg viewBox="0 0 120 120" className="h-full w-full">
+        <div className="relative h-[104px] w-[104px] flex-shrink-0">
+          <svg viewBox="0 0 104 104" className="h-full w-full">
+            <circle cx="52" cy="52" r="42" fill="none" stroke="var(--border-soft)" strokeWidth="9" />
             <circle
-              cx="60"
-              cy="60"
-              r="46"
-              fill="none"
-              stroke="#F1F5F9"
-              strokeWidth="12"
-            />
-            <circle
-              cx="60"
-              cy="60"
-              r="46"
+              cx="52"
+              cy="52"
+              r="42"
               fill="none"
               stroke={accentColor}
-              strokeWidth="12"
+              strokeWidth="9"
               strokeLinecap="round"
               strokeDasharray={circumference}
               strokeDashoffset={offset}
-              transform="rotate(-90 60 60)"
+              transform="rotate(-90 52 52)"
             />
           </svg>
           <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-sm font-semibold text-color-text">{value}%</div>
+            <div className="stat-figure text-sm text-color-text">{value}%</div>
           </div>
         </div>
       </div>

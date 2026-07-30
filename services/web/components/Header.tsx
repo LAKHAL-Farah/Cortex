@@ -1,8 +1,30 @@
 "use client";
 
 import React from "react";
-import { Search, Bell, User, RefreshCw, Zap } from "lucide-react";
+import { Search, Bell, RefreshCw, Sparkles } from "lucide-react";
 import ThemeToggle from "./ThemeToggle";
+
+function IconButton({
+  onClick,
+  title,
+  children,
+}: {
+  onClick?: () => void;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+      className="relative inline-flex h-9 w-9 items-center justify-center rounded-[var(--radius-control)] text-text-dim transition-colors hover:bg-[var(--canvas)]"
+      style={{ border: "1px solid var(--border)" }}
+    >
+      {children}
+    </button>
+  );
+}
 
 export default function Header() {
   const [q, setQ] = React.useState("");
@@ -16,61 +38,66 @@ export default function Header() {
   };
 
   return (
-    <header className="rounded-[20px] border border-[#ECECEC] bg-white p-6 shadow-[0_2px_8px_rgba(0,0,0,0.04)]">
-      <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-        <div className="max-w-2xl">
-          <div className="text-sm uppercase tracking-[0.28em] text-text-faint">Workspace</div>
-          <h1 className="mt-3 text-3xl font-semibold text-color-text">Welcome back, operator.</h1>
-          <p className="mt-3 text-sm leading-6 text-text-dim">Track infrastructure health, performance, and capacity from a single command center.</p>
+    <header className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="eyebrow">Workspace</div>
+          <h1 className="font-display mt-1 text-xl font-semibold text-color-text">Welcome back, operator.</h1>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            onClick={doRefresh}
-            title="Refresh data"
-            className="inline-flex h-11 items-center justify-center rounded-[12px] border border-[#ECECEC] bg-[#F8FAFC] px-4 text-sm font-medium text-color-text transition hover:bg-[#f4f5f7]"
-            aria-label="Refresh"
-          >
-            <RefreshCw className="h-4 w-4" />
-          </button>
+        <div className="flex items-center gap-2">
+          <IconButton title="Refresh data" onClick={doRefresh}>
+            <RefreshCw className="h-[15px] w-[15px]" strokeWidth={1.75} />
+          </IconButton>
 
-          <button
-            title="Notifications"
-            className="relative inline-flex h-11 items-center justify-center rounded-[12px] border border-[#ECECEC] bg-[#F8FAFC] px-4 text-sm font-medium text-color-text transition hover:bg-[#f4f5f7]"
-          >
-            <Bell className="h-4 w-4" />
-            <span className="absolute -right-2 -top-2 inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-red-600 px-1.5 text-[10px] font-semibold text-white">3</span>
-          </button>
+          <IconButton title="Notifications">
+            <Bell className="h-[15px] w-[15px]" strokeWidth={1.75} />
+            <span
+              className="absolute -right-1 -top-1 inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full px-1 text-[10px] font-semibold text-white"
+              style={{ background: "var(--crit)" }}
+            >
+              3
+            </span>
+          </IconButton>
 
           <button
             onClick={openChat}
-            title="Open AI Copilot"
-            className="inline-flex items-center gap-2 rounded-[12px] border border-[#ECECEC] bg-[#F8FAFC] px-4 py-3 text-sm font-medium text-color-text transition hover:bg-[#f4f5f7]"
+            className="inline-flex h-9 items-center gap-2 rounded-[var(--radius-control)] px-3 text-sm font-medium transition-colors hover:bg-[var(--canvas)]"
+            style={{ border: "1px solid var(--border)", color: "var(--text)" }}
           >
-            <Zap className="h-4 w-4 text-orange-600" />
-            <span>Copilot</span>
+            <Sparkles className="h-[15px] w-[15px]" style={{ color: "var(--accent)" }} strokeWidth={1.75} />
+            Copilot
           </button>
 
           <ThemeToggle />
 
-          <button className="inline-flex items-center gap-2 rounded-[12px] border border-[#ECECEC] bg-[#F8FAFC] px-4 py-3 text-sm font-medium text-color-text transition hover:bg-[#f4f5f7]">
-            <User className="h-4 w-4" />
+          <button
+            className="inline-flex h-9 items-center gap-2 rounded-[var(--radius-control)] px-3 text-sm font-medium"
+            style={{ border: "1px solid var(--border)", color: "var(--text)" }}
+          >
+            <span
+              className="grid h-5 w-5 place-items-center rounded-full text-[10px] font-semibold"
+              style={{ background: "var(--accent-soft)", color: "var(--accent)" }}
+            >
+              A
+            </span>
             Alex
           </button>
         </div>
       </div>
 
-      <div className="mt-6 rounded-[14px] border border-[#ECECEC] bg-[#F8FAFC] p-3">
-        <div className="relative flex items-center">
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search the cockpit..."
-            className="w-full rounded-[12px] border border-transparent bg-white px-4 py-3 text-sm text-color-text outline-none transition focus:border-orange-300 focus:ring-2 focus:ring-orange-100"
-            aria-label="Global search"
-          />
-          <Search className="pointer-events-none absolute right-4 h-4 w-4 text-text-faint" />
-        </div>
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search the cockpit..."
+          className="w-full rounded-[var(--radius-control)] py-2.5 pl-9 pr-4 text-sm text-color-text outline-none transition-colors"
+          style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
+          onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
+          onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
+          aria-label="Global search"
+        />
       </div>
     </header>
   );

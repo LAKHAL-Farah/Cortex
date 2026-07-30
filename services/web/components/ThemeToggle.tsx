@@ -26,9 +26,11 @@ export default function ThemeToggle() {
     <button
       onClick={() => setDark((d) => !d)}
       aria-label="Toggle theme"
-      className="p-2 rounded-md hover:bg-bg-hover"
+      title="Toggle theme"
+      className="inline-flex h-9 w-9 items-center justify-center rounded-[var(--radius-control)] text-text-dim transition-colors hover:bg-[var(--canvas)]"
+      style={{ border: "1px solid var(--border)" }}
     >
-      {dark ? <Moon /> : <Sun />}
+      {dark ? <Moon className="h-[15px] w-[15px]" strokeWidth={1.75} /> : <Sun className="h-[15px] w-[15px]" strokeWidth={1.75} />}
     </button>
   );
 }

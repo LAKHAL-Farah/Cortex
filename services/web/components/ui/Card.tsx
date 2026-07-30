@@ -1,11 +1,18 @@
 import React from "react";
 
-export function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+export function Card({
+  children,
+  className = "",
+  interactive = false,
+  padding = "p-5",
+}: {
+  children: React.ReactNode;
+  className?: string;
+  interactive?: boolean;
+  padding?: string;
+}) {
   return (
-    <div
-      className={"bg-bg-sunk border border-[#ECECEC] p-6 " + className}
-      style={{ borderRadius: 'var(--radius-card)', boxShadow: 'var(--shadow)' }}
-    >
+    <div className={`panel ${interactive ? "panel-interactive" : ""} ${padding} ${className}`}>
       {children}
     </div>
   );

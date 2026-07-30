@@ -12,14 +12,14 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null;
 
   return (
-    <div className="rounded-[18px] border border-[#ECECEC] bg-white p-4 shadow-[0_8px_24px_rgba(0,0,0,0.08)] text-sm text-color-text">
-      <div className="text-xs uppercase tracking-[0.2em] text-text-faint">{label}</div>
+    <div className="panel p-3.5 text-sm text-color-text" style={{ boxShadow: "var(--shadow-hover)" }}>
+      <div className="eyebrow">{label}</div>
       {payload.map((item: any) => (
-        <div key={item.dataKey} className="mt-3 flex items-center gap-3">
-          <span className="h-2.5 w-2.5 rounded-full" style={{ background: item.stroke }} />
+        <div key={item.dataKey} className="mt-2 flex items-center gap-2.5">
+          <span className="status-dot" style={{ background: item.stroke }} />
           <div>
-            <div className="font-semibold">{item.name}</div>
-            <div className="text-text-faint">{item.value}%</div>
+            <span className="font-medium">{item.name}</span>{" "}
+            <span className="stat-figure text-text-faint">{item.value}%</span>
           </div>
         </div>
       ))}
@@ -29,8 +29,8 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 
 export default function AnalyticsChart({
   data,
-  primaryColor = "#F97316",
-  secondaryColor = "#7C3AED",
+  primaryColor = "var(--chart-1)",
+  secondaryColor = "var(--chart-4)",
 }: {
   data: AnalyticsPoint[];
   primaryColor?: string;
@@ -39,10 +39,10 @@ export default function AnalyticsChart({
   return (
     <ResponsiveContainer width="100%" height={360}>
       <AreaChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
-        <CartesianGrid stroke="rgba(15,23,42,0.08)" strokeDasharray="3 6" vertical={false} />
+        <CartesianGrid stroke="var(--border-soft)" strokeDasharray="3 5" vertical={false} />
         <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: 'var(--text-muted)', fontSize: 12 }} />
         <YAxis axisLine={false} tickLine={false} tick={{ fill: 'var(--text-muted)', fontSize: 12 }} />
-        <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#F97316', strokeWidth: 1, strokeDasharray: '4 4' }} />
+        <Tooltip content={<CustomTooltip />} cursor={{ stroke: 'var(--accent)', strokeWidth: 1, strokeDasharray: '4 4' }} />
 
         <defs>
           <linearGradient id="lineGradientPrimary" x1="0" x2="0" y1="0" y2="1">
