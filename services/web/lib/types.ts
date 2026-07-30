@@ -38,3 +38,14 @@ export interface DashboardNode extends Node {
   has_metrics: boolean;
   metrics: LiveMetrics | null;
 }
+
+export type LogLevel = "DEBUG" | "INFO" | "WARNING" | "ERROR";
+
+export interface LogEntry {
+  ts: number; // unix ms
+  line: string;
+  host: string | null;
+  role: string | null;
+  source: string | null; // Loki "job" label: "system" (syslog) or a service name
+  service: string | null;
+}
