@@ -5,10 +5,11 @@ from .db import engine
 from fastapi.staticfiles import StaticFiles
 from .routers import nodes
 from .routers import metrics
-
+from .routers import dashboard
 app = FastAPI(title="Cortex API", version="0.1.0")
 app.include_router(nodes.router)
 app.include_router(metrics.router)
+app.include_router(dashboard.router) 
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 @app.get("/health")
 def health():

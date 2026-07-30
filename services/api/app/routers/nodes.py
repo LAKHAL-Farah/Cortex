@@ -2,7 +2,7 @@ import logging
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-
+from fastapi import BackgroundTasks
 from .. import crud, schemas
 from ..db import get_db
 from ..security import require_api_key
@@ -29,26 +29,26 @@ def get_node(node_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.post("", response_model=schemas.NodeOut, status_code=status.HTTP_201_CREATED,
              dependencies=[Depends(require_api_key)])
-def create_node(payload: schemas.NodeCreate, db: Session = Depends(get_db)):
+def create_node(payload: schemas.NodeCreate, background_tasks: BackgroundTasks,
+                db: Session = Depends(get_db)):
     try:
         node = crud.create_node(db, payload)
     except crud.DuplicateNodeError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
     add_host_to_inventory(node.hostname, node.ip_address, node.role)
-    success = install_node_exporter(node.hostname)
-    if success:
-        regenerate_file_sd(db)
-    else:
-        logger.error("node_exporter install failed for %s; not added to Prometheus targets", node.hostname)
 
-    # The node row is created either way (it's already a managed inventory
-    # entry), but callers need to know the exporter install actually
-    # succeeded instead of finding out from server logs. Body still returns
-    # 201; node_exporter_installed=False signals a partial failure. This is
-    # persisted (not just returned on this response) so GET /nodes reflects
-    # it accurately too, even after a page reload or on a different device.
-    node = crud.set_node_exporter_installed(db, node, success)
+    def _install_and_register():
+        success = install_node_exporter(node.hostname)
+        if success:
+            # need a fresh session since this runs after the request's session closed
+            from ..db import SessionLocal
+            with SessionLocal() as bg_db:
+                regenerate_file_sd(bg_db)
+        else:
+            logger.error("node_exporter install failed for %s; not added to Prometheus targets", node.hostname)
+
+    background_tasks.add_task(_install_and_register)
     return node
 
 

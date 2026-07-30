@@ -14,10 +14,17 @@ services:
   api:
     environment:
       PROMETHEUS_URL: http://prometheus:9090/api/v1/query
+      CORTEX_ANSIBLE_HOST_DIR: /infra/ansible-sandbox
+
+    volumes:
+      - ../ansible-sandbox:/infra/ansible-sandbox
+
     networks:
       - cortex-net
       - cortex-sandbox
       - cortex-sandbox-storage
+
+
   controller-sim:
     image: geerlingguy/docker-ubuntu2204-ansible
     hostname: controller-sim
