@@ -1,5 +1,11 @@
+"use client";
+
+import useSWR from "swr";
 import NodeForm from "@/components/NodeForm";
 import NodeTable from "@/components/NodeTable";
+import type { DashboardNode } from "@/lib/types";
+
+const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 export default function NodesPage() {
   return (

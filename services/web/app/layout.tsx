@@ -1,5 +1,7 @@
 import "./globals.css";
 import Link from "next/link";
+import Sidebar from "../components/Sidebar";
+import Header from "../components/Header";
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -23,18 +25,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
 
-      <body className="bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
-        <nav className="border-b bg-white px-6 py-3 flex gap-4 dark:bg-gray-900 dark:border-gray-700">
-          <Link href="/dashboard" className="font-medium">
-            Dashboard
-          </Link>
-
-          <Link href="/nodes" className="font-medium">
-            Nodes
-          </Link>
-        </nav>
-
-        {children}
+      <body className="min-h-screen bg-bg text-color-text">
+        <div className="grid min-h-screen grid-cols-[250px_1fr] gap-6 px-6 py-6 lg:px-8 lg:py-8">
+          <Sidebar />
+          <div className="min-h-screen">
+            <div className="mx-auto max-w-[1600px]">
+              <Header />
+              <main className="mt-6">{children}</main>
+            </div>
+          </div>
+        </div>
       </body>
     </html>
   );
