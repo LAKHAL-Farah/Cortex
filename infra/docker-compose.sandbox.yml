@@ -14,6 +14,7 @@ services:
   api:
     environment:
       PROMETHEUS_URL: http://prometheus:9090/api/v1/query
+      LOKI_URL: http://controller-sim:3100
       CORTEX_ANSIBLE_HOST_DIR: /infra/ansible-sandbox
 
     volumes:
