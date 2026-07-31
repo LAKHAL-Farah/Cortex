@@ -35,7 +35,3 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
-
-
-
-.sandbox-ssh/cortex-logs-feature.patch
