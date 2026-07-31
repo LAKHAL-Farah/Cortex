@@ -12,7 +12,8 @@ import {
   Check,
   ScrollText,
 } from "lucide-react";
-import type { LogEntry, LogLevel } from "@/lib/types";
+import type { LogEntry } from "@/lib/types";
+import { ALL_LEVELS, LEVEL_COLOR, LEVEL_SOFT, parseLevel } from "@/lib/logs";
 
 const fetcher = async (url: string) => {
   const res = await fetch(url);
@@ -37,31 +38,6 @@ const RANGES = [
   { label: "24h", mins: 1440 },
   { label: "7d", mins: 10080 },
 ];
-
-const LEVELS: LogLevel[] = ["ERROR", "WARNING", "INFO", "DEBUG"];
-
-const LEVEL_COLOR: Record<LogLevel, string> = {
-  ERROR: "var(--crit)",
-  WARNING: "var(--warn)",
-  INFO: "var(--ok)",
-  DEBUG: "var(--neutral)",
-};
-const LEVEL_SOFT: Record<LogLevel, string> = {
-  ERROR: "var(--crit-soft)",
-  WARNING: "var(--warn-soft)",
-  INFO: "var(--ok-soft)",
-  DEBUG: "var(--neutral-soft)",
-};
-
-function parseLevel(line: string): LogLevel | null {
-  const m = line.match(/\b(DEBUG|INFO|WARN(?:ING)?|ERROR|CRITICAL|NOTICE)\b/);
-  if (!m) return null;
-  const token = m[1];
-  if (token === "WARN") return "WARNING";
-  if (token === "CRITICAL") return "ERROR";
-  if (token === "NOTICE") return "INFO";
-  return token as LogLevel;
-}
 
 function formatTime(ts: number, minutes: number) {
   const d = new Date(ts);
@@ -245,7 +221,7 @@ export default function LogViewer() {
 
           <select value={level} onChange={(e) => setLevel(e.target.value)} className={selectClass} style={selectStyle}>
             <option value="all">All levels</option>
-            {LEVELS.map((l) => (
+            {ALL_LEVELS.map((l) => (
               <option key={l} value={l}>{l}</option>
             ))}
           </select>
