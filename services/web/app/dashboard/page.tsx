@@ -1,14 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { Plus } from "lucide-react";
-import NodeCard from "@/components/NodeCard";
+import NodeOverviewCard from "@/components/NodeOverviewCard";
 import MetricCard from "@/components/ui/MetricCard";
 import AnalyticsChart from "@/components/AnalyticsChart";
 import RadialProgressCard from "@/components/ui/RadialProgressCard";
-import type { DashboardNode } from "@/lib/types";
+import RecentIssuesPanel, { type Issue } from "@/components/RecentIssuesPanel";
+import { parseLevel } from "@/lib/logs";
+import type { DashboardNode, LogEntry } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -16,31 +18,53 @@ export default function DashboardPage() {
   const { data: nodes, isLoading } = useSWR<DashboardNode[]>("/api/dashboard", fetcher, {
     refreshInterval: 5000,
   });
+  // Recent-issues widget scans the last hour of logs client-side rather than
+  // adding a second "important logs only" backend endpoint; /api/v1/logs
+  // already returns newest-first, so this is just a cheap filter+slice.
+  const { data: logEntries } = useSWR<LogEntry[]>("/api/logs?minutes=60&limit=300", fetcher, {
+    refreshInterval: 5000,
+  });
 
   const metrics = useMemo(() => {
-    if (!nodes?.length) return { active: 0, offline: 0, avgCpu: 0, avgMem: 0, alerts: 0, healthyNodes: 0 };
+    if (!nodes?.length) return { active: 0, offline: 0, avgCpu: 0, avgMem: 0, healthyNodes: 0 };
     const healthyNodes = nodes.filter((node) => node.metrics?.status === "up").length;
     const offline = nodes.length - healthyNodes;
     const avgCpu = Math.round((nodes.reduce((sum, node) => sum + (node.metrics?.cpu_percent || 0), 0) / nodes.length) * 10) / 10;
     const avgMem = Math.round((nodes.reduce((sum, node) => sum + (node.metrics?.memory_percent || 0), 0) / nodes.length) * 10) / 10;
-    const alerts = nodes.reduce((count, node) => count + ((node.metrics?.health === "warning" || node.metrics?.health === "critical") ? 1 : 0), 0);
-    return { active: healthyNodes, offline, avgCpu, avgMem, alerts, healthyNodes };
+    return { active: healthyNodes, offline, avgCpu, avgMem, healthyNodes };
   }, [nodes]);
+
+  const issues: Issue[] = useMemo(() => {
+    if (!logEntries) return [];
+    return logEntries
+      .map((entry) => ({ ...entry, level: parseLevel(entry.line) }))
+      .filter((entry): entry is Issue => entry.level === "ERROR" || entry.level === "WARNING");
+  }, [logEntries]);
+
+  const issueCountsByHost = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const issue of issues) {
+      if (!issue.host) continue;
+      map[issue.host] = (map[issue.host] ?? 0) + 1;
+    }
+    return map;
+  }, [issues]);
 
   if (isLoading) return <p className="p-6 text-sm text-text-faint">Loading…</p>;
   if (!nodes?.length) return <p className="p-6 text-sm text-text-faint">No nodes registered. Add one on the Nodes page.</p>;
 
   const sparklineData = nodes.map((node, index) => ({ name: String(index + 1), value: node.metrics?.cpu_percent ?? 0 }));
   const analyticsData = nodes.map((node) => ({ name: node.hostname, cpu: node.metrics?.cpu_percent ?? 0, memory: node.metrics?.memory_percent ?? 0 }));
+  const topIssues = issues.slice(0, 6);
 
   return (
     <main className="grid gap-4">
       <section className="panel flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <div className="eyebrow">Overview</div>
-          <h2 className="font-display mt-1 text-lg font-semibold text-color-text">Infrastructure insights</h2>
+          <div className="eyebrow">Home</div>
+          <h2 className="font-display mt-1 text-lg font-semibold text-color-text">Fleet overview</h2>
           <p className="mt-1 max-w-xl text-sm leading-6 text-text-faint">
-            Monitor your fleet, understand trends, and take action from a single workspace.
+            Live health, trends, and the issues that need attention — all in one place.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -72,7 +96,7 @@ export default function DashboardPage() {
           title="Average CPU"
           value={`${metrics.avgCpu}%`}
           trend={3}
-          trendLabel="7-day trend"
+          trendLabel="Across the fleet"
           sparklineData={sparklineData.map((item) => ({ ...item, value: item.value - 2 }))}
           sparklineColor="var(--chart-3)"
         />
@@ -80,26 +104,26 @@ export default function DashboardPage() {
           title="Average memory"
           value={`${metrics.avgMem}%`}
           trend={Math.round(metrics.avgMem - metrics.avgCpu)}
-          trendLabel="Weekly usage"
+          trendLabel="Across the fleet"
           sparklineData={sparklineData.map((item) => ({ ...item, value: Math.max(item.value - 4, 0) }))}
           sparklineColor="var(--chart-4)"
         />
         <MetricCard
-          title="Alerts triggered"
-          value={metrics.alerts}
-          trend={metrics.alerts > 0 ? 1 : -1}
-          trendLabel="Active warnings"
+          title="Open issues"
+          value={issues.length}
+          trend={issues.length > 0 ? 1 : -1}
+          trendLabel="Warnings & errors · last hour"
           sparklineData={sparklineData.map((item) => ({ ...item, value: Math.min(item.value + 8, 100) }))}
-          sparklineColor="var(--chart-5)"
+          sparklineColor="var(--crit)"
         />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[2.3fr_1fr]">
+      <div className="grid gap-4 xl:grid-cols-[2.1fr_1fr]">
         <section className="panel p-5">
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <div className="eyebrow">Live analytics</div>
-              <h3 className="mt-1 text-[15px] font-semibold text-color-text">Real-time node metrics</h3>
+              <h3 className="mt-1 text-[15px] font-semibold text-color-text">Fleet CPU & memory</h3>
             </div>
             <div className="flex items-center gap-4 text-xs text-text-faint">
               <span className="inline-flex items-center gap-1.5">
@@ -116,35 +140,13 @@ export default function DashboardPage() {
           <AnalyticsChart data={analyticsData} primaryColor="var(--chart-1)" secondaryColor="var(--chart-4)" />
         </section>
 
-        <aside className="space-y-4">
+        <aside className="grid gap-4">
           <RadialProgressCard
             label="Cluster health"
             value={Math.round((metrics.active / Math.max(nodes.length, 1)) * 100)}
             description={`${metrics.active} of ${nodes.length} nodes responding normally`}
           />
-
-          <div className="panel p-5">
-            <div className="flex items-center justify-between gap-4">
-              <div className="eyebrow">Status summary</div>
-              <span
-                className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium"
-                style={{ color: "var(--ok)", background: "var(--ok-soft)" }}
-              >
-                <span className="status-dot" style={{ background: "var(--ok)" }} />
-                Live
-              </span>
-            </div>
-            <div className="mt-3.5 grid gap-2.5">
-              <div className="rounded-[var(--radius-control)] p-3.5" style={{ background: "var(--canvas)" }}>
-                <div className="text-xs text-text-faint">Memory pressure</div>
-                <div className="stat-figure mt-1.5 text-lg text-color-text">{metrics.avgMem}%</div>
-              </div>
-              <div className="rounded-[var(--radius-control)] p-3.5" style={{ background: "var(--canvas)" }}>
-                <div className="text-xs text-text-faint">CPU efficiency</div>
-                <div className="stat-figure mt-1.5 text-lg text-color-text">{metrics.avgCpu}%</div>
-              </div>
-            </div>
-          </div>
+          <RecentIssuesPanel issues={topIssues} totalCount={issues.length} />
         </aside>
       </div>
 
@@ -152,14 +154,14 @@ export default function DashboardPage() {
         <div className="panel flex flex-col gap-3 p-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <div className="eyebrow">Fleet activity</div>
-            <h3 className="mt-1 text-[15px] font-semibold text-color-text">Active node inventory</h3>
+            <h3 className="mt-1 text-[15px] font-semibold text-color-text">Nodes</h3>
           </div>
           <div className="text-sm text-text-faint">{metrics.active} active nodes</div>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {nodes.map((node) => (
-            <NodeCard key={node.id} n={node} />
+            <NodeOverviewCard key={node.id} n={node} issueCount={issueCountsByHost[node.hostname] ?? 0} />
           ))}
         </div>
       </section>
