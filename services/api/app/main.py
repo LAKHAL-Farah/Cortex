@@ -7,11 +7,13 @@ from .routers import nodes
 from .routers import metrics
 from .routers import dashboard
 from .routers import logs
+from .routers import anomalies
 app = FastAPI(title="Cortex API", version="0.1.0")
 app.include_router(nodes.router)
 app.include_router(metrics.router)
 app.include_router(dashboard.router) 
 app.include_router(logs.router)
+app.include_router(anomalies.router)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 @app.get("/health")
 def health():

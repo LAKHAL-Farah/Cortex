@@ -1,0 +1,149 @@
+"""
+services/api/tests/test_anomaly_detector.py
+
+Unit tests for score_current_value() / detect_anomalies() using an in-memory
+SQLite DB and a mocked Prometheus response -- no live Prometheus or Postgres
+needed. Run with: pytest services/api/tests/test_anomaly_detector.py -v
+
+These are the tests referenced in the notebook's conclusion: they pin down
+severity behavior at known z-scores so a future threshold retune (which the
+1.6 doc already expects to happen once real history accumulates) can't
+silently change behavior without a test failing first.
+"""
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app import models
+from app.services.anomaly_detector import (
+    score_current_value,
+    severity_from_zscore,
+    detect_anomalies,
+    MIN_BASELINE_SAMPLES,
+)
+
+
+@pytest.fixture
+def db():
+    engine = create_engine("sqlite:///:memory:")
+    models.Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    yield session
+    session.close()
+
+
+def make_baseline(db, hostname="host1", metric_name="cpu_usage", weekday=2, hour=13,
+                   median=25.0, mad=1.5, sample_count=36):
+    b = models.Baseline(
+        hostname=hostname, metric_name=metric_name, weekday=weekday, hour=hour,
+        mean=median, stddev=mad, median=median, mad=mad, sample_count=sample_count,
+    )
+    db.add(b)
+    db.commit()
+    return b
+
+
+# --- severity thresholds ---
+
+@pytest.mark.parametrize("z, expected", [
+    (0.5, "normal"),
+    (1.99, "normal"),
+    (2.0, "medium"),
+    (2.9, "medium"),
+    (3.0, "high"),
+    (3.9, "high"),
+    (4.0, "critical"),
+    (10.0, "critical"),
+    (-4.5, "critical"),  # negative z (value far BELOW baseline) is still an anomaly
+])
+def test_severity_from_zscore(z, expected):
+    assert severity_from_zscore(z) == expected
+
+
+# --- robust z-score path (sufficient, clean baseline) ---
+
+def test_uses_robust_zscore_when_baseline_is_well_populated(db):
+    make_baseline(db, median=25.0, mad=1.5, sample_count=36)
+    # value 4 MAD-scaled-std above median -> should be "critical"
+    current_value = 25.0 + 4.1 * (1.4826 * 1.5)
+    z, severity, method, baseline_n = score_current_value(
+        db, "host1", "cpu_usage", current_value, weekday=2, hour=13
+    )
+    assert method == "robust_zscore"
+    assert baseline_n == 36
+    assert severity == "critical"
+
+
+def test_normal_value_is_not_flagged(db):
+    make_baseline(db, median=25.0, mad=1.5, sample_count=36)
+    z, severity, method, _ = score_current_value(db, "host1", "cpu_usage", 25.5, weekday=2, hour=13)
+    assert severity == "normal"
+
+
+# --- baseline contamination resistance (the notebook's key finding) ---
+
+def test_robust_zscore_resists_a_single_bad_historical_day(db):
+    # A naive mean/std baseline corrupted by one bad day would have a much larger
+    # stddev; median/MAD barely move. Simulate the "clean" robust stats directly
+    # (as computed by the 1.8 baseline job with MAD) and confirm a real anomaly is
+    # still clearly flagged, unlike what happened with naive z-score in the notebook.
+    make_baseline(db, median=25.6, mad=1.42, sample_count=36)  # matches notebook's clean slot
+    current_value = 25.6 + 18  # the "moderate_sustained" injection from the notebook
+    z, severity, method, _ = score_current_value(db, "host1", "cpu_usage", current_value, weekday=2, hour=13)
+    assert severity in ("high", "critical")
+
+
+# --- fallback path: missing or thin baseline ---
+
+def test_falls_back_to_ewma_when_no_baseline_exists(db):
+    # No Baseline row at all for this slot.
+    z, severity, method, baseline_n = score_current_value(
+        db, "new-host", "cpu_usage", 50.0, weekday=2, hour=13
+    )
+    assert method == "ewma_fallback"
+    assert baseline_n is None
+    # first-ever observation seeds the EWMA mean with itself -> z == 0, "normal"
+    assert severity == "normal"
+
+
+def test_falls_back_to_ewma_when_baseline_too_thin(db):
+    make_baseline(db, sample_count=MIN_BASELINE_SAMPLES - 1)  # below the trust threshold
+    z, severity, method, baseline_n = score_current_value(
+        db, "host1", "cpu_usage", 25.0, weekday=2, hour=13
+    )
+    assert method == "ewma_fallback"
+
+
+def test_ewma_state_persists_and_adapts_across_calls(db):
+    # First call seeds the EWMA at the observed value (z=0). Second call at the
+    # SAME value should also be ~normal once the state has a nonzero variance
+    # from intervening ticks -- here we just check state actually persists.
+    score_current_value(db, "host1", "cpu_usage", 20.0, weekday=2, hour=13)
+    state = db.query(models.EwmaState).filter_by(hostname="host1", metric_name="cpu_usage").first()
+    assert state is not None
+    assert state.mean == pytest.approx(20.0)
+
+    # A big jump afterward should register as anomalous relative to the learned mean.
+    z, severity, method, _ = score_current_value(db, "host1", "cpu_usage", 90.0, weekday=2, hour=13)
+    assert severity != "normal"
+
+
+# --- end-to-end detect_anomalies() with a mocked Prometheus response ---
+
+def test_detect_anomalies_writes_anomaly_flag(db, monkeypatch):
+    # No matching baseline slot for "now" -> exercises the EWMA fallback path
+    # end-to-end, which is exactly the sandbox-day-one scenario from the notebook.
+    import app.services.anomaly_detector as mod
+
+    def fake_fetch_instant(query):
+        return [{"metric": {"instance": "compute1-sim:9100"}, "value": [0, "95.0"]}]
+
+    monkeypatch.setattr(mod, "fetch_instant", fake_fetch_instant)
+    monkeypatch.setattr(mod, "METRICS", {"cpu_usage": "dummy"})
+
+    mod.detect_anomalies(db)
+
+    flag = db.query(models.AnomalyFlag).filter_by(hostname="compute1-sim").first()
+    assert flag is not None
+    assert flag.current_value == 95.0
