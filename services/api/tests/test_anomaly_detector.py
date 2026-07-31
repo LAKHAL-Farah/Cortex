@@ -46,6 +46,15 @@ def make_baseline(db, hostname="host1", metric_name="cpu_usage", weekday=2, hour
 
 # --- severity thresholds ---
 
+def test_baseline_model_exists():
+    """Guards against the class silently disappearing from models.py again
+    (this exact bug happened once already: models.Baseline was referenced by
+    anomaly_detector.py but missing from models.py, causing an AttributeError
+    at runtime that no test caught)."""
+    assert hasattr(models, "Baseline")
+    assert models.Baseline.__tablename__ == "baselines"
+
+
 @pytest.mark.parametrize("z, expected", [
     (0.5, "normal"),
     (1.99, "normal"),

@@ -15,7 +15,31 @@ branch_labels = None
 depends_on = None
 
 def upgrade() -> None:
-    # ... existing anomaly_flags / ewma_state blocks stay as-is ...
+    op.create_table('anomaly_flags',
+        sa.Column('id', sa.UUID(), nullable=False),
+        sa.Column('hostname', sa.String(), nullable=False),
+        sa.Column('metric_name', sa.String(), nullable=False),
+        sa.Column('current_value', sa.Float(), nullable=False),
+        sa.Column('z_score', sa.Float(), nullable=False),
+        sa.Column('severity', sa.String(), nullable=False),
+        sa.Column('method', sa.String(), nullable=False, server_default='robust_zscore'),
+        sa.Column('baseline_n', sa.Integer(), nullable=True),
+        sa.Column('detected_at', sa.DateTime(), nullable=True),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('hostname', 'metric_name', name='uq_anomaly_slot')
+    )
+    op.create_index(op.f('ix_anomaly_flags_hostname'), 'anomaly_flags', ['hostname'], unique=False)
+
+    op.create_table('ewma_state',
+        sa.Column('id', sa.UUID(), nullable=False),
+        sa.Column('hostname', sa.String(), nullable=False),
+        sa.Column('metric_name', sa.String(), nullable=False),
+        sa.Column('mean', sa.Float(), nullable=False),
+        sa.Column('var', sa.Float(), nullable=False, server_default='0.0'),
+        sa.Column('updated_at', sa.DateTime(), nullable=True),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('hostname', 'metric_name', name='uq_ewma_slot')
+    )
     op.create_index(op.f('ix_ewma_state_hostname'), 'ewma_state', ['hostname'], unique=False)
 
     op.create_table('baselines',

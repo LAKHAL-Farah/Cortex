@@ -16,6 +16,8 @@ def list_anomalies(db: Session = Depends(get_db)):
             "current_value": r.current_value,
             "z_score": r.z_score,
             "severity": r.severity,
+            "method": r.method,
+            "baseline_n": r.baseline_n,
             "detected_at": r.detected_at.isoformat(),
         }
         for r in rows
@@ -30,6 +32,8 @@ def get_anomaly(hostname: str, db: Session = Depends(get_db)):
             "current_value": r.current_value,
             "z_score": r.z_score,
             "severity": r.severity,
+            "method": r.method,
+            "baseline_n": r.baseline_n,
             "detected_at": r.detected_at.isoformat(),
         }
         for r in rows
