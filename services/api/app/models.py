@@ -109,3 +109,23 @@ class EwmaState(Base):
     __table_args__ = (
         UniqueConstraint("hostname", "metric_name", name="uq_ewma_slot"),
     )
+
+
+class Baseline(Base):
+    __tablename__ = "baselines"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hostname = Column(String, nullable=False, index=True)
+    metric_name = Column(String, nullable=False)
+    weekday = Column(Integer, nullable=False)  # 0=Monday ... 6=Sunday
+    hour = Column(Integer, nullable=False)     # 0-23
+    mean = Column(Float, nullable=False)
+    stddev = Column(Float, nullable=False)
+    median = Column(Float, nullable=False)
+    mad = Column(Float, nullable=False)
+    sample_count = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("hostname", "metric_name", "weekday", "hour", name="uq_baseline_slot"),
+    )
