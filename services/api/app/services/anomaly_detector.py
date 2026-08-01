@@ -19,14 +19,12 @@ Changes vs. the 1.6 draft, based on notebook comparison
 import logging
 from datetime import datetime
 
-import requests
 from sqlalchemy.orm import Session
 
 from .. import models
+from . import prometheus_client
 
 logger = logging.getLogger(__name__)
-
-PROMETHEUS_URL = "http://prometheus:9090"
 
 METRICS = {
     "cpu_usage": '100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
@@ -52,14 +50,15 @@ EWMA_ALPHA = 0.02
 
 
 def fetch_instant(promql_query: str) -> list[dict]:
-    """Query Prometheus for the current value (no history)."""
-    resp = requests.get(
-        f"{PROMETHEUS_URL}/api/v1/query",
-        params={"query": promql_query},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()["data"]["result"]
+    """Query Prometheus for the current value (no history).
+
+    Delegates to prometheus_client.query(), which honors the PROMETHEUS_URL
+    env var (see docker-compose.sandbox.yml). The previous version of this
+    function hit a hardcoded "http://prometheus:9090" directly, which only
+    happened to work here because that default matches the sandbox's service
+    name -- it silently ignored any PROMETHEUS_URL override in other envs.
+    """
+    return prometheus_client.query(promql_query)
 
 
 def severity_from_zscore(z: float) -> str:
