@@ -13,6 +13,7 @@ from .routers import metrics
 from .routers import dashboard
 from .routers import logs
 from .routers import anomalies
+from .routers import baselines
 from .services.anomaly_detector import detect_anomalies
 from .services.baseline_builder import compute_baselines
 
@@ -75,6 +76,7 @@ app.include_router(metrics.router)
 app.include_router(dashboard.router) 
 app.include_router(logs.router)
 app.include_router(anomalies.router)
+app.include_router(baselines.router)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 @app.get("/health")
 def health():
