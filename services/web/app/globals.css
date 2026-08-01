@@ -206,25 +206,40 @@ select {
    turning the app into a neon dashboard. Every effect here is subtle and
    layers on top of .panel rather than replacing it. */
 
-/* Soft ambient gradient wash pinned to the top-left of a panel. */
-.glow-surface {
-  position: relative;
-  isolation: isolate;
-  overflow: hidden;
-}
-.glow-surface::before {
-  content: "";
-  position: absolute;
-  inset: -60% -10% auto -10%;
-  height: 180px;
-  background: radial-gradient(
-    60% 100% at 25% 0%,
-    color-mix(in srgb, var(--accent) 14%, transparent),
-    color-mix(in srgb, var(--medium) 10%, transparent) 55%,
-    transparent 75%
-  );
-  pointer-events: none;
-  z-index: -1;
+/* Soft ambient gradient wash pinned to the top-left of a panel.
+ *
+ * Wrapped in `@layer components` on purpose: Tailwind v4 puts its utility
+ * classes in `@layer utilities`, and per the CSS cascade-layers spec any
+ * *unlayered* rule beats a layered one regardless of source order. Since
+ * this block previously sat outside any @layer, `.glow-surface`'s
+ * `position: relative` was unconditionally winning over utility classes
+ * like `fixed`/`absolute` applied on the same element -- e.g. the alert
+ * detail drawer (`glow-surface fixed inset-y-0 right-0 ...` in
+ * AlertsView.tsx) was silently forced to `position: relative`, so instead
+ * of overlaying the viewport as a right-hand panel it rendered in normal
+ * document flow, beneath the alerts table. Placing it in the `components`
+ * layer (which comes before `utilities` in Tailwind's layer order) lets
+ * utility classes override it again as expected. */
+@layer components {
+  .glow-surface {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+  }
+  .glow-surface::before {
+    content: "";
+    position: absolute;
+    inset: -60% -10% auto -10%;
+    height: 180px;
+    background: radial-gradient(
+      60% 100% at 25% 0%,
+      color-mix(in srgb, var(--accent) 14%, transparent),
+      color-mix(in srgb, var(--medium) 10%, transparent) 55%,
+      transparent 75%
+    );
+    pointer-events: none;
+    z-index: -1;
+  }
 }
 
 /* Slow ambient border glow for "generated insight" callouts. */

@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import useSWR from "swr";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   History,
   ArrowLeft,
@@ -16,6 +17,11 @@ import {
   Cpu,
   MemoryStick,
   Activity,
+  ChevronRight,
+  Sparkles,
+  ExternalLink,
+  ScrollText,
+  X,
 } from "lucide-react";
 import type { AnomalyEvent, AnomalySeverity } from "@/lib/types";
 import {
@@ -23,12 +29,16 @@ import {
   SEVERITY_COLOR,
   SEVERITY_LABEL,
   SEVERITY_SOFT,
+  SEVERITY_THRESHOLDS,
+  METHOD_LABEL,
   formatDetectedAt,
   formatDuration,
   formatRelative,
   formatZScore,
   metricLabel,
+  zScoreFill,
 } from "@/lib/anomalies";
+import { ProgressBar } from "./ui/ProgressBar";
 
 const fetcher = async (url: string) => {
   const res = await fetch(url);
@@ -80,10 +90,11 @@ function StatusBadge({ isActive }: { isActive: boolean }) {
   );
 }
 
-function EventRow({ e }: { e: AnomalyEvent }) {
+function EventRow({ e, onOpen }: { e: AnomalyEvent; onOpen: () => void }) {
   return (
-    <div
-      className="grid w-full grid-cols-[auto_1fr_auto] items-center gap-3 border-b p-4 text-left last:border-b-0 sm:grid-cols-[110px_1.4fr_1fr_90px_140px_120px]"
+    <button
+      onClick={onOpen}
+      className="group grid w-full grid-cols-[auto_1fr_auto] items-center gap-3 border-b p-4 text-left transition-colors last:border-b-0 hover:bg-[var(--canvas)] sm:grid-cols-[110px_1.4fr_1fr_90px_140px_120px_20px]"
       style={{ borderColor: "var(--border-soft)" }}
     >
       <div className="hidden sm:block">
@@ -121,10 +132,171 @@ function EventRow({ e }: { e: AnomalyEvent }) {
         <span className="stat-figure mt-0.5 text-color-text">Lasted {formatDuration(e.started_at, e.resolved_at)}</span>
       </div>
 
-      <div className="flex items-center justify-end">
+      <div className="flex items-center justify-end sm:justify-start">
         <StatusBadge isActive={e.is_active} />
       </div>
+
+      <ChevronRight className="hidden h-4 w-4 text-text-muted transition-transform group-hover:translate-x-0.5 sm:block" strokeWidth={2} />
+    </button>
+  );
+}
+
+function ZScoreMeter({ z, severity }: { z: number; severity: AnomalySeverity }) {
+  const fill = zScoreFill(z);
+  const scale = SEVERITY_THRESHOLDS.critical + 1.5;
+  const markers: { at: number; label: string }[] = [
+    { at: SEVERITY_THRESHOLDS.medium / scale, label: "2σ" },
+    { at: SEVERITY_THRESHOLDS.high / scale, label: "3σ" },
+    { at: SEVERITY_THRESHOLDS.critical / scale, label: "4σ" },
+  ];
+  return (
+    <div className="relative pt-1">
+      <div className="relative h-2 overflow-hidden rounded-full" style={{ background: "var(--border-soft)" }}>
+        <div
+          className="h-full rounded-full transition-[width] duration-700 ease-out"
+          style={{ width: `${fill * 100}%`, background: SEVERITY_COLOR[severity] }}
+        />
+        {markers.map((m) => (
+          <div
+            key={m.label}
+            className="absolute top-0 h-full w-px"
+            style={{ left: `${m.at * 100}%`, background: "var(--surface)", opacity: 0.6 }}
+          />
+        ))}
+      </div>
+      <div className="relative mt-1 h-3.5 text-[10px] text-text-faint">
+        {markers.map((m) => (
+          <span key={m.label} className="absolute -translate-x-1/2" style={{ left: `${m.at * 100}%` }}>
+            {m.label}
+          </span>
+        ))}
+      </div>
     </div>
+  );
+}
+
+/** One-line, deterministic summary of a past episode, mirroring
+ * lib/anomalies.ts::buildInsight but phrased around a peak reading over a
+ * (possibly finished) window instead of a single live sample. */
+function buildEventInsight(e: AnomalyEvent): string {
+  const metric = metricLabel(e.metric_name);
+  const dir = e.z_score >= 0 ? "above" : "below";
+  const magnitude = Math.abs(e.z_score).toFixed(1);
+  const confidence =
+    e.method === "ewma_fallback"
+      ? "a short-term EWMA estimate, since this host/hour slot didn't have enough history yet"
+      : `a baseline of ${e.baseline_n ?? "—"} samples for this weekday and hour`;
+  const status = e.is_active
+    ? "It's still active."
+    : `It lasted ${formatDuration(e.started_at, e.resolved_at)} before resolving.`;
+
+  return `${e.hostname}'s ${metric.toLowerCase()} peaked at ${e.current_value.toFixed(1)}%, ${magnitude}σ ${dir} what's typical here — based on ${confidence}. ${status}`;
+}
+
+function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
+  return (
+    <>
+      <motion.div
+        className="fixed inset-0 z-40"
+        style={{ background: "rgba(10,12,16,0.45)", backdropFilter: "blur(2px)" }}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        onClick={onClose}
+      />
+      <motion.aside
+        className="glow-surface fixed inset-y-0 right-0 z-50 flex w-full max-w-[440px] flex-col border-l"
+        style={{ background: "var(--surface)", borderColor: "var(--border)" }}
+        initial={{ x: "100%" }}
+        animate={{ x: 0 }}
+        exit={{ x: "100%" }}
+        transition={{ type: "spring", stiffness: 320, damping: 34 }}
+      >
+        <div className="flex items-start justify-between gap-3 border-b p-5" style={{ borderColor: "var(--border-soft)" }}>
+          <div>
+            <div className="flex items-center gap-1.5">
+              <SeverityBadge severity={e.severity} />
+              <StatusBadge isActive={e.is_active} />
+            </div>
+            <h2 className="font-display mt-2 text-lg font-semibold text-color-text">{e.hostname}</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-sm text-text-faint">
+              <MetricGlyph metric={e.metric_name} className="h-3.5 w-3.5" />
+              {metricLabel(e.metric_name)}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)] text-text-faint transition-colors hover:bg-[var(--canvas)]"
+          >
+            <X className="h-4 w-4" strokeWidth={2} />
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-4 overflow-y-auto p-5">
+          <div className="glow-insight rounded-[var(--radius-panel)] p-4">
+            <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--accent)" }}>
+              <Sparkles className="h-3.5 w-3.5" strokeWidth={2} />
+              Generated insight
+            </div>
+            <p className="mt-2 text-sm leading-relaxed text-color-text">{buildEventInsight(e)}</p>
+          </div>
+
+          <div className="panel p-4">
+            <div className="eyebrow">Peak value</div>
+            <div className="stat-figure mt-1 text-2xl text-color-text">{e.current_value.toFixed(1)}%</div>
+            <div className="mt-3">
+              <ProgressBar value={e.current_value} color={SEVERITY_COLOR[e.severity]} />
+            </div>
+          </div>
+
+          <div className="panel p-4">
+            <div className="flex items-center justify-between">
+              <div className="eyebrow">Peak deviation</div>
+              <span className="stat-figure text-sm" style={{ color: SEVERITY_COLOR[e.severity] }}>
+                {formatZScore(e.z_score)}
+              </span>
+            </div>
+            <ZScoreMeter z={e.z_score} severity={e.severity} />
+          </div>
+
+          <div className="panel divide-y p-1" style={{ borderColor: "var(--border-soft)" }}>
+            {[
+              { label: "Detection method", value: METHOD_LABEL[e.method] },
+              { label: "Baseline size", value: e.baseline_n != null ? `${e.baseline_n} samples` : "warming up (EWMA)" },
+              { label: "Started at", value: formatDetectedAt(e.started_at) },
+              { label: "Started", value: formatRelative(e.started_at) },
+              { label: "Resolved at", value: e.resolved_at ? formatDetectedAt(e.resolved_at) : "Still active" },
+              { label: "Duration", value: formatDuration(e.started_at, e.resolved_at) },
+            ].map((row) => (
+              <div key={row.label} className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-sm">
+                <span className="text-text-faint">{row.label}</span>
+                <span className="text-color-text">{row.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 border-t p-4" style={{ borderColor: "var(--border-soft)" }}>
+          <Link
+            href={`/nodes/${encodeURIComponent(e.hostname)}`}
+            className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 py-2 text-sm font-medium transition-colors hover:bg-[var(--canvas)]"
+            style={{ border: "1px solid var(--border)", color: "var(--text)" }}
+          >
+            <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
+            View node
+          </Link>
+          <Link
+            href="/logs"
+            className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 py-2 text-sm font-medium transition-colors hover:bg-[var(--canvas)]"
+            style={{ border: "1px solid var(--border)", color: "var(--text)" }}
+          >
+            <ScrollText className="h-3.5 w-3.5" strokeWidth={2} />
+            View logs
+          </Link>
+        </div>
+      </motion.aside>
+    </>
   );
 }
 
@@ -135,6 +307,7 @@ export default function AnomalyHistoryView() {
   const [search, setSearch] = useState(hostnameParam);
   const [severity, setSeverity] = useState<"all" | AnomalySeverity>("all");
   const [status, setStatus] = useState<StatusFilter>("all");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const { data, error, isLoading, isValidating, mutate } = useSWR<AnomalyEvent[]>("/api/anomalies/history", fetcher, {
     refreshInterval: 15000,
@@ -155,6 +328,7 @@ export default function AnomalyHistoryView() {
   }, [events, search, severity, status]);
 
   const activeCount = events.filter((e) => e.is_active).length;
+  const selected = events.find((e) => e.id === selectedId) ?? null;
 
   return (
     <main className="grid gap-4">
@@ -276,10 +450,12 @@ export default function AnomalyHistoryView() {
             </div>
           )}
           {filtered.map((e) => (
-            <EventRow key={e.id} e={e} />
+            <EventRow key={e.id} e={e} onOpen={() => setSelectedId(e.id)} />
           ))}
         </div>
       </div>
+
+      <AnimatePresence>{selected && <Detail e={selected} onClose={() => setSelectedId(null)} />}</AnimatePresence>
     </main>
   );
 }
