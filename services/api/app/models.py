@@ -91,6 +91,34 @@ class AnomalyFlag(Base):
     )
  
  
+class AnomalyEvent(Base):
+    """History of anomaly episodes, independent from AnomalyFlag.
+
+    AnomalyFlag is a single upserted row per (hostname, metric_name) that
+    only reflects the *current* state -- it gets overwritten on every
+    detection tick, so nothing about a past anomaly survives once it
+    resolves or a new one starts. This table is append-only: one row per
+    episode, opened when a host/metric first crosses into an anomalous
+    severity and closed (resolved_at set) once it drops back to "normal",
+    so the Alerts > History page has something to actually show.
+    """
+    __tablename__ = "anomaly_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hostname = Column(String, nullable=False, index=True)
+    metric_name = Column(String, nullable=False)
+    # Peak values reached while the episode was open (severity only ever
+    # ratchets up within an episode; a fresh episode starts if it dips back
+    # to normal and re-triggers later).
+    current_value = Column(Float, nullable=False)
+    z_score = Column(Float, nullable=False)
+    severity = Column(String, nullable=False)
+    method = Column(String, nullable=False, default="robust_zscore")
+    baseline_n = Column(Integer, nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)  # NULL while still active
+
+
 class EwmaState(Base):
     """Persisted online mean/variance estimate, used as a fallback when a
     (weekday, hour) baseline slot doesn't exist yet or is too thin to trust

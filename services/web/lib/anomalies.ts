@@ -78,6 +78,22 @@ export function formatRelative(iso: string): string {
   return `${diffDay}d ago`;
 }
 
+/** How long an anomaly episode has lasted: startIso -> endIso, or "now" while
+ * still active (endIso == null). Used on the Alerts > History page. */
+export function formatDuration(startIso: string, endIso: string | null): string {
+  const start = new Date(startIso).getTime();
+  const end = endIso ? new Date(endIso).getTime() : Date.now();
+  if (Number.isNaN(start) || Number.isNaN(end)) return "—";
+  const diffSec = Math.max(0, Math.round((end - start) / 1000));
+  if (diffSec < 60) return `${diffSec}s`;
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour}h ${diffMin % 60}m`;
+  const diffDay = Math.floor(diffHour / 24);
+  return `${diffDay}d ${diffHour % 24}h`;
+}
+
 /** One-line, deterministic summary of a flag built from its own fields —
  * not a model call, just the anomaly's numbers put into a sentence so the
  * drawer reads like an explanation instead of a raw record dump. */

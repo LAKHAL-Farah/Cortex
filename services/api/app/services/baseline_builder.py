@@ -39,11 +39,12 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from . import prometheus_client
+from .anomaly_detector import resolve_hostname
 
 logger = logging.getLogger(__name__)
 
 METRICS = {
-    "cpu_usage": '100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
+    "cpu_usage": '100 - (avg by(instance, node) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
     "ram_usage": '(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100',
 }
 
@@ -92,8 +93,7 @@ def compute_baselines(db: Session, lookback_days: int = LOOKBACK_DAYS) -> int:
         buckets: dict[str, dict[tuple[int, int], list[float]]] = defaultdict(lambda: defaultdict(list))
 
         for series in series_list:
-            instance_label = series["metric"].get("instance", "unknown")
-            hostname = instance_label.split(":")[0]
+            hostname = resolve_hostname(db, series["metric"])
             for ts, raw_val in series.get("values", []):
                 try:
                     value = float(raw_val)

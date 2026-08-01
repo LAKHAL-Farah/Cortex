@@ -21,6 +21,7 @@ import {
   ScrollText,
   ShieldCheck,
   Radar,
+  History,
 } from "lucide-react";
 import type { AnomalyFlag, AnomalySeverity } from "@/lib/types";
 import {
@@ -300,6 +301,14 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
             View node
           </Link>
           <Link
+            href={`/alerts/history?hostname=${encodeURIComponent(a.hostname)}`}
+            className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 py-2 text-sm font-medium transition-colors hover:bg-[var(--canvas)]"
+            style={{ border: "1px solid var(--border)", color: "var(--text)" }}
+          >
+            <History className="h-3.5 w-3.5" strokeWidth={2} />
+            History
+          </Link>
+          <Link
             href="/logs"
             className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 py-2 text-sm font-medium transition-colors hover:bg-[var(--canvas)]"
             style={{ border: "1px solid var(--border)", color: "var(--text)" }}
@@ -397,6 +406,14 @@ export default function AlertsView() {
           >
             <RefreshCw className={`h-4 w-4 ${isValidating ? "animate-spin" : ""}`} strokeWidth={2} />
           </button>
+          <Link
+            href="/alerts/history"
+            className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] px-3 py-2 text-sm font-medium text-text-dim transition-colors hover:bg-[var(--canvas)]"
+            style={{ border: "1px solid var(--border)" }}
+          >
+            <History className="h-3.5 w-3.5" strokeWidth={2} />
+            History
+          </Link>
         </div>
       </div>
 

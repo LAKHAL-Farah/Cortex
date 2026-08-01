@@ -10,6 +10,8 @@ severity behavior at known z-scores so a future threshold retune (which the
 1.6 doc already expects to happen once real history accumulates) can't
 silently change behavior without a test failing first.
 """
+from datetime import datetime
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -156,3 +158,72 @@ def test_detect_anomalies_writes_anomaly_flag(db, monkeypatch):
     flag = db.query(models.AnomalyFlag).filter_by(hostname="compute1-sim").first()
     assert flag is not None
     assert flag.current_value == 95.0
+
+
+# --- hostname resolution: real hostname, not the scrape target's bare IP ---
+
+def test_resolve_hostname_prefers_node_label(db):
+    """The 'node' label (real Node.hostname, attached by prometheus_sd.py)
+    should win over parsing an IP out of 'instance' -- previously the IP was
+    the *only* thing used, so alerts always displayed an IP instead of a
+    hostname."""
+    from app.services.anomaly_detector import resolve_hostname
+
+    hostname = resolve_hostname(db, {"instance": "10.0.1.21:9100", "node": "compute1-sim"})
+    assert hostname == "compute1-sim"
+
+
+def test_resolve_hostname_falls_back_to_nodes_table_by_ip(db):
+    """When 'node' is missing (e.g. an older/aggregated series), fall back to
+    looking the IP up in the nodes table before giving up and using the bare
+    IP -- this is the 'hostname associated with it from the nodes table'."""
+    from app.services.anomaly_detector import resolve_hostname
+
+    db.add(models.Node(hostname="compute1-sim", ip_address="10.0.1.21", role="compute"))
+    db.commit()
+
+    hostname = resolve_hostname(db, {"instance": "10.0.1.21:9100"})
+    assert hostname == "compute1-sim"
+
+
+def test_resolve_hostname_falls_back_to_ip_when_unregistered(db):
+    from app.services.anomaly_detector import resolve_hostname
+
+    hostname = resolve_hostname(db, {"instance": "10.0.1.99:9100"})
+    assert hostname == "10.0.1.99"
+
+
+# --- anomaly history (AnomalyEvent) ---
+
+def test_detect_anomalies_opens_and_resolves_history_event(db, monkeypatch):
+    """A host/metric crossing into an anomalous severity should open an
+    AnomalyEvent, and dropping back to normal should resolve it -- so past
+    anomalies stay visible on the History page instead of just disappearing
+    the way the AnomalyFlag-only upsert did."""
+    import app.services.anomaly_detector as mod
+
+    now = datetime.utcnow()
+    make_baseline(db, hostname="host1", metric_name="cpu_usage", weekday=now.weekday(), hour=now.hour,
+                  median=25.0, mad=1.5, sample_count=36)
+
+    values = iter([25.0 + 5 * (1.4826 * 1.5), 25.5])  # first: critical spike, then: back to normal
+
+    def fake_fetch_instant(query):
+        return [{"metric": {"instance": "host1:9100", "node": "host1"}, "value": [0, str(next(values))]}]
+
+    monkeypatch.setattr(mod, "fetch_instant", fake_fetch_instant)
+    monkeypatch.setattr(mod, "METRICS", {"cpu_usage": "dummy"})
+
+    mod.detect_anomalies(db)
+    event = db.query(models.AnomalyEvent).filter_by(hostname="host1", metric_name="cpu_usage").first()
+    assert event is not None
+    assert event.resolved_at is None
+    assert event.severity == "critical"
+
+    mod.detect_anomalies(db)
+    db.refresh(event)
+    assert event.resolved_at is not None
+
+    # Still queryable afterward -- this is the point of the history table.
+    all_events = db.query(models.AnomalyEvent).filter_by(hostname="host1").all()
+    assert len(all_events) == 1

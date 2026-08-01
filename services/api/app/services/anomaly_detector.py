@@ -21,15 +21,44 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import crud, models
 from . import prometheus_client
 
 logger = logging.getLogger(__name__)
 
 METRICS = {
-    "cpu_usage": '100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
+    # Grouped by (instance, node) instead of just (instance): "node" is the
+    # real hostname label prometheus_sd.py attaches from the nodes table
+    # (see regenerate_file_sd()). Grouping only by "instance" dropped it,
+    # which is why every flag ended up labeled with a bare IP -- see
+    # resolve_hostname() below.
+    "cpu_usage": '100 - (avg by(instance, node) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
     "ram_usage": '(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100',
 }
+
+# Anomaly severities only ever ratchet up while an AnomalyEvent stays open,
+# so a later "medium" tick doesn't overwrite an earlier "critical" peak.
+_SEVERITY_RANK = {"normal": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def resolve_hostname(db: Session, series_metric: dict) -> str:
+    """Best-effort real hostname for a Prometheus series.
+
+    Prefers the "node" label (the actual Node.hostname, attached to every
+    scrape target by prometheus_sd.regenerate_file_sd()). Falls back to
+    looking the target IP up in the nodes table directly, and only as a
+    last resort falls back to the bare IP parsed out of "instance" -- which
+    used to be the *only* thing this looked at, so anomalies always showed
+    an IP address instead of a hostname.
+    """
+    node_label = series_metric.get("node")
+    if node_label:
+        return node_label
+
+    instance_label = series_metric.get("instance", "unknown")
+    ip = instance_label.split(":")[0]
+    node = crud.get_node_by_ip(db, ip)
+    return node.hostname if node else ip
 
 # Severity thresholds, in (robust) standard deviations. Unchanged from the 1.6 draft --
 # the notebook's threshold sweep (section 9) confirmed 2/3/4 gives a reasonable
@@ -142,8 +171,7 @@ def detect_anomalies(db: Session) -> None:
         current_results = fetch_instant(query)
 
         for series in current_results:
-            instance_label = series["metric"].get("instance", "unknown")
-            hostname = instance_label.split(":")[0]
+            hostname = resolve_hostname(db, series["metric"])
             current_value = float(series["value"][1])
 
             z_score, severity, method, baseline_n = score_current_value(
@@ -169,6 +197,33 @@ def detect_anomalies(db: Session) -> None:
                     severity=severity, method=method, baseline_n=baseline_n,
                     detected_at=now,
                 ))
+
+            # History: keep one open AnomalyEvent per (hostname, metric_name)
+            # episode so past anomalies remain visible after they resolve,
+            # instead of only ever showing the current state like AnomalyFlag.
+            open_event = (
+                db.query(models.AnomalyEvent)
+                .filter_by(hostname=hostname, metric_name=metric_name, resolved_at=None)
+                .first()
+            )
+            if severity != "normal":
+                if open_event is None:
+                    db.add(models.AnomalyEvent(
+                        hostname=hostname, metric_name=metric_name,
+                        current_value=current_value, z_score=z_score,
+                        severity=severity, method=method, baseline_n=baseline_n,
+                        started_at=now,
+                    ))
+                elif _SEVERITY_RANK[severity] >= _SEVERITY_RANK[open_event.severity]:
+                    # Record the peak reached during this episode, not just
+                    # whatever the last tick happened to be.
+                    open_event.current_value = current_value
+                    open_event.z_score = z_score
+                    open_event.severity = severity
+                    open_event.method = method
+                    open_event.baseline_n = baseline_n
+            elif open_event is not None:
+                open_event.resolved_at = now
 
         db.commit()
         logger.info("Anomaly detection pass done for %s", metric_name)
