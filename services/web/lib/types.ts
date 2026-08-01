@@ -64,6 +64,22 @@ export interface AnomalyFlag {
   detected_at: string; // ISO 8601
 }
 
+/** One (weekday, hour) slot of a node/metric's learned baseline curve, as
+ * returned by GET /api/v1/baselines/{hostname}?metric_name=. weekday is
+ * 0=Monday .. 6=Sunday, hour is 0-23. median/mad is the robust estimator
+ * used for anomaly scoring (ADR-0001); mean/stddev is included alongside
+ * for comparison only. */
+export interface BaselineSlot {
+  weekday: number;
+  hour: number;
+  median: number;
+  mad: number;
+  mean: number;
+  stddev: number;
+  sample_count: number;
+  updated_at: string | null;
+}
+
 /** One row per anomaly episode (Alerts > History), as opposed to AnomalyFlag
  * which only ever reflects the current state per host/metric. */
 export interface AnomalyEvent {
