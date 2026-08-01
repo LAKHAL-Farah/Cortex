@@ -49,3 +49,33 @@ export interface LogEntry {
   source: string | null; // Loki "job" label: "system" (syslog) or a service name
   service: string | null;
 }
+
+export type AnomalySeverity = "medium" | "high" | "critical";
+export type AnomalyMethod = "robust_zscore" | "ewma_fallback";
+
+export interface AnomalyFlag {
+  hostname: string;
+  metric_name: string; // e.g. "cpu_usage" | "ram_usage"
+  current_value: number;
+  z_score: number;
+  severity: AnomalySeverity;
+  method: AnomalyMethod;
+  baseline_n: number | null; // sample count backing the baseline (null when EWMA fallback)
+  detected_at: string; // ISO 8601
+}
+
+/** One row per anomaly episode (Alerts > History), as opposed to AnomalyFlag
+ * which only ever reflects the current state per host/metric. */
+export interface AnomalyEvent {
+  id: string;
+  hostname: string;
+  metric_name: string;
+  current_value: number; // peak value reached during the episode
+  z_score: number; // peak z-score reached during the episode
+  severity: AnomalySeverity; // peak severity reached during the episode
+  method: AnomalyMethod;
+  baseline_n: number | null;
+  started_at: string; // ISO 8601
+  resolved_at: string | null; // ISO 8601, null while still active
+  is_active: boolean;
+}

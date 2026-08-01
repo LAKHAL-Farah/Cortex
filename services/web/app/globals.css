@@ -41,6 +41,8 @@
   --crit-soft: rgba(214,69,69,0.1);
   --neutral: #8A93A6;
   --neutral-soft: rgba(138,147,166,0.1);
+  --medium: #7C6FE0;
+  --medium-soft: rgba(124,111,224,0.1);
 
   /* data-viz palette, muted/consistent (not rainbow) */
   --chart-1: #E15B3C;
@@ -80,6 +82,8 @@
   --crit-soft: rgba(229,104,107,0.14);
   --neutral: #8A93A6;
   --neutral-soft: rgba(138,147,166,0.14);
+  --medium: #9B90EE;
+  --medium-soft: rgba(155,144,238,0.16);
 
   --chart-1: #E97757;
   --chart-2: #5B9BD9;
@@ -195,4 +199,62 @@ select {
 
 ::placeholder {
   color: var(--text-muted);
+}
+
+/* ---- Ambient "AI" accents, opt-in only ----
+   Used on the alerts/anomaly page to hint at model-driven detection without
+   turning the app into a neon dashboard. Every effect here is subtle and
+   layers on top of .panel rather than replacing it. */
+
+/* Soft ambient gradient wash pinned to the top-left of a panel. */
+.glow-surface {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+.glow-surface::before {
+  content: "";
+  position: absolute;
+  inset: -60% -10% auto -10%;
+  height: 180px;
+  background: radial-gradient(
+    60% 100% at 25% 0%,
+    color-mix(in srgb, var(--accent) 14%, transparent),
+    color-mix(in srgb, var(--medium) 10%, transparent) 55%,
+    transparent 75%
+  );
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* Slow ambient border glow for "generated insight" callouts. */
+.glow-insight {
+  position: relative;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 8%, var(--surface)),
+    color-mix(in srgb, var(--medium) 8%, var(--surface))
+  );
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+}
+
+/* A gentle breathing ring, color driven by --pulse-color so severity can
+   set it inline. Used sparingly (e.g. one live badge), not on every card. */
+.glow-pulse {
+  animation: glow-pulse 2.4s ease-in-out infinite;
+}
+@keyframes glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--pulse-color, var(--crit)) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--pulse-color, var(--crit)) 0%, transparent);
+  }
+}
+
+/* Thin colored halo, color driven by --ring-color. Used on the currently
+   selected/critical row so it reads as "lit up" without heavy borders. */
+.glow-ring {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ring-color, var(--accent)) 45%, transparent),
+    0 0 18px -6px var(--ring-color, var(--accent));
 }

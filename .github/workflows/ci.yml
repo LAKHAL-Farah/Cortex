@@ -48,3 +48,5 @@ jobs:
         run: |
           mkdir -p /tmp/prometheus_file_sd
           pytest -v
+      - name: Run anomaly detector tests
+        run: docker compose exec -T api pytest tests/ -v
