@@ -6,7 +6,7 @@ import { useMetricHistory } from "@/components/MetricChart";
 import PlotlyChart from "@/components/PlotlyChart";
 import { useEffect, useState } from "react";
 import { Card } from "@/components/ui/Card";
-import { ArrowLeft, Server } from "lucide-react";
+import { ArrowLeft, Server, TrendingUp } from "lucide-react";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -178,20 +178,30 @@ export default function NodeDetailPage() {
         <section className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="eyebrow">Historical metrics</div>
-            <div className="inline-flex rounded-[var(--radius-control)] p-0.5" style={{ border: "1px solid var(--border)" }}>
-              {RANGES.map((r) => (
-                <button
-                  key={r.mins}
-                  onClick={() => setMinutes(r.mins)}
-                  className="rounded-[5px] px-2.5 py-1 text-xs font-medium transition-colors"
-                  style={{
-                    background: minutes === r.mins ? "var(--accent)" : "transparent",
-                    color: minutes === r.mins ? "#fff" : "var(--text-dim)",
-                  }}
-                >
-                  {r.label}
-                </button>
-              ))}
+            <div className="flex items-center gap-2">
+              <Link
+                href={`/baselines?host=${encodeURIComponent(node.hostname)}&metric=cpu_usage`}
+                className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] px-2.5 py-1 text-xs font-medium text-text-dim transition-colors hover:bg-[var(--canvas)]"
+                style={{ border: "1px solid var(--border)" }}
+              >
+                <TrendingUp className="h-3.5 w-3.5" strokeWidth={2} />
+                View baseline
+              </Link>
+              <div className="inline-flex rounded-[var(--radius-control)] p-0.5" style={{ border: "1px solid var(--border)" }}>
+                {RANGES.map((r) => (
+                  <button
+                    key={r.mins}
+                    onClick={() => setMinutes(r.mins)}
+                    className="rounded-[5px] px-2.5 py-1 text-xs font-medium transition-colors"
+                    style={{
+                      background: minutes === r.mins ? "var(--accent)" : "transparent",
+                      color: minutes === r.mins ? "#fff" : "var(--text-dim)",
+                    }}
+                  >
+                    {r.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
