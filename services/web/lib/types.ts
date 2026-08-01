@@ -49,3 +49,17 @@ export interface LogEntry {
   source: string | null; // Loki "job" label: "system" (syslog) or a service name
   service: string | null;
 }
+
+export type AnomalySeverity = "medium" | "high" | "critical";
+export type AnomalyMethod = "robust_zscore" | "ewma_fallback";
+
+export interface AnomalyFlag {
+  hostname: string;
+  metric_name: string; // e.g. "cpu_usage" | "ram_usage"
+  current_value: number;
+  z_score: number;
+  severity: AnomalySeverity;
+  method: AnomalyMethod;
+  baseline_n: number | null; // sample count backing the baseline (null when EWMA fallback)
+  detected_at: string; // ISO 8601
+}
