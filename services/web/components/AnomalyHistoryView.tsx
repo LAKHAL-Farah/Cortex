@@ -205,13 +205,14 @@ function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
         onClick={onClose}
       />
       <motion.aside
-        className="glow-surface fixed inset-y-0 right-0 z-50 flex w-full max-w-[440px] flex-col border-l"
+        className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[440px] flex-col overflow-hidden border-l"
         style={{ background: "var(--surface)", borderColor: "var(--border)" }}
         initial={{ x: "100%" }}
         animate={{ x: 0 }}
         exit={{ x: "100%" }}
         transition={{ type: "spring", stiffness: 320, damping: 34 }}
       >
+        <div className="glow-surface pointer-events-none absolute inset-0 -z-10" aria-hidden="true" />
         <div className="flex items-start justify-between gap-3 border-b p-5" style={{ borderColor: "var(--border-soft)" }}>
           <div>
             <div className="flex items-center gap-1.5">
