@@ -40,13 +40,17 @@ def create_node(payload: schemas.NodeCreate, background_tasks: BackgroundTasks,
 
     def _install_and_register():
         success = install_node_exporter(node.hostname)
-        if success:
-            # need a fresh session since this runs after the request's session closed
-            from ..db import SessionLocal
-            with SessionLocal() as bg_db:
-                regenerate_file_sd(bg_db)
-        else:
-            logger.error("node_exporter install failed for %s; not added to Prometheus targets", node.hostname)
+        if not success:
+            logger.error("node_exporter install failed for %s", node.hostname)
+        # The file_sd target file reflects active nodes in the DB, independent
+        # of whether node_exporter is installed yet -- Prometheus will simply
+        # fail to scrape the target until the install succeeds (or a manual
+        # recheck does). Gating this on install success meant a newly created
+        # node never showed up as a target at all when the install failed.
+        # need a fresh session since this runs after the request's session closed
+        from ..db import SessionLocal
+        with SessionLocal() as bg_db:
+            _safe_regenerate_file_sd(bg_db)
 
     background_tasks.add_task(_install_and_register)
     return node

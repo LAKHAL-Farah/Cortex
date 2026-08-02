@@ -1,3 +1,4 @@
+import itertools
 import uuid
 import pytest
 from fastapi.testclient import TestClient
@@ -6,11 +7,18 @@ from app.main import app
 client = TestClient(app)
 HEADERS = {"X-API-Key": "test-key"}
 
+# Unique (not fixed) per call, since the tests share one DB with no per-test
+# rollback/cleanup -- a fixed default here collides with nodes created by
+# earlier tests/runs and causes spurious 409s. A counter (rather than a
+# random address) also rules out birthday-collision flakiness between calls
+# within the same run.
+_next_ip_octet = itertools.count(10)
+
 
 def _payload(**overrides):
     base = {
         "hostname": f"test-node-{uuid.uuid4().hex[:6]}",
-        "ip_address": "10.0.1.50",
+        "ip_address": f"10.0.1.{next(_next_ip_octet)}",
         "role": "compute",
         "exporter_port": 9100,
         "is_active": True,
@@ -58,7 +66,7 @@ def test_rejects_unknown_role():
 def test_rejects_duplicate_hostname():
     payload = _payload()
     client.post("/api/v1/nodes", json=payload, headers=HEADERS)
-    dup = _payload(hostname=payload["hostname"], ip_address="10.0.1.51")
+    dup = _payload(hostname=payload["hostname"])
     assert client.post("/api/v1/nodes", json=dup, headers=HEADERS).status_code == 409
 
 
@@ -69,10 +77,14 @@ def test_write_endpoints_require_api_key():
 def test_file_sd_reflects_active_nodes(tmp_path, monkeypatch):
     from app.services import prometheus_sd
     monkeypatch.setattr(prometheus_sd, "FILE_SD_PATH", str(tmp_path / "nodes.json"))
-    client.post("/api/v1/nodes", json=_payload(hostname="fsd-check", ip_address="10.0.1.52"), headers=HEADERS)
+    # Unique hostname per run (see _payload's ip_address comment above) --
+    # a fixed hostname would 409 against a node left over from a prior run
+    # against the same DB, and the file never gets written at all.
+    hostname = f"fsd-check-{uuid.uuid4().hex[:6]}"
+    client.post("/api/v1/nodes", json=_payload(hostname=hostname), headers=HEADERS)
     import json
     data = json.loads((tmp_path / "nodes.json").read_text())
-    assert any(t["labels"]["node"] == "fsd-check" for t in data)
+    assert any(t["labels"]["node"] == hostname for t in data)
 
 
 def test_file_sd_file_is_world_readable(tmp_path, monkeypatch):
@@ -80,6 +92,7 @@ def test_file_sd_file_is_world_readable(tmp_path, monkeypatch):
     # writes must not be mkstemp's default 0600.
     from app.services import prometheus_sd
     monkeypatch.setattr(prometheus_sd, "FILE_SD_PATH", str(tmp_path / "nodes.json"))
-    client.post("/api/v1/nodes", json=_payload(hostname="perm-check", ip_address="10.0.1.53"), headers=HEADERS)
+    hostname = f"perm-check-{uuid.uuid4().hex[:6]}"
+    client.post("/api/v1/nodes", json=_payload(hostname=hostname), headers=HEADERS)
     mode = (tmp_path / "nodes.json").stat().st_mode & 0o777
     assert mode & 0o044 == 0o044  # owner+other read bits set
