@@ -1,3 +1,4 @@
+# roles/promtail/defaults/main.yml
 ---
 promtail_version: "3.6.0"
 promtail_arch: "amd64"
@@ -10,8 +11,16 @@ promtail_http_port: 9080
 promtail_config_dir: "/etc/promtail"
 promtail_data_dir: "/var/lib/promtail"
 
-promtail_archive_path: "/tmp/promtail-linux-amd64.zip"
-promtail_extracted_binary: "/tmp/promtail-linux-amd64"
+# Pre-fetched release archive shipped in roles/promtail/files/ (same offline
+# distribution strategy as node_exporter): the controller already holds the
+# archive, so it is pushed to each target over the Ansible connection
+# instead of every node reaching out to github.com directly.
+promtail_archive: "promtail-linux-{{ promtail_arch }}-{{ promtail_version }}.zip"
+promtail_archive_path: "/tmp/{{ promtail_archive }}"
+promtail_extracted_binary: "/tmp/promtail-linux-{{ promtail_arch }}"
 
+# Only used if you need to refresh roles/promtail/files/{{ promtail_archive }}
+# from the controller (e.g. via a manual curl), not consumed by the install
+# tasks themselves.
 promtail_download_url: >-
   https://github.com/grafana/loki/releases/download/v{{ promtail_version }}/promtail-linux-{{ promtail_arch }}.zip

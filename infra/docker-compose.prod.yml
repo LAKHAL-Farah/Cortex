@@ -1,0 +1,56 @@
+
+networks:
+  cortex-net:
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: ${CORTEX_DB_PASSWORD}
+      POSTGRES_DB: cortex
+    volumes:
+      - cortex_pgdata:/var/lib/postgresql/data
+    networks:
+      - cortex-net
+
+  api:
+    build: 
+      context: ../services/api
+      network: host
+    environment:
+      DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
+      CORTEX_API_KEY: ${CORTEX_API_KEY}
+      PROMETHEUS_FILE_SD_PATH: ${PROMETHEUS_FILE_SD_HOST_DIR}
+      CORTEX_ANSIBLE_DIR: ${CORTEX_ANSIBLE_DIR:-/infra/ansible}
+      ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
+      PROMETHEUS_URL: ${PROMETHEUS_URL}
+      PROMETHEUS_RANGE_URL: ${PROMETHEUS_RANGE_URL}
+      LOKI_URL: ${LOKI_URL}
+    volumes:
+      - ../services/api:/app
+      - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd
+      - ${CORTEX_ANSIBLE_HOST_DIR:-../infra/ansible}:/infra/ansible
+      - ${CORTEX_SSH_KEY_HOST_DIR:-./.sandbox-ssh}:/root/.ssh:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - cortex-net
+  web:
+    build: 
+      context: ../services/web
+      network: host
+    environment:
+      CORTEX_API_URL: http://api:8000
+      CORTEX_API_KEY: ${CORTEX_API_KEY}
+    ports:
+      - "127.0.0.1:3500:3000"
+    depends_on:
+      - api
+    networks:
+      - cortex-net
+
+volumes:
+  cortex_pgdata:
+

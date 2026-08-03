@@ -1,0 +1,13 @@
+[
+{% for host in groups['monitoring'] %}
+  {
+    "targets": [
+      "{{ hostvars[host]['ansible_host'] }}:{{ node_exporter_port }}"
+    ],
+    "labels": {
+      "node": "{{ host }}",
+      "role": "{{ hostvars[host]['node_role'] }}"
+    }
+  }{% if not loop.last %},{% endif %}
+{% endfor %}
+]

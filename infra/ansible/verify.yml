@@ -1,7 +1,13 @@
 ---
-# Automates the P0 checklist:
+# Automates the P0 checklist and now covers every role deployed by site.yml:
+#   node_exporter, prometheus, loki, promtail, grafana
+#
 #   1.2 - curl :9100/metrics returns real data on all target nodes
 #   1.3 - up{} == 1 for all nodes, with role labels present
+#   1.4 - Loki is up and ready to receive logs
+#   1.5 - Promtail is running and actively tailing logs on every node
+#   1.6 - Loki has actually received log entries from every logging agent
+#   1.7 - Grafana is up and healthy
 
 - name: Verify node_exporter is reachable on every monitored node
   hosts: monitoring
@@ -51,3 +57,92 @@
         that:
           - prom_up.json.data.result | length >= groups['monitoring'] | length
         fail_msg: "Expected at least {{ groups['monitoring'] | length }} targets, got {{ prom_up.json.data.result | length }}"
+
+- name: Verify Loki is up and ready
+  hosts: loki_server
+  become: false
+  tasks:
+    - name: curl /ready on the Loki server
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ loki_http_port }}/ready"
+        return_content: true
+        status_code: 200
+      register: loki_ready_check
+
+    - name: Assert Loki reports ready
+      ansible.builtin.assert:
+        that:
+          - loki_ready_check.status == 200
+        fail_msg: "Loki on {{ inventory_hostname }} ({{ ansible_host }}) is not ready"
+        success_msg: "Loki OK on {{ inventory_hostname }} ({{ ansible_host }})"
+
+- name: Verify Promtail is running and tailing logs on every agent
+  hosts: logging_agents
+  become: false
+  tasks:
+    - name: curl /ready on this node's Promtail
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ promtail_http_port }}/ready"
+        return_content: true
+        status_code: 200
+      register: promtail_ready_check
+
+    - name: Assert Promtail reports ready
+      ansible.builtin.assert:
+        that:
+          - promtail_ready_check.status == 200
+        fail_msg: "Promtail on {{ inventory_hostname }} ({{ ansible_host }}) is not ready"
+        success_msg: "Promtail OK on {{ inventory_hostname }} ({{ ansible_host }})"
+
+    - name: curl /metrics on this node's Promtail
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ promtail_http_port }}/metrics"
+        return_content: true
+      register: promtail_metrics_check
+
+    - name: Assert Promtail is actively reading log lines
+      ansible.builtin.assert:
+        that:
+          - "'promtail_read_lines_total' in promtail_metrics_check.content"
+        fail_msg: "Promtail on {{ inventory_hostname }} did not report read-line metrics (not tailing logs)"
+        success_msg: "Promtail is tailing logs on {{ inventory_hostname }}"
+
+- name: Verify Loki has received log entries from every node
+  hosts: loki_server
+  become: false
+  tasks:
+    - name: Query Loki for known values of the 'host' label
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ loki_http_port }}/loki/api/v1/label/host/values"
+        return_content: true
+      register: loki_host_labels
+
+    - name: Show hosts Loki has actually seen logs from
+      ansible.builtin.debug:
+        msg: "Loki has received logs from: {{ loki_host_labels.json.data }}"
+
+    - name: Assert every logging agent has shipped at least one log line
+      ansible.builtin.assert:
+        that:
+          - item in loki_host_labels.json.data
+        fail_msg: "No logs from '{{ item }}' have reached Loki yet"
+        success_msg: "Loki confirmed receiving logs from '{{ item }}'"
+      loop: "{{ groups['logging_agents'] }}"
+
+- name: Verify Grafana is up and healthy
+  hosts: grafana_server
+  become: false
+  tasks:
+    - name: curl /api/health on Grafana
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ grafana_http_port }}/api/health"
+        return_content: true
+        status_code: 200
+      register: grafana_health_check
+
+    - name: Assert Grafana reports healthy database status
+      ansible.builtin.assert:
+        that:
+          - grafana_health_check.json.database == "ok"
+        fail_msg: "Grafana on {{ inventory_hostname }} ({{ ansible_host }}) is not healthy: {{ grafana_health_check.content }}"
+        success_msg: "Grafana OK on {{ inventory_hostname }} ({{ ansible_host }})"

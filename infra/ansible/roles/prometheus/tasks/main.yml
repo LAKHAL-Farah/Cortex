@@ -63,6 +63,15 @@
     group: prometheus
     mode: "0755"
 
+- name: Generate node exporter file_sd targets
+  ansible.builtin.template:
+    src: nodes.json.j2
+    dest: "{{ prometheus_file_sd_dir }}/nodes.json"
+    owner: prometheus
+    group: prometheus
+    mode: "0644"
+  notify: restart prometheus
+
 - name: Deploy prometheus.yml scrape config
   ansible.builtin.template:
     src: prometheus.yml.j2
