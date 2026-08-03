@@ -1,11 +1,14 @@
+import logging
 import os
 from pathlib import Path
-from .ansible_runner import ANSIBLE_DIR 
+from .ansible_runner import ANSIBLE_DIR
 
+logger = logging.getLogger(__name__)
 
 INVENTORY_PATH = Path(
     os.environ.get("CORTEX_INVENTORY_PATH") or (ANSIBLE_DIR / "inventory" / "hosts.ini")
 )
+logger.info("inventory_manager: writing node registrations to %s", INVENTORY_PATH)
 
 GROUP_BY_ROLE = {
     "controller": "controllers",

@@ -16,6 +16,7 @@ from .routers import anomalies
 from .routers import baselines
 from .services.anomaly_detector import detect_anomalies
 from .services.baseline_builder import compute_baselines
+from .services.node_seeder import seed_nodes_from_file_sd
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,18 @@ async def _run_periodic(fn, interval_seconds: float, name: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # If the DB is empty (fresh deploy, or infra that was provisioned by
+    # Ansible before Cortex existed), backfill it from the Prometheus
+    # file_sd file so /nodes isn't empty despite Prometheus already having
+    # real targets. No-ops once any node exists. See node_seeder.py.
+    db = SessionLocal()
+    try:
+        await asyncio.to_thread(seed_nodes_from_file_sd, db)
+    except Exception:
+        logger.exception("startup node seeding failed")
+    finally:
+        db.close()
+
     tasks = [
         asyncio.create_task(
             _run_periodic(detect_anomalies, ANOMALY_DETECTION_INTERVAL_SECONDS, "anomaly detection")

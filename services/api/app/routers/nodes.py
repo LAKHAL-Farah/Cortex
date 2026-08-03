@@ -7,7 +7,7 @@ from .. import crud, schemas
 from ..db import get_db
 from ..security import require_api_key
 from ..services.prometheus_sd import regenerate_file_sd
-from ..services.inventory_manager import add_host_to_inventory
+from ..services.inventory_manager import add_host_to_inventory, remove_host_from_inventory
 from ..services.ansible_runner import install_node_exporter
 
 logger = logging.getLogger(__name__)
@@ -96,13 +96,17 @@ def delete_node(node_id: uuid.UUID, db: Session = Depends(get_db)):
     node = crud.get_node(db, node_id)
     if node is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "node not found")
+    hostname = node.hostname
     crud.delete_node(db, node)
-    # The DB row is already gone at this point; if the target file write
-    # below fails (e.g. disk/permission issue), the node must still count
-    # as deleted rather than surfacing a 500 for an operation that already
-    # succeeded. Prometheus will pick up the correct target list on its
-    # next file_sd refresh (or the next successful regenerate call) either way.
+    # The DB row is already gone at this point; if the target file write or
+    # inventory cleanup below fails (e.g. disk/permission issue), the node
+    # must still count as deleted rather than surfacing a 500 for an
+    # operation that already succeeded. Prometheus will pick up the correct
+    # target list on its next file_sd refresh (or the next successful
+    # regenerate call) either way, and a stray inventory line can be cleaned
+    # up by hand or on the next delete of the same host.
     _safe_regenerate_file_sd(db)
+    _safe_remove_host_from_inventory(hostname)
 
 
 
@@ -111,3 +115,10 @@ def _safe_regenerate_file_sd(db: Session) -> None:
         regenerate_file_sd(db)
     except Exception:
         logger.exception("failed to regenerate prometheus file_sd target file")
+
+
+def _safe_remove_host_from_inventory(hostname: str) -> None:
+    try:
+        remove_host_from_inventory(hostname)
+    except Exception:
+        logger.exception("failed to remove %s from the ansible inventory", hostname)

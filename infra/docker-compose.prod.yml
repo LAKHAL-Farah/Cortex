@@ -22,8 +22,17 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
       CORTEX_API_KEY: ${CORTEX_API_KEY}
-      PROMETHEUS_FILE_SD_PATH: ${PROMETHEUS_FILE_SD_HOST_DIR}
+      # Container-side path, matching the `:/file_sd` mount below -- this was
+      # previously set to the *host* dir (${PROMETHEUS_FILE_SD_HOST_DIR}),
+      # which doesn't exist inside the container and isn't even a file path,
+      # so every regenerate_file_sd() call after a node add/edit/delete was
+      # silently failing and the original Ansible-provisioned nodes.json was
+      # never being overwritten.
+      PROMETHEUS_FILE_SD_PATH: /file_sd/nodes.json
       CORTEX_ANSIBLE_DIR: ${CORTEX_ANSIBLE_DIR:-/infra/ansible}
+      # Used only to refuse startup if the resolved Ansible dir ever turns
+      # out to be infra/ansible-sandbox -- see ansible_runner.py.
+      CORTEX_ENV: production
       ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
       PROMETHEUS_URL: ${PROMETHEUS_URL}
       PROMETHEUS_RANGE_URL: ${PROMETHEUS_RANGE_URL}

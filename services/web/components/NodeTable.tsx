@@ -1,8 +1,9 @@
 "use client";
+import { useState } from "react";
 import Link from "next/link";
-import useSWR from "swr";
+import useSWR, { mutate } from "swr";
 import type { DashboardNode, NodeRole } from "@/lib/types";
-import { Server, ShieldCheck } from "lucide-react";
+import { Server, ShieldCheck, Trash2 } from "lucide-react";
 import { ProgressBar } from "./ui/ProgressBar";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
@@ -33,6 +34,30 @@ export default function NodeTable({ nodes: incomingNodes, isLoading: incomingLoa
   });
   const nodes = incomingNodes ?? fetchedNodes;
   const isLoading = incomingLoading ?? fetching;
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  async function handleDelete(e: React.MouseEvent, id: string, hostname: string) {
+    // Rows are <Link>s (click = navigate to the node detail page); stop
+    // that from firing when the delete button itself is clicked.
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.confirm(`Remove "${hostname}" from the node registry? This also stops Prometheus from scraping it.`)) {
+      return;
+    }
+    setDeletingId(id);
+    try {
+      const res = await fetch(`/api/nodes/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        window.alert(`Failed to delete ${hostname}: ${res.status} ${JSON.stringify(payload.detail ?? payload)}`);
+        return;
+      }
+      mutate("/api/dashboard");
+      mutate("/api/nodes");
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   if (isLoading) return <p className="p-6 text-sm text-text-faint">Loading…</p>;
   if (!nodes?.length) return <p className="p-6 text-sm text-text-faint">No nodes registered yet.</p>;
@@ -47,12 +72,13 @@ export default function NodeTable({ nodes: incomingNodes, isLoading: incomingLoa
         </div>
       </div>
 
-      <div className="hidden grid-cols-[3fr_1fr_1fr_2fr_1fr] gap-4 px-5 py-2.5 text-[11px] font-medium uppercase tracking-[0.08em] text-text-muted sm:grid" style={{ background: "var(--canvas)" }}>
+      <div className="hidden grid-cols-[3fr_1fr_1fr_2fr_1fr_auto] gap-4 px-5 py-2.5 text-[11px] font-medium uppercase tracking-[0.08em] text-text-muted sm:grid" style={{ background: "var(--canvas)" }}>
         <div>Node</div>
         <div>Role</div>
         <div>Status</div>
         <div>CPU</div>
         <div className="text-right">Updated</div>
+        <div className="text-right">Actions</div>
       </div>
 
       <div>
@@ -67,7 +93,7 @@ export default function NodeTable({ nodes: incomingNodes, isLoading: incomingLoa
             <Link
               key={n.id}
               href={href}
-              className="group grid gap-4 border-b p-5 transition-colors last:border-b-0 hover:bg-[var(--canvas)] sm:grid-cols-[3fr_1fr_1fr_2fr_1fr]"
+              className="group grid gap-4 border-b p-5 transition-colors last:border-b-0 hover:bg-[var(--canvas)] sm:grid-cols-[3fr_1fr_1fr_2fr_1fr_auto]"
               style={{ borderColor: "var(--border-soft)" }}
             >
               <div className="flex items-center gap-3">
@@ -107,6 +133,19 @@ export default function NodeTable({ nodes: incomingNodes, isLoading: incomingLoa
 
               <div className="flex items-center justify-end text-sm text-text-faint">
                 {n.updated_at ? new Date(n.updated_at).toLocaleDateString() : n.created_at ? new Date(n.created_at).toLocaleDateString() : "—"}
+              </div>
+
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={(e) => handleDelete(e, n.id, n.hostname)}
+                  disabled={deletingId === n.id}
+                  aria-label={`Delete ${n.hostname}`}
+                  title={`Delete ${n.hostname}`}
+                  className="inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)] text-text-faint transition-colors hover:bg-[var(--crit-soft)] hover:text-[var(--crit)] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <Trash2 className="h-4 w-4" strokeWidth={1.75} />
+                </button>
               </div>
             </Link>
           );
