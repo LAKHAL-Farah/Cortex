@@ -73,6 +73,26 @@ MAD_SCALE = 1.4826
 # skipping the host/metric entirely.
 MIN_BASELINE_SAMPLES = 10
 
+# ...and at least this many *distinct calendar days* backing it, separately
+# from MIN_BASELINE_SAMPLES. A single hour's worth of 5-minute-step points
+# (up to 12) all comes from one real occurrence of that (weekday, hour) --
+# highly autocorrelated, not an actual spread across different days -- and
+# used to be enough to clear MIN_BASELINE_SAMPLES on its own right after a
+# fresh deploy. That produced a median/MAD computed from one near-constant
+# hour, which then scored any real swing later that same slot as absurdly
+# many "sigma" (e.g. 800+) instead of correctly falling back to EWMA during
+# this early rollout window. 5 days is a light week's worth of real history.
+MIN_BASELINE_DAYS = 5
+
+# Floor on MAD (before MAD_SCALE is applied), in the same units as the
+# metric itself (percentage points for cpu_usage/ram_usage). Guards against
+# the same failure mode as MIN_BASELINE_DAYS from a different angle: even
+# with enough distinct days, a genuinely very stable slot can still have a
+# tiny-but-nonzero MAD, and dividing by something close to zero turns a
+# modest, real change into a triple-digit z-score. This does not hide a
+# real anomaly -- it just stops the denominator from collapsing to noise.
+MIN_MAD_FLOOR = 1.0
+
 # EWMA smoothing factor for the fallback path. Lower = slower to adapt, less
 # sensitive to noise. This value updates roughly over ~1-2 hours of 1-minute ticks.
 EWMA_ALPHA = 0.02
@@ -146,12 +166,15 @@ def score_current_value(db: Session, hostname: str, metric_name: str, current_va
         baseline is not None
         and getattr(baseline, "sample_count", None) not in (None,)
         and baseline.sample_count >= MIN_BASELINE_SAMPLES
+        and getattr(baseline, "distinct_days", None) not in (None,)
+        and baseline.distinct_days >= MIN_BASELINE_DAYS
         and getattr(baseline, "mad", None)
         and baseline.mad > 0
     )
 
     if use_baseline:
-        z = (current_value - baseline.median) / (MAD_SCALE * baseline.mad)
+        effective_mad = max(baseline.mad, MIN_MAD_FLOOR)
+        z = (current_value - baseline.median) / (MAD_SCALE * effective_mad)
         return z, severity_from_zscore(z), "robust_zscore", baseline.sample_count
 
     # Fallback: EWMA, no (weekday, hour) table needed.

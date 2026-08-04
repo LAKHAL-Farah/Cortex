@@ -12,6 +12,11 @@ services:
       POSTGRES_DB: cortex
     volumes:
       - cortex_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortex"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
       - cortex-net
 
@@ -19,6 +24,9 @@ services:
     build:
       context: ../services/api
       network: host
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
       CORTEX_API_KEY: ${CORTEX_API_KEY}

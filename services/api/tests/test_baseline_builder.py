@@ -9,7 +9,7 @@ These pin down the exact gap that caused every AnomalyFlag to come back with
 "method": "ewma_fallback": the `baselines` table was never populated by
 anything in production code. compute_baselines() is what now populates it.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import models
 from app.services.baseline_builder import compute_baselines
-from app.services.anomaly_detector import score_current_value, MIN_BASELINE_SAMPLES
+from app.services.anomaly_detector import score_current_value, MIN_BASELINE_SAMPLES, MIN_BASELINE_DAYS
 
 
 @pytest.fixture
@@ -63,6 +63,9 @@ def test_compute_baselines_writes_median_and_mad(db, monkeypatch):
     )
     assert baseline is not None
     assert baseline.sample_count == 12
+    # All 12 points came from the same single hour -- one real calendar day,
+    # regardless of how many raw points it produced.
+    assert baseline.distinct_days == 1
     # Median should sit near the tight cluster, essentially unmoved by the
     # single 90.0 outlier -- this is the whole point of using median/MAD.
     assert 24.0 <= baseline.median <= 26.0
@@ -112,10 +115,18 @@ def test_thin_slot_below_min_points_is_not_stored(db, monkeypatch):
 def test_end_to_end_switches_from_fallback_to_robust_zscore(db, monkeypatch):
     """The behavior the user actually cares about: before compute_baselines()
     has run, score_current_value() must fall back to EWMA (correct, expected
-    behavior for a slot with no data yet). After it runs with enough samples,
-    the exact same call should switch to robust_zscore automatically -- no
-    other code changes required, since anomaly_detector.py already handles
-    this switch on its own once `baselines` is populated.
+    behavior for a slot with no data yet). After it runs with enough samples
+    spread across enough distinct days, the exact same call should switch to
+    robust_zscore automatically -- no other code changes required, since
+    anomaly_detector.py already handles this switch on its own once
+    `baselines` is populated.
+
+    The samples are deliberately spread across MIN_BASELINE_DAYS separate
+    Wednesdays rather than crammed into one hour: a single hour's worth of
+    5-minute-step points all comes from one real occurrence of this
+    (weekday, hour) slot, which clears MIN_BASELINE_SAMPLES without the slot
+    ever having seen real day-to-day variation -- exactly the thin-baseline
+    case MIN_BASELINE_DAYS exists to catch.
     """
     import app.services.baseline_builder as mod
 
@@ -129,12 +140,50 @@ def test_end_to_end_switches_from_fallback_to_robust_zscore(db, monkeypatch):
     )
     assert method == "ewma_fallback"
 
-    # Populate the baseline with enough clean samples. A little jitter is
-    # needed -- an all-identical baseline has mad == 0, which
-    # score_current_value() correctly refuses to trust (division by zero),
-    # exactly like a real (weekday, hour) slot would never be perfectly flat.
-    values = [25.0, 24.5, 25.5, 25.0, 24.8, 25.2, 25.0, 24.6, 25.4, 25.0]
-    assert len(values) == MIN_BASELINE_SAMPLES
+    # Populate the baseline with enough clean samples across enough distinct
+    # days. A little jitter is needed -- an all-identical baseline has
+    # mad == 0, which score_current_value() correctly refuses to trust
+    # (division by zero), exactly like a real (weekday, hour) slot would
+    # never be perfectly flat.
+    per_day_values = [25.0, 24.5, 25.5, 25.0, 24.8, 25.2, 25.0, 24.6, 25.4, 25.0]
+    assert len(per_day_values) == MIN_BASELINE_SAMPLES
+    points = []
+    for i, v in enumerate(per_day_values):
+        day = base + timedelta(weeks=i % MIN_BASELINE_DAYS)
+        points.append([_ts(day.replace(minute=(i * 5) % 60)), str(v)])
+
+    def fake_query_range(promql, start, end, step):
+        return [{"metric": {"instance": "host1:9100"}, "values": points}]
+
+    monkeypatch.setattr(mod, "METRICS", {"cpu_usage": "dummy"})
+    monkeypatch.setattr(mod.prometheus_client, "query_range", fake_query_range)
+    compute_baselines(db)
+
+    baseline = (
+        db.query(models.Baseline)
+        .filter_by(hostname="host1", metric_name="cpu_usage", weekday=weekday, hour=hour)
+        .first()
+    )
+    assert baseline.distinct_days >= MIN_BASELINE_DAYS
+
+    # After: same slot now has a sufficiently-populated, multi-day baseline -> robust_zscore.
+    z, severity, method, baseline_n = score_current_value(
+        db, "host1", "cpu_usage", 25.0, weekday=weekday, hour=hour
+    )
+    assert method == "robust_zscore"
+    assert baseline_n == MIN_BASELINE_SAMPLES
+
+
+def test_still_falls_back_when_samples_cleared_but_all_from_one_day(db, monkeypatch):
+    """The bug this whole file exists to guard against: MIN_BASELINE_SAMPLES
+    clears easily from a single hour (12 points at a 5-minute step) right
+    after a fresh deploy, but that's one real day of data, not a spread. This
+    must keep using EWMA until enough distinct days have actually gone by."""
+    import app.services.baseline_builder as mod
+
+    weekday, hour = 2, 13
+    base = datetime(2026, 7, 15, hour, 0)  # a Wednesday
+    values = [25.0, 24.5, 25.5, 25.0, 24.8, 25.2, 25.0, 24.6, 25.4, 25.0, 25.1, 24.9]
     points = [[_ts(base.replace(minute=(i * 5) % 60)), str(v)] for i, v in enumerate(values)]
 
     def fake_query_range(promql, start, end, step):
@@ -144,9 +193,7 @@ def test_end_to_end_switches_from_fallback_to_robust_zscore(db, monkeypatch):
     monkeypatch.setattr(mod.prometheus_client, "query_range", fake_query_range)
     compute_baselines(db)
 
-    # After: same slot now has a sufficiently-populated baseline -> robust_zscore.
-    z, severity, method, baseline_n = score_current_value(
+    z, severity, method, _ = score_current_value(
         db, "host1", "cpu_usage", 25.0, weekday=weekday, hour=hour
     )
-    assert method == "robust_zscore"
-    assert baseline_n == MIN_BASELINE_SAMPLES
+    assert method == "ewma_fallback"

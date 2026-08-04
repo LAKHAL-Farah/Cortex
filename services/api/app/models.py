@@ -152,6 +152,14 @@ class Baseline(Base):
     median = Column(Float, nullable=False)
     mad = Column(Float, nullable=False)
     sample_count = Column(Integer, nullable=False, default=0)
+    # Distinct calendar days that contributed a sample to this slot, as
+    # opposed to sample_count's raw point count. A single hour's worth of
+    # 5-minute-step points (up to 12) all come from *one* real occurrence of
+    # this (weekday, hour) and are highly autocorrelated -- they can clear
+    # MIN_BASELINE_SAMPLES without the slot having ever actually seen a
+    # second day, which is what let brand-new/thin history get trusted as a
+    # real baseline (see anomaly_detector.MIN_BASELINE_DAYS).
+    distinct_days = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (

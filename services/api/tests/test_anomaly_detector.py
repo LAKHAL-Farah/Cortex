@@ -22,6 +22,8 @@ from app.services.anomaly_detector import (
     severity_from_zscore,
     detect_anomalies,
     MIN_BASELINE_SAMPLES,
+    MIN_BASELINE_DAYS,
+    MIN_MAD_FLOOR,
 )
 
 
@@ -36,10 +38,16 @@ def db():
 
 
 def make_baseline(db, hostname="host1", metric_name="cpu_usage", weekday=2, hour=13,
-                   median=25.0, mad=1.5, sample_count=36):
+                   median=25.0, mad=1.5, sample_count=36, distinct_days=None):
+    # Default distinct_days comfortably clears MIN_BASELINE_DAYS so existing
+    # "well populated baseline" tests don't have to know about day-coverage
+    # gating unless that's specifically what they're testing.
+    if distinct_days is None:
+        distinct_days = max(MIN_BASELINE_DAYS, 7)
     b = models.Baseline(
         hostname=hostname, metric_name=metric_name, weekday=weekday, hour=hour,
         mean=median, stddev=mad, median=median, mad=mad, sample_count=sample_count,
+        distinct_days=distinct_days,
     )
     db.add(b)
     db.commit()
@@ -124,6 +132,33 @@ def test_falls_back_to_ewma_when_baseline_too_thin(db):
         db, "host1", "cpu_usage", 25.0, weekday=2, hour=13
     )
     assert method == "ewma_fallback"
+
+
+def test_falls_back_to_ewma_when_baseline_spans_too_few_days(db):
+    """Enough raw points (sample_count clears MIN_BASELINE_SAMPLES) but they
+    all came from fewer than MIN_BASELINE_DAYS distinct calendar days -- e.g.
+    one hour's worth of 5-minute-step points right after a fresh deploy.
+    That's not a real day-to-day spread yet, so this must still fall back to
+    EWMA instead of trusting a median/MAD built from one autocorrelated hour."""
+    make_baseline(db, sample_count=MIN_BASELINE_SAMPLES + 8, distinct_days=1)
+    z, severity, method, baseline_n = score_current_value(
+        db, "host1", "cpu_usage", 25.0, weekday=2, hour=13
+    )
+    assert method == "ewma_fallback"
+
+
+def test_mad_floor_prevents_absurd_zscore_on_near_zero_mad(db):
+    """A well-populated, multi-day baseline slot can still legitimately have
+    a tiny MAD (a genuinely very stable hour). Without a floor, a modest real
+    swing divided by a near-zero MAD produces an absurd, meaningless z-score
+    (hundreds of "sigma") instead of a sane severity."""
+    make_baseline(db, median=74.5, mad=0.005, sample_count=40, distinct_days=10)
+    current_value = 80.0  # a real but modest jump, not an 800-sigma event
+    z, severity, method, _ = score_current_value(
+        db, "host1", "cpu_usage", current_value, weekday=2, hour=13
+    )
+    assert method == "robust_zscore"
+    assert abs(z) < 20  # sane bound; without the floor this would be in the thousands
 
 
 def test_ewma_state_persists_and_adapts_across_calls(db):

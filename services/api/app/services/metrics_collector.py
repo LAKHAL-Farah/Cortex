@@ -227,14 +227,36 @@ def collect_metrics():
 
 
 
-def get_history(instance: str, minutes: int = 60, step: str = "15s"):
+def _step_for_range(minutes: int) -> str:
+    """Pick a step size that scales with the requested range.
+
+    A fixed 15s step was fine for the default 60-minute window, but for
+    longer ranges (6h/24h/7d) it produces far more points than Prometheus's
+    query_range endpoint allows per series (it caps resolution and returns
+    an error once you cross it). That error was being swallowed by the
+    broad except in get_history() below, so the series silently came back
+    empty and the UI fell back to a flat 2-point line -- which is why
+    switching time ranges looked like it wasn't doing anything: every range
+    past a certain size rendered the exact same fallback line.
+
+    Targeting ~300 points keeps every range chart-worthy without getting
+    anywhere near Prometheus's limit, while never going below the original
+    15s floor for short ranges where finer resolution is cheap anyway.
+    """
+    target_points = 300
+    step_seconds = max(15, (minutes * 60) // target_points)
+    return f"{int(step_seconds)}s"
+
+
+def get_history(instance: str, minutes: int = 60, step: str | None = None):
     end = time.time()
     start = end - minutes * 60
+    resolved_step = step if step is not None else _step_for_range(minutes)
     out = {}
     for name, promql in METRIC_QUERIES.items():
         scoped = f'({promql}){{instance="{instance}"}}' if "{{instance" not in promql else promql
         try:
-            results = query_range(scoped, start, end, step)
+            results = query_range(scoped, start, end, resolved_step)
             series = []
             if results:
                 if len(results) == 1:

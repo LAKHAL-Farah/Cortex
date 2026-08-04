@@ -91,6 +91,10 @@ def compute_baselines(db: Session, lookback_days: int = LOOKBACK_DAYS) -> int:
 
         # hostname -> (weekday, hour) -> [values]
         buckets: dict[str, dict[tuple[int, int], list[float]]] = defaultdict(lambda: defaultdict(list))
+        # hostname -> (weekday, hour) -> {calendar dates seen}. Kept separate
+        # from `buckets` because what we need out of it is len(set), not the
+        # values themselves.
+        day_sets: dict[str, dict[tuple[int, int], set]] = defaultdict(lambda: defaultdict(set))
 
         for series in series_list:
             hostname = resolve_hostname(db, series["metric"])
@@ -100,7 +104,9 @@ def compute_baselines(db: Session, lookback_days: int = LOOKBACK_DAYS) -> int:
                 except (TypeError, ValueError):
                     continue
                 dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-                buckets[hostname][(dt.weekday(), dt.hour)].append(value)
+                slot = (dt.weekday(), dt.hour)
+                buckets[hostname][slot].append(value)
+                day_sets[hostname][slot].add(dt.date())
 
         for hostname, slot_map in buckets.items():
             for (weekday, hour), values in slot_map.items():
@@ -111,6 +117,7 @@ def compute_baselines(db: Session, lookback_days: int = LOOKBACK_DAYS) -> int:
                 mad = _median_absolute_deviation(values, median)
                 mean = statistics.fmean(values)
                 stddev = statistics.pstdev(values)
+                distinct_days = len(day_sets[hostname][(weekday, hour)])
 
                 existing = (
                     db.query(models.Baseline)
@@ -123,13 +130,14 @@ def compute_baselines(db: Session, lookback_days: int = LOOKBACK_DAYS) -> int:
                     existing.median = median
                     existing.mad = mad
                     existing.sample_count = len(values)
+                    existing.distinct_days = distinct_days
                     existing.updated_at = datetime.utcnow()
                 else:
                     db.add(models.Baseline(
                         hostname=hostname, metric_name=metric_name,
                         weekday=weekday, hour=hour,
                         mean=mean, stddev=stddev, median=median, mad=mad,
-                        sample_count=len(values),
+                        sample_count=len(values), distinct_days=distinct_days,
                     ))
                 slots_written += 1
 
