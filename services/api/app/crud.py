@@ -20,6 +20,8 @@ def get_node(db: Session, node_id: uuid.UUID) -> models.Node | None:
 def get_node_by_ip(db: Session, ip_address: str) -> models.Node | None:
     return db.scalar(select(models.Node).where(models.Node.ip_address == ip_address))
 
+def get_node_by_hostname(db: Session, hostname: str) -> models.Node | None:
+    return db.scalar(select(models.Node).where(models.Node.hostname == hostname))
 
 def create_node(db: Session, payload: schemas.NodeCreate) -> models.Node:
     node = models.Node(**payload.model_dump())

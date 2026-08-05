@@ -1,9 +1,7 @@
-
 import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 from sqlalchemy import text
 from .db import engine, SessionLocal
@@ -17,19 +15,31 @@ from .routers import baselines
 from .services.anomaly_detector import detect_anomalies
 from .services.baseline_builder import compute_baselines
 from .services.node_seeder import seed_nodes_from_file_sd
-
+from .services.forecast_dataset_builder import build_dataset
+from .routers import forecast
+from .services.forecast_trainer import train_all_models
 logger = logging.getLogger(__name__)
 
 # How often detect_anomalies() re-scores the latest Prometheus values. The
 # EWMA fallback's alpha (see anomaly_detector.EWMA_ALPHA) is tuned assuming
 # ~1-minute ticks, so this is the default.
 ANOMALY_DETECTION_INTERVAL_SECONDS = int(os.getenv("ANOMALY_DETECTION_INTERVAL_SECONDS", "60"))
-
 # How often the (weekday, hour) baselines table is rebuilt from Prometheus
 # history. Hourly is plenty -- a single slot's stats don't meaningfully change
 # faster than that, and it keeps the range-query load on Prometheus low.
 BASELINE_REFRESH_INTERVAL_SECONDS = int(os.getenv("BASELINE_REFRESH_INTERVAL_SECONDS", "3600"))
 
+# How often the forecasting dataset (cpu/memory/disk history CSV) is rebuilt
+# from Prometheus. Forecasting looks at day/week-scale trends (tomorrow, 7d,
+# 30d out), so unlike anomaly detection or baselines this doesn't need to be
+# frequent -- daily is enough to track the trend and keeps the 14-day
+# range-query cheap and infrequent on Prometheus.
+FORECAST_DATASET_REFRESH_INTERVAL_SECONDS = int(os.getenv("FORECAST_DATASET_REFRESH_INTERVAL_SECONDS", "86400"))
+
+# How often forecasting models are retrained from the latest dataset.
+# Same cadence as the dataset rebuild -- no point retraining more often
+# than the data itself changes.
+FORECAST_TRAINING_INTERVAL_SECONDS = int(os.getenv("FORECAST_TRAINING_INTERVAL_SECONDS", "86400"))
 
 async def _run_periodic(fn, interval_seconds: float, name: str) -> None:
     """Runs fn(db) in a worker thread on a fixed interval, forever.
@@ -53,6 +63,27 @@ async def _run_periodic(fn, interval_seconds: float, name: str) -> None:
         await asyncio.sleep(interval_seconds)
 
 
+async def _run_periodic_no_db(fn, interval_seconds: float, name: str) -> None:
+    """Same as _run_periodic, but for jobs that don't take a db session
+    (forecast dataset builder writes straight to a CSV, not the database).
+    """
+    while True:
+        try:
+            await asyncio.to_thread(fn, "/app/forecast_dataset.csv")
+        except Exception:
+            logger.exception("%s pass failed", name)
+        await asyncio.sleep(interval_seconds)
+
+async def _run_periodic_no_args(fn, interval_seconds: float, name: str) -> None:
+    """Same as _run_periodic, but for jobs that take no arguments at all
+    (forecast_trainer reads its own dataset path from env, writes .pkl files)."""
+    while True:
+        try:
+            await asyncio.to_thread(fn)
+        except Exception:
+            logger.exception("%s pass failed", name)
+        await asyncio.sleep(interval_seconds)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # If the DB is empty (fresh deploy, or infra that was provisioned by
@@ -74,6 +105,12 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(
             _run_periodic(compute_baselines, BASELINE_REFRESH_INTERVAL_SECONDS, "baseline refresh")
         ),
+        asyncio.create_task(
+            _run_periodic_no_db(build_dataset, FORECAST_DATASET_REFRESH_INTERVAL_SECONDS, "forecast dataset build")
+        ),
+        asyncio.create_task(
+            _run_periodic_no_args(train_all_models, FORECAST_TRAINING_INTERVAL_SECONDS, "forecast model training")
+),
     ]
     try:
         yield
@@ -90,15 +127,17 @@ app.include_router(dashboard.router)
 app.include_router(logs.router)
 app.include_router(anomalies.router)
 app.include_router(baselines.router)
+app.include_router(forecast.router)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.get("/health/db")
 def health_db():
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     return {"db": "ok"}
-
-
