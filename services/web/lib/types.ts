@@ -79,7 +79,16 @@ export interface BaselineSlot {
   sample_count: number;
   updated_at: string | null;
 }
+export interface ForecastPoint {
+  day: "tomorrow" | "7_days" | "30_days";
+  value: number;
+}
 
+export interface ForecastResult {
+  hostname: string;
+  metric: string;
+  forecast: ForecastPoint[];
+}
 /** One row per anomaly episode (Alerts > History), as opposed to AnomalyFlag
  * which only ever reflects the current state per host/metric. */
 export interface AnomalyEvent {
@@ -95,3 +104,4 @@ export interface AnomalyEvent {
   resolved_at: string | null; // ISO 8601, null while still active
   is_active: boolean;
 }
+
