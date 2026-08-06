@@ -7,12 +7,16 @@ without a live cluster), but for the OpenStack side: `topology_sync.py`
 OpenStack in the sandbox. This gives it one.
 
 It's a small FastAPI app (`app.py`) that implements just enough of the
-Keystone v3 / Nova v2.1 / Neutron v2.0 REST surface for `openstacksdk`'s
-list calls to work:
+Keystone v3 / Nova v2.1 / Cinder v3 / Neutron v2.0 REST surface for
+`openstacksdk`'s list calls to work:
 
 - Keystone: `POST /v3/auth/tokens` (issues a fake token + service catalog
-  pointing back at itself for compute/network)
+  pointing back at itself for compute/block-storage/network)
 - Nova: `GET /os-hypervisors[/detail]`, `GET /os-services`
+- Cinder: `GET /volume/v3` (version discovery), `GET /volume/v3/os-services`
+  -- catalog `type` is `block-storage` (that's the literal string
+  `openstacksdk`'s `conn.block_storage` proxy looks up, not `cinder` or
+  `volume`)
 - Neutron: `GET /networks`, `/subnets`, `/routers`, `/floatingips`, `/agents`
 
 **Not a real OpenStack** — no writes, no auth checks (any username/password
@@ -31,6 +35,12 @@ registry already know about:
 |------------------|-----------|-----------------------------------|
 | compute1-sim     | 10.0.1.21 | `[computes]` in ansible-sandbox   |
 | compute2-sim     | 10.0.1.22 | `[computes]` in ansible-sandbox   |
+
+Cinder services reuse `controller-sim`/`storage-sim` the same way -- one
+`cinder-scheduler` on `controller-sim`, and two on `storage-sim`
+(`cinder-backup` with a plain host, `cinder-volume` as `storage-sim@lvmdriver-1`
+so `topology_sync._parse_cinder_host`'s `host@backend` split has something
+real to exercise).
 
 Plus one network/subnet pair per sandbox subnet (`10.0.1.0/24`,
 `10.0.2.0/24`), one router, and one floating IP. Edit the lists at the top
@@ -76,11 +86,13 @@ import openstack
 conn = openstack.connect()
 print([h.name for h in conn.compute.hypervisors()])
 print([n.name for n in conn.network.networks()])
+print([(s.binary, s.host) for s in conn.block_storage.services()])
 "
 ```
 
-Expected: `['compute1-sim', 'compute2-sim']` and
-`['sandbox-net', 'sandbox-storage-net']`.
+Expected: `['compute1-sim', 'compute2-sim']`,
+`['sandbox-net', 'sandbox-storage-net']`, and
+`[('cinder-scheduler', 'controller-sim'), ('cinder-backup', 'storage-sim'), ('cinder-volume', 'storage-sim@lvmdriver-1')]`.
 
 ## Once topology_sync.py exists (Phase 2)
 

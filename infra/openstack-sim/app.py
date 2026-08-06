@@ -21,6 +21,10 @@ _BASE = f"http://{SIM_HOST}:{SIM_PORT}"
 IDENTITY_URL = f"{_BASE}/v3"
 COMPUTE_URL = f"{_BASE}/v2.1"
 NETWORK_URL = f"{_BASE}/v2.0"
+# Own path prefix (not "/v3", which is already Keystone's) -- mirrors how
+# COMPUTE_URL/NETWORK_URL each get their own prefix so version-discovery
+# GETs against this endpoint don't collide with the identity ones.
+BLOCK_STORAGE_URL = f"{_BASE}/volume/v3"
 
 # ---- seed data, mirrors infra/ansible-sandbox's controller-sim/compute*-sim ----
 HYPERVISORS = [
@@ -63,6 +67,15 @@ NOVA_SERVICES = [
     {"id": 2, "binary": "nova-compute", "host": "compute2-sim", "zone": "nova", "status": "enabled", "state": "up"},
     {"id": 3, "binary": "nova-scheduler", "host": "controller-sim", "zone": "internal", "status": "enabled", "state": "up"},
     {"id": 4, "binary": "nova-conductor", "host": "controller-sim", "zone": "internal", "status": "enabled", "state": "up"},
+]
+
+CINDER_SERVICES = [
+    # controller-sim runs the control-plane pieces, same as it does for Nova.
+    {"id": 1, "binary": "cinder-scheduler", "host": "controller-sim", "zone": "internal", "status": "enabled", "state": "up"},
+    {"id": 2, "binary": "cinder-backup", "host": "storage-sim", "zone": "nova", "status": "enabled", "state": "up"},
+    # `host@backend` -- exercises topology_sync._parse_cinder_host's split,
+    # same as a real multi-backend Cinder deployment would report.
+    {"id": 3, "binary": "cinder-volume", "host": "storage-sim@lvmdriver-1", "zone": "nova", "status": "enabled", "state": "up"},
 ]
 
 NETWORKS = [
@@ -204,6 +217,19 @@ async def issue_token(request: Request):
                         {"id": "network-pub", "interface": "public", "region": "RegionOne", "url": NETWORK_URL},
                     ],
                 },
+                {
+                    # openstacksdk's block_storage proxy looks this up by
+                    # service_type == "block-storage" specifically (see
+                    # openstack/_services_mixin.py) -- that's the string
+                    # that must match here, "cinder"/"volume" are just
+                    # display name / aliases elsewhere, not this.
+                    "type": "block-storage",
+                    "name": "cinder",
+                    "id": "block-storage-sim",
+                    "endpoints": [
+                        {"id": "block-storage-pub", "interface": "public", "region": "RegionOne", "url": BLOCK_STORAGE_URL},
+                    ],
+                },
             ],
         }
     }
@@ -247,6 +273,27 @@ def get_hypervisor(hv_id: str):
 @app.get("/v2.1/os-services")
 def list_services():
     return {"services": NOVA_SERVICES}
+
+
+# -------------------------------------------------------------- cinder --
+@app.get("/volume/v3")
+def block_storage_version():
+    # keystoneauth1's get_api_major_version() GETs this before trusting the
+    # catalog entry (same as it does for Nova's /v2.1) -- without it,
+    # conn.block_storage.* calls fail version discovery even once the
+    # catalog entry above exists.
+    return {
+        "version": {
+            "id": "v3.0",
+            "status": "CURRENT",
+            "links": [{"rel": "self", "href": BLOCK_STORAGE_URL}],
+        }
+    }
+
+
+@app.get("/volume/v3/os-services")
+def list_cinder_services():
+    return {"services": CINDER_SERVICES}
 
 
 # ---------------------------------------------------------------- neutron --
