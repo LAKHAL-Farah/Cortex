@@ -24,7 +24,6 @@ services:
       # CORTEX_OPENSTACK_HOST_DIR, real creds, prod-only) with a fake
       # clouds.yaml that points at openstack-sim below -- no real cluster,
       # no real credentials needed to test the topology graph locally.
-      - ./openstack-sim/clouds.sandbox.yaml:/etc/openstack/clouds.yaml:ro
 
     networks:
       - cortex-net
