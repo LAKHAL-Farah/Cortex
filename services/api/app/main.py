@@ -18,6 +18,7 @@ from .services.node_seeder import seed_nodes_from_file_sd
 from .services.forecast_dataset_builder import build_dataset
 from .routers import forecast
 from .services.forecast_trainer import train_all_models
+from . import graph_db
 logger = logging.getLogger(__name__)
 
 # How often detect_anomalies() re-scores the latest Prometheus values. The
@@ -98,6 +99,15 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    try:
+        await asyncio.to_thread(graph_db.apply_schema_constraints)
+    except Exception:
+        # Non-fatal: the rest of the API doesn't depend on the topology
+        # graph, and topology_sync's own MERGE calls will keep working even
+        # without constraints (just without the uniqueness guarantee) --
+        # log and move on rather than blocking startup.
+        logger.exception("topology graph schema bootstrap failed")
+
     tasks = [
         asyncio.create_task(
             _run_periodic(detect_anomalies, ANOMALY_DETECTION_INTERVAL_SECONDS, "anomaly detection")
@@ -118,6 +128,7 @@ async def lifespan(app: FastAPI):
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        graph_db.close_driver()
 
 
 app = FastAPI(title="Cortex API", version="0.1.0", lifespan=lifespan)

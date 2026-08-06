@@ -20,10 +20,34 @@ services:
     networks:
       - cortex-net
 
+  neo4j:
+    image: neo4j:5-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${CORTEX_NEO4J_PASSWORD}
+      # Community Edition ships one database only; keep it small (topology
+      # graph is a few hundred vertices/edges at RIF SAS scale).
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    volumes:
+      - cortex_neo4jdata:/data
+    ports:
+      - "127.0.0.1:7474:7474"   # Neo4j Browser (http)
+      - "127.0.0.1:7687:7687"   # Bolt (driver protocol)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cortex-net
+
   api:
     build: ../services/api
     depends_on:
       postgres:
+        condition: service_healthy
+      neo4j:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
@@ -31,11 +55,16 @@ services:
       PROMETHEUS_FILE_SD_PATH: /file_sd/nodes.json
       CORTEX_ANSIBLE_DIR: ${CORTEX_ANSIBLE_DIR:-/infra/ansible}
       ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
+      OS_CLIENT_CONFIG_FILE: /etc/openstack/clouds.yaml
+      OS_CLOUD: ${OS_CLOUD:-cortex-reader}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_PASSWORD: ${CORTEX_NEO4J_PASSWORD}
     volumes:
       - ../services/api:/app
       - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd
       - ${CORTEX_ANSIBLE_HOST_DIR:-../infra/ansible}:/infra/ansible
       - ${CORTEX_SSH_KEY_HOST_DIR:-./.sandbox-ssh}:/root/.ssh:ro
+      - ${CORTEX_OPENSTACK_HOST_DIR:-./.local-openstack}:/etc/openstack:ro
     ports:
       - "127.0.0.1:8000:8000"
     networks:
@@ -54,4 +83,5 @@ services:
 
 volumes:
   cortex_pgdata:
+  cortex_neo4jdata:
 
