@@ -37,6 +37,6 @@ build/
 *.egg-info/
 
 # Generated datasets / ML artifacts
-
-*.csv*.pkl
+*.pkl
 *.csv
+
