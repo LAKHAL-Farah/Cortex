@@ -19,6 +19,7 @@ from .services.forecast_dataset_builder import build_dataset
 from .routers import forecast
 from .services.forecast_trainer import train_all_models
 from .services.topology_sync import sync_topology
+from .services.prometheus_health import sync_prometheus_health
 from . import graph_db
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,14 @@ FORECAST_TRAINING_INTERVAL_SECONDS = int(os.getenv("FORECAST_TRAINING_INTERVAL_S
 # adr-0002) -- 5 minutes is frequent enough to notice a new hypervisor or a
 # service flipping state without hammering the OpenStack API.
 TOPOLOGY_SYNC_INTERVAL_SECONDS = int(os.getenv("TOPOLOGY_SYNC_INTERVAL_SECONDS", "300"))
+
+# How often sync_prometheus_health() overlays `up{job="node_exporter"}"
+# onto :Node.health and recomputes :Service.state (see adr-0003). Runs far
+# more often than TOPOLOGY_SYNC_INTERVAL_SECONDS -- it only talks to
+# Prometheus (20s scrape interval, see infra/prometheus/prometheus.yml)
+# and Neo4j, never OpenStack, so there's no reason to tie its cadence to
+# the OpenStack poll.
+PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS = int(os.getenv("PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS", "30"))
 
 async def _run_periodic(fn, interval_seconds: float, name: str) -> None:
     """Runs fn(db) in a worker thread on a fixed interval, forever.
@@ -130,6 +139,13 @@ async def lifespan(app: FastAPI):
 ),
         asyncio.create_task(
             _run_periodic(sync_topology, TOPOLOGY_SYNC_INTERVAL_SECONDS, "topology sync")
+        ),
+        asyncio.create_task(
+            _run_periodic(
+                sync_prometheus_health,
+                PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS,
+                "prometheus health sync",
+            )
         ),
     ]
     try:

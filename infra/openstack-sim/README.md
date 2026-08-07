@@ -150,3 +150,59 @@ To see the mark-and-sweep in action, comment out `ROUTERS[0]` (or any
 other entity) in `app.py`, restart the `openstack-sim` container, run the
 sync again, and confirm the corresponding vertex (and any CONNECTS/SERVES
 edge pointing at it) is gone from the graph.
+
+## Testing the Prometheus cross-check (Phase 4) against this sim
+
+Phase 4 (`prometheus_health.py`, see
+`docs/architecture/adr-0003-prometheus-cross-check.md`) doesn't talk to
+`openstack-sim` at all -- it only reads `up{job="node_exporter"}` from the
+`prometheus` container and writes `Node.health`/`Service.state` to Neo4j.
+It does depend on a Phase 2/3 sync having already run at least once (so
+there's a `:Node`/`:Service` graph for it to overlay onto), and on
+`compute1-sim`/`compute2-sim`/`controller-sim`/`storage-sim` actually
+running `node_exporter` and being in Prometheus's file_sd targets --
+both already true once you've registered the sandbox hypervisors the
+normal way (a `sync_topology()` pass installs `node_exporter` on any new
+hypervisor and regenerates file_sd; see `ansible_runner.install_node_exporter`).
+
+With the sandbox stack up and at least one `sync_topology()` pass done:
+
+```bash
+# Run one Phase 4 pass (same call main.py's scheduler makes every
+# PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS, default 30s)
+docker compose exec api python3 -c "
+from app.services.prometheus_health import sync_prometheus_health
+import json
+print(json.dumps(sync_prometheus_health(), indent=2))
+"
+```
+
+Then check the graph, e.g. via `docker compose exec neo4j cypher-shell`:
+
+```cypher
+// Every Node should have an explicit health -- 'up' for every sandbox
+// node once node_exporter is installed and Prometheus has scraped it.
+MATCH (n:Node) RETURN n.id, n.health, n.health_checked_at;
+
+// openstack_state (OpenStack's raw report) vs. the reconciled state
+// (cross-checked against the host's Node.health) -- should agree ('up'/
+// 'up') for everything healthy in the sandbox.
+MATCH (s:Service) RETURN s.id, s.openstack_state, s.state;
+```
+
+To exercise the actual disagreement case (`openstack_state: up`,
+`Node.health: down` -> reconciled `state: unreachable`), stop one of the
+sim containers so Prometheus can no longer scrape its `node_exporter`
+while `openstack-sim` still reports its services as `up` (it's just
+static seed data in `app.py`, unaffected by the container's real state):
+
+```bash
+docker compose stop compute1-sim
+# wait for Prometheus's scrape_interval (20s) + a bit, then re-run the
+# Phase 4 pass above
+```
+
+Expect `nova-compute@compute1-sim` (and `neutron-openvswitch-agent@compute1-sim`)
+to show `openstack_state: up`, `state: unreachable`, and
+`compute1-sim`'s `Node.health` to read `down`. `docker compose start
+compute1-sim` and run another pass to see it flip back to `up`/`up`.

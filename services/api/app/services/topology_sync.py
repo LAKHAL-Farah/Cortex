@@ -17,6 +17,14 @@ for the edges that can legitimately change target -- router gateways,
 floating IP associations, agent hosting assignments -- the edges too) for
 anything OpenStack no longer reports.
 
+Phase 4 (`prometheus_health.py`, see
+docs/architecture/adr-0003-prometheus-cross-check.md) builds on top of
+this: it reads the `Service.openstack_state` this module writes below and
+reconciles it against the Prometheus-observed health of the `Node` a
+service `RUNS_ON` into `Service.state`. This module only ever writes
+`openstack_state` (OpenStack's own raw report) -- `state` is owned by
+Phase 4 and deliberately left untouched here.
+
 This is the one and only OpenStack polling loop (see
 docs/architecture/adr-0002-topology-graph.md, decision 3). It supersedes
 openstack_discovery.discover_new_computes(): registering a previously-unseen
@@ -172,6 +180,16 @@ def _sync_services_to_graph(session, services: list[dict]) -> None:
     # against was already added to $nodes in the same pass (see
     # sync_topology below), so RUNS_ON always has somewhere real to land
     # instead of silently creating a second, property-less Node vertex.
+    #
+    # `openstack_state`, not `state`: Phase 4 (prometheus_health.py, see
+    # docs/architecture/adr-0003-prometheus-cross-check.md) owns `state`
+    # as a value reconciled against the host's Prometheus-observed
+    # health -- this pass only ever writes OpenStack's own raw, unmodified
+    # report. Leaving `state` untouched here (rather than also setting it
+    # as a placeholder) is deliberate: a stale reconciled value would be
+    # actively misleading if left in place after a real disagreement, so
+    # it's better left absent until the next Phase 4 pass computes it
+    # fresh (adr-0003, consequences).
     session.run(
         """
         UNWIND $services AS svc
@@ -182,7 +200,7 @@ def _sync_services_to_graph(session, services: list[dict]) -> None:
             s.source = svc.source,
             s.zone = svc.zone,
             s.status = svc.status,
-            s.state = svc.state,
+            s.openstack_state = svc.state,
             s.last_synced_at = datetime()
         WITH s, svc
         MATCH (n:Node {id: svc.node_id})
