@@ -124,7 +124,15 @@ ROUTERS = [
         "name": "sandbox-router",
         "status": "ACTIVE",
         "admin_state_up": True,
-        "external_gateway_info": None,
+        # Gatewayed onto sandbox-net -- exercises topology_sync's
+        # Router-[:CONNECTS]->Network edge (via _gateway_network_id).
+        "external_gateway_info": {
+            "network_id": "8f3f0f4a-0000-0000-0000-000000000001",
+            "external_fixed_ips": [
+                {"subnet_id": "8f3f0f4a-0000-0000-0000-000000000011", "ip_address": "10.0.1.254"}
+            ],
+            "enable_snat": True,
+        },
         "project_id": "sandbox-project",
     },
 ]
@@ -146,6 +154,20 @@ NEUTRON_AGENTS = [
     {"id": "a3", "binary": "neutron-openvswitch-agent", "host": "compute1-sim", "agent_type": "Open vSwitch agent", "alive": True, "admin_state_up": True},
     {"id": "a4", "binary": "neutron-openvswitch-agent", "host": "compute2-sim", "agent_type": "Open vSwitch agent", "alive": True, "admin_state_up": True},
 ]
+
+# DHCP/L3 hosting-endpoint seed data -- what
+# GET /v2.0/agents/{agent_id}/dhcp-networks and .../l3-routers return,
+# keyed by agent id. Mirrors what conn.network.dhcp_agent_hosting_networks()
+# / conn.network.agent_hosted_routers() actually call in a real deployment.
+DHCP_AGENT_NETWORKS = {
+    # a2 (neutron-dhcp-agent@controller-sim) hosts DHCP for both sandbox networks.
+    "a2": [NETWORKS[0], NETWORKS[1]],
+}
+
+L3_AGENT_ROUTERS = {
+    # a1 (neutron-l3-agent@controller-sim) hosts the one sandbox router.
+    "a1": [ROUTERS[0]],
+}
 
 
 def _now_iso():
@@ -332,6 +354,16 @@ def list_floating_ips():
 @app.get("/v2.0/agents")
 def list_agents():
     return {"agents": NEUTRON_AGENTS}
+
+
+@app.get("/v2.0/agents/{agent_id}/dhcp-networks")
+def list_dhcp_agent_networks(agent_id: str):
+    return {"networks": DHCP_AGENT_NETWORKS.get(agent_id, [])}
+
+
+@app.get("/v2.0/agents/{agent_id}/l3-routers")
+def list_l3_agent_routers(agent_id: str):
+    return {"routers": L3_AGENT_ROUTERS.get(agent_id, [])}
 
 
 @app.get("/healthz")

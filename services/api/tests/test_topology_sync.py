@@ -46,6 +46,43 @@ def _svc(host, binary, availability_zone="nova", status="enabled", state="up", i
     )
 
 
+def _network(id, name="net", status="ACTIVE", is_admin_state_up=True, is_shared=False, project_id="proj"):
+    return types.SimpleNamespace(
+        id=id, name=name, status=status, is_admin_state_up=is_admin_state_up,
+        is_shared=is_shared, project_id=project_id,
+    )
+
+
+def _subnet(id, network_id, name="subnet", cidr="10.0.0.0/24", ip_version=4, gateway_ip="10.0.0.1"):
+    return types.SimpleNamespace(
+        id=id, network_id=network_id, name=name, cidr=cidr,
+        ip_version=ip_version, gateway_ip=gateway_ip,
+    )
+
+
+def _router(id, name="router", status="ACTIVE", is_admin_state_up=True, project_id="proj",
+            external_gateway_info=None):
+    return types.SimpleNamespace(
+        id=id, name=name, status=status, is_admin_state_up=is_admin_state_up,
+        project_id=project_id, external_gateway_info=external_gateway_info,
+    )
+
+
+def _fip(id, floating_network_id, router_id=None, floating_ip_address="203.0.113.1",
+         fixed_ip_address=None, status="ACTIVE"):
+    return types.SimpleNamespace(
+        id=id, floating_network_id=floating_network_id, router_id=router_id,
+        floating_ip_address=floating_ip_address, fixed_ip_address=fixed_ip_address, status=status,
+    )
+
+
+def _agent(id, binary, host, agent_type, is_alive=True, is_admin_state_up=True, availability_zone=None):
+    return types.SimpleNamespace(
+        id=id, binary=binary, host=host, agent_type=agent_type, is_alive=is_alive,
+        is_admin_state_up=is_admin_state_up, availability_zone=availability_zone,
+    )
+
+
 class _FakeResult:
     def __init__(self, record):
         self._record = record
@@ -61,6 +98,20 @@ class _FakeGraphStore:
     def __init__(self):
         self.nodes: dict[str, dict] = {}
         self.services: dict[str, dict] = {}
+        self.networks: dict[str, dict] = {}
+        self.subnets: dict[str, dict] = {}
+        self.routers: dict[str, dict] = {}
+        self.floating_ips: dict[str, dict] = {}
+        # Edges as {source_id: target_id} (single-target CONNECTS edges) or
+        # {source_id: {target_id, ...}} (multi-target SERVES edges) -- only
+        # ever populated when the fake's MATCH on the target side would
+        # actually have found something, same as real Neo4j.
+        self.subnet_network_edges: dict[str, str] = {}
+        self.router_gateway_edges: dict[str, str] = {}
+        self.fip_network_edges: dict[str, str] = {}
+        self.fip_router_edges: dict[str, str] = {}
+        self.dhcp_serves: dict[str, set] = {}
+        self.l3_serves: dict[str, set] = {}
 
 
 class _FakeSession:
@@ -101,6 +152,108 @@ class _FakeSession:
                 del self.store.nodes[nid]
             return _FakeResult({"removed": len(stale)})
 
+        # ---- Phase 3: Network/Subnet/Router/FloatingIP + CONNECTS/SERVES ----
+
+        if "MERGE (n:Network {id: net.id})" in query:
+            for net in kwargs["networks"]:
+                self.store.networks[net["id"]] = net
+            return _FakeResult(None)
+
+        if "MERGE (s:Subnet {id: sub.id})" in query:
+            for sub in kwargs["subnets"]:
+                self.store.subnets[sub["id"]] = sub
+                if sub["network_id"] in self.store.networks:
+                    self.store.subnet_network_edges[sub["id"]] = sub["network_id"]
+            return _FakeResult(None)
+
+        if "MERGE (router:Router {id: r.id})" in query:
+            for r in kwargs["routers"]:
+                self.store.routers[r["id"]] = r
+            return _FakeResult(None)
+
+        if "OPTIONAL MATCH (router)-[old:CONNECTS]->(:Network)" in query:
+            for r in kwargs["routers"]:
+                self.store.router_gateway_edges.pop(r["id"], None)
+            return _FakeResult(None)
+
+        if "MATCH (net:Network {id: r.gateway_network_id})" in query:
+            for r in kwargs["routers"]:
+                if r["id"] in self.store.routers and r["gateway_network_id"] in self.store.networks:
+                    self.store.router_gateway_edges[r["id"]] = r["gateway_network_id"]
+            return _FakeResult(None)
+
+        if "MERGE (f:FloatingIP {id: fip.id})" in query:
+            for fip in kwargs["fips"]:
+                self.store.floating_ips[fip["id"]] = fip
+                if fip["network_id"] in self.store.networks:
+                    self.store.fip_network_edges[fip["id"]] = fip["network_id"]
+            return _FakeResult(None)
+
+        if "OPTIONAL MATCH (f)-[old:CONNECTS]->(:Router)" in query:
+            for fip in kwargs["fips"]:
+                self.store.fip_router_edges.pop(fip["id"], None)
+            return _FakeResult(None)
+
+        if "MATCH (r:Router {id: fip.router_id})" in query:
+            for fip in kwargs["fips"]:
+                if fip["id"] in self.store.floating_ips and fip["router_id"] in self.store.routers:
+                    self.store.fip_router_edges[fip["id"]] = fip["router_id"]
+            return _FakeResult(None)
+
+        if "OPTIONAL MATCH (s)-[old:SERVES]->(:Network)" in query:
+            for aid in kwargs["agent_ids"]:
+                self.store.dhcp_serves.pop(aid, None)
+            return _FakeResult(None)
+
+        if "MATCH (net:Network {id: h.network_id})" in query:
+            for h in kwargs["hosting"]:
+                if h["service_id"] in self.store.services and h["network_id"] in self.store.networks:
+                    self.store.dhcp_serves.setdefault(h["service_id"], set()).add(h["network_id"])
+            return _FakeResult(None)
+
+        if "OPTIONAL MATCH (s)-[old:SERVES]->(:Router)" in query:
+            for aid in kwargs["agent_ids"]:
+                self.store.l3_serves.pop(aid, None)
+            return _FakeResult(None)
+
+        if "MATCH (r:Router {id: h.router_id})" in query:
+            for h in kwargs["hosting"]:
+                if h["service_id"] in self.store.services and h["router_id"] in self.store.routers:
+                    self.store.l3_serves.setdefault(h["service_id"], set()).add(h["router_id"])
+            return _FakeResult(None)
+
+        if "MATCH (v:Network)" in query and "DETACH DELETE" in query:
+            seen = set(kwargs["seen_ids"])
+            stale = [i for i in self.store.networks if i not in seen]
+            for i in stale:
+                del self.store.networks[i]
+            return _FakeResult({"removed": len(stale)})
+
+        if "MATCH (v:Subnet)" in query and "DETACH DELETE" in query:
+            seen = set(kwargs["seen_ids"])
+            stale = [i for i in self.store.subnets if i not in seen]
+            for i in stale:
+                del self.store.subnets[i]
+                self.store.subnet_network_edges.pop(i, None)
+            return _FakeResult({"removed": len(stale)})
+
+        if "MATCH (v:Router)" in query and "DETACH DELETE" in query:
+            seen = set(kwargs["seen_ids"])
+            stale = [i for i in self.store.routers if i not in seen]
+            for i in stale:
+                del self.store.routers[i]
+                self.store.router_gateway_edges.pop(i, None)
+            return _FakeResult({"removed": len(stale)})
+
+        if "MATCH (v:FloatingIP)" in query and "DETACH DELETE" in query:
+            seen = set(kwargs["seen_ids"])
+            stale = [i for i in self.store.floating_ips if i not in seen]
+            for i in stale:
+                del self.store.floating_ips[i]
+                self.store.fip_network_edges.pop(i, None)
+                self.store.fip_router_edges.pop(i, None)
+            return _FakeResult({"removed": len(stale)})
+
         return _FakeResult(None)
 
     def __enter__(self):
@@ -126,7 +279,12 @@ class _FakeDriver:
 
 class _FakeConn:
     def __init__(self, hypervisors=None, nova_services=None, cinder_services=None,
-                 hypervisors_raise=False, nova_services_raise=False, cinder_services_raise=False):
+                 hypervisors_raise=False, nova_services_raise=False, cinder_services_raise=False,
+                 networks=None, subnets=None, routers=None, floating_ips=None, neutron_agents=None,
+                 networks_raise=False, subnets_raise=False, routers_raise=False,
+                 floating_ips_raise=False, neutron_agents_raise=False,
+                 dhcp_hosting=None, dhcp_hosting_raise_for=None,
+                 l3_hosting=None, l3_hosting_raise_for=None):
         def _hypervisors(details=False):
             if hypervisors_raise:
                 raise RuntimeError("nova hypervisors unreachable")
@@ -144,6 +302,56 @@ class _FakeConn:
 
         self.compute = types.SimpleNamespace(hypervisors=_hypervisors, services=_nova_services)
         self.block_storage = types.SimpleNamespace(services=_cinder_services)
+
+        def _networks(**kw):
+            if networks_raise:
+                raise RuntimeError("neutron networks unreachable")
+            return iter(networks or [])
+
+        def _subnets(**kw):
+            if subnets_raise:
+                raise RuntimeError("neutron subnets unreachable")
+            return iter(subnets or [])
+
+        def _routers(**kw):
+            if routers_raise:
+                raise RuntimeError("neutron routers unreachable")
+            return iter(routers or [])
+
+        def _ips(**kw):
+            if floating_ips_raise:
+                raise RuntimeError("neutron floating ips unreachable")
+            return iter(floating_ips or [])
+
+        def _agents(**kw):
+            if neutron_agents_raise:
+                raise RuntimeError("neutron agents unreachable")
+            return iter(neutron_agents or [])
+
+        _dhcp_hosting = dhcp_hosting or {}
+        _dhcp_hosting_raise_for = dhcp_hosting_raise_for or set()
+        _l3_hosting = l3_hosting or {}
+        _l3_hosting_raise_for = l3_hosting_raise_for or set()
+
+        def _dhcp_agent_hosting_networks(agent, **kw):
+            if agent.id in _dhcp_hosting_raise_for:
+                raise RuntimeError(f"dhcp hosting unreachable for {agent.id}")
+            return iter(_dhcp_hosting.get(agent.id, []))
+
+        def _agent_hosted_routers(agent, **kw):
+            if agent.id in _l3_hosting_raise_for:
+                raise RuntimeError(f"l3 hosting unreachable for {agent.id}")
+            return iter(_l3_hosting.get(agent.id, []))
+
+        self.network = types.SimpleNamespace(
+            networks=_networks,
+            subnets=_subnets,
+            routers=_routers,
+            ips=_ips,
+            agents=_agents,
+            dhcp_agent_hosting_networks=_dhcp_agent_hosting_networks,
+            agent_hosted_routers=_agent_hosted_routers,
+        )
 
 
 def _patch_graph(monkeypatch):
@@ -384,3 +592,329 @@ def test_summary_counts_reflect_input_sizes(monkeypatch):
     assert result["cinder_services"] == 1
     assert result["graph_nodes"] == 4  # compute1, compute2, controller, storage
     assert result["graph_services"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Neutron networks/subnets/routers/floating IPs, agents, SERVES/
+# CONNECTS edges
+# ---------------------------------------------------------------------------
+
+def test_networks_subnets_routers_floating_ips_synced_with_connects_edges(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    net1 = _network("net-1")
+    router1 = _router("router-1", external_gateway_info={"network_id": "net-1"})
+    _set_conn(monkeypatch, _FakeConn(
+        networks=[net1],
+        subnets=[_subnet("subnet-1", network_id="net-1")],
+        routers=[router1],
+        floating_ips=[_fip("fip-1", floating_network_id="net-1", router_id="router-1")],
+    ))
+
+    result = topology_sync.sync_topology(db)
+
+    assert result["networks"] == 1
+    assert result["subnets"] == 1
+    assert result["routers"] == 1
+    assert result["floating_ips"] == 1
+    assert result["network_topology_ok"] is True
+
+    store = fake_driver.store
+    assert "net-1" in store.networks
+    assert "subnet-1" in store.subnets
+    assert "router-1" in store.routers
+    assert "fip-1" in store.floating_ips
+    # Subnet -[:CONNECTS]-> Network
+    assert store.subnet_network_edges["subnet-1"] == "net-1"
+    # Router -[:CONNECTS]-> Network (external gateway)
+    assert store.router_gateway_edges["router-1"] == "net-1"
+    # FloatingIP -[:CONNECTS]-> Network and -[:CONNECTS]-> Router
+    assert store.fip_network_edges["fip-1"] == "net-1"
+    assert store.fip_router_edges["fip-1"] == "router-1"
+
+
+def test_router_without_gateway_gets_no_connects_edge(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    _set_conn(monkeypatch, _FakeConn(
+        networks=[_network("net-1")],
+        routers=[_router("router-1", external_gateway_info=None)],
+    ))
+
+    topology_sync.sync_topology(db)
+
+    assert "router-1" not in fake_driver.store.router_gateway_edges
+
+
+def test_router_gateway_switching_networks_clears_old_edge(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    net1, net2 = _network("net-1"), _network("net-2")
+    router = _router("router-1", external_gateway_info={"network_id": "net-1"})
+    _set_conn(monkeypatch, _FakeConn(networks=[net1, net2], routers=[router]))
+    topology_sync.sync_topology(db)
+    assert fake_driver.store.router_gateway_edges["router-1"] == "net-1"
+
+    # Same router, now gatewayed onto net-2 instead.
+    router.external_gateway_info = {"network_id": "net-2"}
+    topology_sync.sync_topology(db)
+
+    assert fake_driver.store.router_gateway_edges["router-1"] == "net-2"
+
+
+def test_router_gateway_detached_removes_edge(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    net1 = _network("net-1")
+    router = _router("router-1", external_gateway_info={"network_id": "net-1"})
+    _set_conn(monkeypatch, _FakeConn(networks=[net1], routers=[router]))
+    topology_sync.sync_topology(db)
+    assert "router-1" in fake_driver.store.router_gateway_edges
+
+    router.external_gateway_info = None
+    topology_sync.sync_topology(db)
+
+    assert "router-1" not in fake_driver.store.router_gateway_edges
+
+
+def test_floating_ip_reassociated_to_different_router_clears_old_edge(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    net1 = _network("net-1")
+    router1, router2 = _router("router-1"), _router("router-2")
+    fip = _fip("fip-1", floating_network_id="net-1", router_id="router-1")
+    _set_conn(monkeypatch, _FakeConn(networks=[net1], routers=[router1, router2], floating_ips=[fip]))
+    topology_sync.sync_topology(db)
+    assert fake_driver.store.fip_router_edges["fip-1"] == "router-1"
+
+    fip.router_id = "router-2"
+    topology_sync.sync_topology(db)
+
+    assert fake_driver.store.fip_router_edges["fip-1"] == "router-2"
+
+
+def test_dhcp_agent_serves_its_hosted_networks(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    net1, net2 = _network("net-1"), _network("net-2")
+    dhcp_agent = _agent("a1", "neutron-dhcp-agent", "controller", "DHCP agent")
+    _set_conn(monkeypatch, _FakeConn(
+        networks=[net1, net2],
+        neutron_agents=[dhcp_agent],
+        dhcp_hosting={"a1": [net1, net2]},
+    ))
+
+    result = topology_sync.sync_topology(db)
+
+    assert result["neutron_agents"] == 1
+    assert result["dhcp_hosting_edges"] == 2
+    service_id = "neutron-dhcp-agent@controller"
+    assert service_id in fake_driver.store.services
+    assert fake_driver.store.dhcp_serves[service_id] == {"net-1", "net-2"}
+
+
+def test_l3_agent_serves_its_hosted_routers(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    router1 = _router("router-1")
+    l3_agent = _agent("a1", "neutron-l3-agent", "controller", "L3 agent")
+    _set_conn(monkeypatch, _FakeConn(
+        routers=[router1],
+        neutron_agents=[l3_agent],
+        l3_hosting={"a1": [router1]},
+    ))
+
+    result = topology_sync.sync_topology(db)
+
+    assert result["l3_hosting_edges"] == 1
+    service_id = "neutron-l3-agent@controller"
+    assert fake_driver.store.l3_serves[service_id] == {"router-1"}
+
+
+def test_dhcp_hosting_edge_removed_when_agent_stops_hosting_a_network(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    net1, net2 = _network("net-1"), _network("net-2")
+    dhcp_agent = _agent("a1", "neutron-dhcp-agent", "controller", "DHCP agent")
+    conn = _FakeConn(
+        networks=[net1, net2],
+        neutron_agents=[dhcp_agent],
+        dhcp_hosting={"a1": [net1, net2]},
+    )
+    _set_conn(monkeypatch, conn)
+    topology_sync.sync_topology(db)
+    service_id = "neutron-dhcp-agent@controller"
+    assert fake_driver.store.dhcp_serves[service_id] == {"net-1", "net-2"}
+
+    # Agent now only hosts net-1.
+    conn.network.dhcp_agent_hosting_networks = lambda agent, **kw: iter([net1])
+    topology_sync.sync_topology(db)
+
+    assert fake_driver.store.dhcp_serves[service_id] == {"net-1"}
+
+
+def test_one_agents_hosting_failure_does_not_touch_its_stale_edges_or_other_agents(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    net1 = _network("net-1")
+    router1 = _router("router-1")
+    dhcp_agent = _agent("a1", "neutron-dhcp-agent", "controller", "DHCP agent")
+    l3_agent = _agent("a2", "neutron-l3-agent", "controller", "L3 agent")
+    dhcp_service_id = "neutron-dhcp-agent@controller"
+    l3_service_id = "neutron-l3-agent@controller"
+
+    # First pass: both agents' hosting calls succeed.
+    _set_conn(monkeypatch, _FakeConn(
+        networks=[net1], routers=[router1], neutron_agents=[dhcp_agent, l3_agent],
+        dhcp_hosting={"a1": [net1]}, l3_hosting={"a2": [router1]},
+    ))
+    topology_sync.sync_topology(db)
+    assert fake_driver.store.dhcp_serves[dhcp_service_id] == {"net-1"}
+    assert fake_driver.store.l3_serves[l3_service_id] == {"router-1"}
+
+    # Second pass: the DHCP agent's hosting call now fails; the L3 agent's
+    # still succeeds.
+    _set_conn(monkeypatch, _FakeConn(
+        networks=[net1], routers=[router1], neutron_agents=[dhcp_agent, l3_agent],
+        dhcp_hosting={"a1": [net1]}, dhcp_hosting_raise_for={"a1"},
+        l3_hosting={"a2": [router1]},
+    ))
+    result = topology_sync.sync_topology(db)
+
+    # The DHCP agent's edge from the last successful pass is left alone
+    # (not wrongly cleared), and the L3 agent is unaffected.
+    assert fake_driver.store.dhcp_serves[dhcp_service_id] == {"net-1"}
+    assert fake_driver.store.l3_serves[l3_service_id] == {"router-1"}
+    assert result["dhcp_hosting_edges"] == 0
+    assert result["l3_hosting_edges"] == 1
+
+
+def test_neutron_agent_synced_as_service_running_on_its_host(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    ovs_agent = _agent("a3", "neutron-openvswitch-agent", "compute3", "Open vSwitch agent",
+                        is_alive=True, is_admin_state_up=True)
+    _set_conn(monkeypatch, _FakeConn(neutron_agents=[ovs_agent]))
+
+    result = topology_sync.sync_topology(db)
+
+    service_id = "neutron-openvswitch-agent@compute3"
+    svc = fake_driver.store.services[service_id]
+    assert svc["node_id"] == "compute3"
+    assert svc["source"] == "neutron"
+    assert svc["status"] == "enabled"
+    assert svc["state"] == "up"
+    # compute3 wasn't a known hypervisor, so it's graphed as a bare
+    # placeholder Node, same as an unresolved Nova/Cinder service host.
+    assert "compute3" in fake_driver.store.nodes
+    assert result["unresolved_hosts"] == 1
+
+
+def test_neutron_agent_down_and_disabled_maps_to_down_disabled(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    dead_agent = _agent("a1", "neutron-dhcp-agent", "controller", "DHCP agent",
+                         is_alive=False, is_admin_state_up=False)
+    _set_conn(monkeypatch, _FakeConn(neutron_agents=[dead_agent]))
+
+    topology_sync.sync_topology(db)
+
+    svc = fake_driver.store.services["neutron-dhcp-agent@controller"]
+    assert svc["state"] == "down"
+    assert svc["status"] == "disabled"
+
+
+def test_network_topology_sweep_removes_deleted_entities(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    net1 = _network("net-1")
+    _set_conn(monkeypatch, _FakeConn(
+        networks=[net1],
+        subnets=[_subnet("subnet-1", network_id="net-1")],
+        routers=[_router("router-1")],
+        floating_ips=[_fip("fip-1", floating_network_id="net-1")],
+    ))
+    topology_sync.sync_topology(db)
+    store = fake_driver.store
+    assert set(store.subnets) == {"subnet-1"}
+    assert set(store.routers) == {"router-1"}
+    assert set(store.floating_ips) == {"fip-1"}
+
+    # Next pass: only the network remains; subnet/router/floating IP were
+    # deleted in OpenStack.
+    _set_conn(monkeypatch, _FakeConn(networks=[net1]))
+    result = topology_sync.sync_topology(db)
+
+    assert result["swept_subnets"] == 1
+    assert result["swept_routers"] == 1
+    assert result["swept_floating_ips"] == 1
+    assert result["swept_networks"] == 0
+    assert set(store.networks) == {"net-1"}
+    assert store.subnets == {}
+    assert store.routers == {}
+    assert store.floating_ips == {}
+
+
+def test_neutron_listing_failure_skips_only_network_topology_sweep(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    # First pass: a healthy picture across the board, including a compute
+    # node that's about to disappear.
+    _set_conn(monkeypatch, _FakeConn(
+        hypervisors=[_hv("compute1")],
+        networks=[_network("net-1")],
+        subnets=[_subnet("subnet-1", network_id="net-1")],
+    ))
+    topology_sync.sync_topology(db)
+    assert "compute1" in fake_driver.store.nodes
+    assert "subnet-1" in fake_driver.store.subnets
+
+    # Second pass: Neutron subnets is unreachable, but Nova is fine and
+    # compute1 is now gone.
+    _set_conn(monkeypatch, _FakeConn(
+        hypervisors=[],
+        networks=[_network("net-1")],
+        subnets_raise=True,
+    ))
+    result = topology_sync.sync_topology(db)
+
+    assert result["network_topology_ok"] is False
+    assert result["complete_picture"] is True
+    # Compute sweep still ran (independent failure domain).
+    assert "compute1" not in fake_driver.store.nodes
+    # But the network-topology sweep did not run, so the now-unreported
+    # subnet is left alone rather than being deleted on a partial picture.
+    assert "subnet-1" in fake_driver.store.subnets
+    assert result["swept_subnets"] == 0
+
+
+def test_neutron_agents_failure_blocks_compute_sweep_too(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    _set_conn(monkeypatch, _FakeConn(hypervisors=[_hv("compute1")]))
+    topology_sync.sync_topology(db)
+    assert "compute1" in fake_driver.store.nodes
+
+    # Neutron agents unreachable this pass; compute1 no longer reported.
+    _set_conn(monkeypatch, _FakeConn(hypervisors=[], neutron_agents_raise=True))
+    result = topology_sync.sync_topology(db)
+
+    assert result["complete_picture"] is False
+    # Node/Service sweep is shared across all sources (including Neutron
+    # agents, since they can populate placeholder Nodes too), so it's
+    # skipped entirely on a partial picture -- compute1 survives.
+    assert "compute1" in fake_driver.store.nodes

@@ -1,7 +1,21 @@
-"""Phase 2 of the topology-graph feature: Nova hypervisors/services and
-Cinder services -> the `nodes` table (Postgres) and
-(:Node)/(:Service)-[:RUNS_ON]->(:Node) (Neo4j), with a mark-and-sweep pass
-that removes graph vertices for anything OpenStack no longer reports.
+"""Phase 2 + Phase 3 of the topology-graph feature.
+
+Phase 2: Nova hypervisors/services and Cinder services -> the `nodes` table
+(Postgres) and (:Node)/(:Service)-[:RUNS_ON]->(:Node) (Neo4j).
+
+Phase 3: Neutron networks/subnets/routers/floating IPs -> (:Network)/
+(:Subnet)/(:Router)/(:FloatingIP), plus Neutron agents (same (:Service)
+label as Nova/Cinder, RUNS_ON the same as Phase 2) and the DHCP/L3
+hosting-endpoint calls (`dhcp_agent_hosting_networks`, `agent_hosted_routers`)
+-> (:Service)-[:SERVES]->(:Network|:Router) edges. `CONNECTS` edges capture
+the Neutron entities' own structural links to each other -- Subnet to its
+Network, a Router's external gateway to its Network, a FloatingIP to its
+Network and (if associated) its Router.
+
+Both phases share one mark-and-sweep pass that removes graph vertices (and,
+for the edges that can legitimately change target -- router gateways,
+floating IP associations, agent hosting assignments -- the edges too) for
+anything OpenStack no longer reports.
 
 This is the one and only OpenStack polling loop (see
 docs/architecture/adr-0002-topology-graph.md, decision 3). It supersedes
@@ -61,6 +75,27 @@ def _parse_cinder_host(raw_host: str) -> tuple[str, str | None]:
         host, _, backend = raw_host.partition("@")
         return host, backend
     return raw_host, None
+
+
+def _neutron_agent_service_id(binary: str, host: str) -> str:
+    """Same `{binary}@{host}` scheme Nova/Cinder services already use (see
+    the `id` built in the tagged_services loop below) -- kept as a named
+    helper because the DHCP/L3 hosting-endpoint lookups need to compute the
+    same id again afterward, from just the agent, to know which :Service
+    vertex a SERVES edge should start from.
+    """
+    return f"{binary}@{host}"
+
+
+def _gateway_network_id(router: Any) -> str | None:
+    """A Router's `external_gateway_info` is a dict (or None if the router
+    has no external gateway attached) -- pull the network id out of it once,
+    here, rather than inlining the `.get()` at every call site.
+    """
+    info = getattr(router, "external_gateway_info", None)
+    if not info:
+        return None
+    return info.get("network_id")
 
 
 def _register_new_hypervisor(db: Session, hostname: str, ip_address: str) -> schemas.NodeOut | None:
@@ -157,6 +192,195 @@ def _sync_services_to_graph(session, services: list[dict]) -> None:
     )
 
 
+def _sync_networks_to_graph(session, networks: list[dict]) -> None:
+    session.run(
+        """
+        UNWIND $networks AS net
+        MERGE (n:Network {id: net.id})
+        SET n.name = net.name,
+            n.status = net.status,
+            n.admin_state_up = net.admin_state_up,
+            n.shared = net.shared,
+            n.project_id = net.project_id,
+            n.last_synced_at = datetime()
+        """,
+        networks=networks,
+    )
+
+
+def _sync_subnets_to_graph(session, subnets: list[dict]) -> None:
+    # A subnet's network_id is fixed at creation time (a subnet can't be
+    # moved to a different network), so a plain MERGE is enough here --
+    # unlike the router-gateway/floating-IP-association edges below, there's
+    # no "target changed" case to guard against, only "subnet/network
+    # vanished", which the vertex sweep already handles.
+    session.run(
+        """
+        UNWIND $subnets AS sub
+        MERGE (s:Subnet {id: sub.id})
+        SET s.name = sub.name,
+            s.cidr = sub.cidr,
+            s.ip_version = sub.ip_version,
+            s.gateway_ip = sub.gateway_ip,
+            s.last_synced_at = datetime()
+        WITH s, sub
+        MATCH (net:Network {id: sub.network_id})
+        MERGE (s)-[:CONNECTS]->(net)
+        """,
+        subnets=subnets,
+    )
+
+
+def _sync_routers_to_graph(session, routers: list[dict]) -> None:
+    session.run(
+        """
+        UNWIND $routers AS r
+        MERGE (router:Router {id: r.id})
+        SET router.name = r.name,
+            router.status = r.status,
+            router.admin_state_up = r.admin_state_up,
+            router.project_id = r.project_id,
+            router.last_synced_at = datetime()
+        """,
+        routers=routers,
+    )
+
+
+def _sync_router_gateways_to_graph(session, routers: list[dict]) -> None:
+    """A router's external gateway can be attached, detached, or switched to
+    a different external network at any time, so (unlike Subnet->Network)
+    this can't be a plain MERGE -- that would leave a stale CONNECTS edge
+    pointing at the old gateway network if it ever changes. Every router in
+    `routers` (the full list synced this pass, not just the ones currently
+    gatewayed) gets its existing outgoing CONNECTS->Network edge cleared
+    first, then recreated if it currently has a gateway.
+    """
+    session.run(
+        """
+        UNWIND $routers AS r
+        MATCH (router:Router {id: r.id})
+        OPTIONAL MATCH (router)-[old:CONNECTS]->(:Network)
+        DELETE old
+        """,
+        routers=routers,
+    )
+    gatewayed = [r for r in routers if r["gateway_network_id"]]
+    if gatewayed:
+        session.run(
+            """
+            UNWIND $routers AS r
+            MATCH (router:Router {id: r.id})
+            MATCH (net:Network {id: r.gateway_network_id})
+            MERGE (router)-[:CONNECTS]->(net)
+            """,
+            routers=gatewayed,
+        )
+
+
+def _sync_floating_ips_to_graph(session, floating_ips: list[dict]) -> None:
+    # floating_network_id is a required field (a floating IP is always
+    # carved out of some external network) and, practically, never changes
+    # after creation -- a plain MERGE is enough for this edge, same
+    # reasoning as Subnet->Network above. The Router association is a
+    # different story; see _sync_floating_ip_routers_to_graph.
+    session.run(
+        """
+        UNWIND $fips AS fip
+        MERGE (f:FloatingIP {id: fip.id})
+        SET f.floating_ip_address = fip.floating_ip_address,
+            f.fixed_ip_address = fip.fixed_ip_address,
+            f.status = fip.status,
+            f.last_synced_at = datetime()
+        WITH f, fip
+        MATCH (net:Network {id: fip.network_id})
+        MERGE (f)-[:CONNECTS]->(net)
+        """,
+        fips=floating_ips,
+    )
+
+
+def _sync_floating_ip_routers_to_graph(session, floating_ips: list[dict]) -> None:
+    """A floating IP's router association changes whenever it's
+    disassociated/reassociated with a VM behind a different router, so this
+    needs the same clear-then-recreate treatment as router gateways."""
+    session.run(
+        """
+        UNWIND $fips AS fip
+        MATCH (f:FloatingIP {id: fip.id})
+        OPTIONAL MATCH (f)-[old:CONNECTS]->(:Router)
+        DELETE old
+        """,
+        fips=floating_ips,
+    )
+    associated = [f for f in floating_ips if f["router_id"]]
+    if associated:
+        session.run(
+            """
+            UNWIND $fips AS fip
+            MATCH (f:FloatingIP {id: fip.id})
+            MATCH (r:Router {id: fip.router_id})
+            MERGE (f)-[:CONNECTS]->(r)
+            """,
+            fips=associated,
+        )
+
+
+def _sync_dhcp_hosting_to_graph(session, agent_ids: list[str], hosting: list[dict]) -> None:
+    """SERVES edges from a DHCP agent's :Service vertex to every :Network it
+    currently hosts. `agent_ids` is every DHCP agent whose hosting call
+    succeeded this pass (see sync_topology) -- each of those gets its
+    existing outgoing SERVES->Network edges cleared before `hosting`
+    (agent_id, network_id pairs) is applied, so a network the agent stopped
+    hosting doesn't linger. An agent whose hosting call failed this tick is
+    simply left out of `agent_ids`, so its edges from the last successful
+    pass are untouched rather than wrongly cleared.
+    """
+    if agent_ids:
+        session.run(
+            """
+            UNWIND $agent_ids AS aid
+            MATCH (s:Service {id: aid})
+            OPTIONAL MATCH (s)-[old:SERVES]->(:Network)
+            DELETE old
+            """,
+            agent_ids=agent_ids,
+        )
+    if hosting:
+        session.run(
+            """
+            UNWIND $hosting AS h
+            MATCH (s:Service {id: h.service_id})
+            MATCH (net:Network {id: h.network_id})
+            MERGE (s)-[:SERVES]->(net)
+            """,
+            hosting=hosting,
+        )
+
+
+def _sync_l3_hosting_to_graph(session, agent_ids: list[str], hosting: list[dict]) -> None:
+    """Same as _sync_dhcp_hosting_to_graph, but L3 agents SERVES Routers."""
+    if agent_ids:
+        session.run(
+            """
+            UNWIND $agent_ids AS aid
+            MATCH (s:Service {id: aid})
+            OPTIONAL MATCH (s)-[old:SERVES]->(:Router)
+            DELETE old
+            """,
+            agent_ids=agent_ids,
+        )
+    if hosting:
+        session.run(
+            """
+            UNWIND $hosting AS h
+            MATCH (s:Service {id: h.service_id})
+            MATCH (r:Router {id: h.router_id})
+            MERGE (s)-[:SERVES]->(r)
+            """,
+            hosting=hosting,
+        )
+
+
 def _sweep_stale_services(session, seen_ids: set[str]) -> int:
     """Removes any :Service vertex not touched by this pass -- a service
     that no longer shows up in Nova's or Cinder's service list (binary
@@ -196,13 +420,39 @@ def _sweep_stale_nodes(session, seen_ids: set[str]) -> int:
     return record["removed"] if record else 0
 
 
+def _sweep_stale_vertices(session, label: str, seen_ids: set[str]) -> int:
+    """Generic mark-and-sweep for the Phase 3 vertex labels (Network,
+    Subnet, Router, FloatingIP) -- same DETACH DELETE pattern as
+    _sweep_stale_nodes/_sweep_stale_services, just parameterized on the
+    label since Cypher can't take a label as a query parameter (it has to
+    be interpolated into the query text, which is safe here because `label`
+    only ever comes from the fixed calls in sync_topology below, never from
+    OpenStack data).
+    """
+    result = session.run(
+        f"""
+        MATCH (v:{label})
+        WHERE NOT v.id IN $seen_ids
+        WITH v
+        DETACH DELETE v
+        RETURN count(*) AS removed
+        """,
+        seen_ids=list(seen_ids),
+    )
+    record = result.single()
+    return record["removed"] if record else 0
+
+
 def sync_topology(db: Session) -> dict:
-    """One full pass: discover hypervisors/Nova services/Cinder services
-    from OpenStack, register any new hypervisor as a Postgres Node (see
-    _register_new_hypervisor), upsert the current picture into the graph as
-    Node/Service vertices and RUNS_ON edges, then mark-and-sweep -- delete
-    any Node/Service vertex this pass didn't touch, so decommissioned hosts
-    and removed services don't linger in the graph forever.
+    """One full pass: discover hypervisors/Nova services/Cinder services and
+    Neutron networks/subnets/routers/floating IPs/agents from OpenStack,
+    register any new hypervisor as a Postgres Node (see
+    _register_new_hypervisor), upsert the current picture into the graph
+    (Node/Service/Network/Subnet/Router/FloatingIP vertices, RUNS_ON/SERVES/
+    CONNECTS edges), then mark-and-sweep -- delete any vertex (and, where a
+    target can legitimately change over time, any edge) this pass didn't
+    touch, so decommissioned hosts, removed services, and deleted Neutron
+    resources don't linger in the graph forever.
 
     Safe to call on a fixed interval (see main.py) -- every upsert is a
     MERGE keyed on a stable id, so re-running with unchanged OpenStack
@@ -211,15 +461,21 @@ def sync_topology(db: Session) -> dict:
     """
     conn = _connect()
 
-    # Each listing call is independent and wrapped separately: a Cinder
-    # outage (or a cloud that simply doesn't run Cinder) shouldn't take
-    # down Nova's half of the sync, and a Nova failure shouldn't take down
-    # Cinder's. `*_ok` tracks whether we got a genuinely fresh, complete
-    # picture this pass -- see the mark-and-sweep guard below.
+    # Each listing call is independent and wrapped separately: an outage in
+    # one OpenStack service (or a cloud that simply doesn't run it) shouldn't
+    # take down the rest of the sync. `*_ok` tracks whether we got a
+    # genuinely fresh, complete picture this pass -- see the mark-and-sweep
+    # guards below.
     hypervisors: list = []
     nova_services: list = []
     cinder_services: list = []
+    networks: list = []
+    subnets: list = []
+    routers: list = []
+    floating_ips: list = []
+    neutron_agents: list = []
     hypervisors_ok = nova_services_ok = cinder_services_ok = False
+    networks_ok = subnets_ok = routers_ok = floating_ips_ok = neutron_agents_ok = False
 
     try:
         hypervisors = list(conn.compute.hypervisors(details=True))
@@ -238,6 +494,36 @@ def sync_topology(db: Session) -> dict:
         cinder_services_ok = True
     except Exception:
         logger.exception("topology sync: failed to list Cinder services")
+
+    try:
+        networks = list(conn.network.networks())
+        networks_ok = True
+    except Exception:
+        logger.exception("topology sync: failed to list Neutron networks")
+
+    try:
+        subnets = list(conn.network.subnets())
+        subnets_ok = True
+    except Exception:
+        logger.exception("topology sync: failed to list Neutron subnets")
+
+    try:
+        routers = list(conn.network.routers())
+        routers_ok = True
+    except Exception:
+        logger.exception("topology sync: failed to list Neutron routers")
+
+    try:
+        floating_ips = list(conn.network.ips())
+        floating_ips_ok = True
+    except Exception:
+        logger.exception("topology sync: failed to list Neutron floating IPs")
+
+    try:
+        neutron_agents = list(conn.network.agents())
+        neutron_agents_ok = True
+    except Exception:
+        logger.exception("topology sync: failed to list Neutron agents")
 
     existing_by_hostname = {n.hostname: n for n in crud.list_nodes(db)}
 
@@ -273,12 +559,23 @@ def sync_topology(db: Session) -> dict:
 
     graph_services: list[dict] = []
     unresolved_hosts: set[str] = set()
+    # agent.id (Neutron's own UUID) -> the {binary}@{host} id we give its
+    # :Service vertex -- the DHCP/L3 hosting-endpoint calls below only have
+    # the agent object to work from, and need this to know which :Service
+    # vertex a SERVES edge starts from.
+    neutron_service_id_by_agent_id: dict[str, str] = {}
 
-    # Nova and Cinder services share the same shape (binary/host/zone/
-    # status/state) once Cinder's optional `@backend` suffix is peeled off,
-    # so both sources feed the same loop -- tagged with `source` so the
-    # graph can tell them apart.
-    tagged_services = [(svc, "nova") for svc in nova_services] + [(svc, "cinder") for svc in cinder_services]
+    # Nova, Cinder, and Neutron agents all share the same shape (binary/
+    # host/zone/status/state) once Cinder's optional `@backend` suffix is
+    # peeled off and Neutron's is_alive/is_admin_state_up booleans are
+    # mapped onto the same up/down + enabled/disabled vocabulary Nova/Cinder
+    # already use, so all three sources feed the same loop -- tagged with
+    # `source` so the graph can tell them apart.
+    tagged_services = (
+        [(svc, "nova") for svc in nova_services]
+        + [(svc, "cinder") for svc in cinder_services]
+        + [(svc, "neutron") for svc in neutron_agents]
+    )
 
     for svc, source in tagged_services:
         raw_host = getattr(svc, "host", None)
@@ -291,6 +588,24 @@ def sync_topology(db: Session) -> dict:
             link_host, backend = _parse_cinder_host(raw_host)
         else:
             link_host, backend = raw_host, None
+
+        if source == "neutron":
+            # Agent resources don't have Nova/Cinder's status/state strings
+            # -- they report is_admin_state_up/is_alive booleans instead.
+            # Map them onto the same enabled/disabled + up/down vocabulary
+            # so the graph doesn't need a different shape per source.
+            status = "enabled" if getattr(svc, "is_admin_state_up", None) else "disabled"
+            state = "up" if getattr(svc, "is_alive", None) else "down"
+            zone = getattr(svc, "availability_zone", None)
+            service_id = _neutron_agent_service_id(binary, raw_host)
+            agent_id = getattr(svc, "id", None)
+            if agent_id:
+                neutron_service_id_by_agent_id[agent_id] = service_id
+        else:
+            status = getattr(svc, "status", None)
+            state = getattr(svc, "state", None)
+            zone = getattr(svc, "availability_zone", None)
+            service_id = f"{binary}@{raw_host}"
 
         if link_host not in graph_nodes:
             # A service host we haven't seen as a hypervisor -- e.g.
@@ -312,14 +627,14 @@ def sync_topology(db: Session) -> dict:
 
         graph_services.append(
             {
-                "id": f"{binary}@{raw_host}",
+                "id": service_id,
                 "binary": binary,
                 "host": raw_host,
                 "backend": backend,
                 "source": source,
-                "zone": getattr(svc, "availability_zone", None),
-                "status": getattr(svc, "status", None),
-                "state": getattr(svc, "state", None),
+                "zone": zone,
+                "status": status,
+                "state": state,
                 "node_id": link_host,
             }
         )
@@ -332,13 +647,107 @@ def sync_topology(db: Session) -> dict:
             ", ".join(sorted(unresolved_hosts)),
         )
 
+    # DHCP/L3 hosting-endpoint calls: one openstacksdk call per agent
+    # (there's no bulk "hosting" listing), so each is wrapped individually.
+    # A single agent's hosting call failing shouldn't discard every other
+    # agent's edges -- `dhcp_synced_agent_ids`/`l3_synced_agent_ids` (only
+    # the agents whose call succeeded this pass) is what gates the
+    # clear-then-recreate in _sync_dhcp_hosting_to_graph/
+    # _sync_l3_hosting_to_graph, so a failed agent's edges from the last
+    # successful pass are simply left alone rather than wrongly cleared.
+    dhcp_hosting: list[dict] = []
+    l3_hosting: list[dict] = []
+    dhcp_synced_agent_ids: list[str] = []
+    l3_synced_agent_ids: list[str] = []
+
+    for agent in neutron_agents:
+        agent_id = getattr(agent, "id", None)
+        service_id = neutron_service_id_by_agent_id.get(agent_id)
+        if not service_id:
+            continue  # already logged above as missing host/binary
+
+        agent_type = getattr(agent, "agent_type", None)
+        if agent_type == "DHCP agent":
+            try:
+                hosted_networks = list(conn.network.dhcp_agent_hosting_networks(agent))
+            except Exception:
+                logger.exception("topology sync: failed to list networks hosted by DHCP agent %s", service_id)
+                continue
+            dhcp_synced_agent_ids.append(service_id)
+            for net in hosted_networks:
+                dhcp_hosting.append({"service_id": service_id, "network_id": net.id})
+        elif agent_type == "L3 agent":
+            try:
+                hosted_routers = list(conn.network.agent_hosted_routers(agent))
+            except Exception:
+                logger.exception("topology sync: failed to list routers hosted by L3 agent %s", service_id)
+                continue
+            l3_synced_agent_ids.append(service_id)
+            for router in hosted_routers:
+                l3_hosting.append({"service_id": service_id, "router_id": router.id})
+
+    graph_networks = [
+        {
+            "id": net.id,
+            "name": getattr(net, "name", None),
+            "status": getattr(net, "status", None),
+            "admin_state_up": getattr(net, "is_admin_state_up", None),
+            "shared": getattr(net, "is_shared", None),
+            "project_id": getattr(net, "project_id", None),
+        }
+        for net in networks
+    ]
+    graph_subnets = [
+        {
+            "id": sub.id,
+            "name": getattr(sub, "name", None),
+            "cidr": getattr(sub, "cidr", None),
+            "ip_version": getattr(sub, "ip_version", None),
+            "gateway_ip": getattr(sub, "gateway_ip", None),
+            "network_id": getattr(sub, "network_id", None),
+        }
+        for sub in subnets
+    ]
+    graph_routers = [
+        {
+            "id": router.id,
+            "name": getattr(router, "name", None),
+            "status": getattr(router, "status", None),
+            "admin_state_up": getattr(router, "is_admin_state_up", None),
+            "project_id": getattr(router, "project_id", None),
+            "gateway_network_id": _gateway_network_id(router),
+        }
+        for router in routers
+    ]
+    graph_floating_ips = [
+        {
+            "id": fip.id,
+            "floating_ip_address": getattr(fip, "floating_ip_address", None),
+            "fixed_ip_address": getattr(fip, "fixed_ip_address", None),
+            "status": getattr(fip, "status", None),
+            "network_id": getattr(fip, "floating_network_id", None),
+            "router_id": getattr(fip, "router_id", None),
+        }
+        for fip in floating_ips
+    ]
+
     # Only trust this pass to sweep if every listing it depends on actually
     # succeeded -- a partial picture (e.g. Cinder unreachable this tick)
     # must never be used to delete vertices that are still real, just
-    # un-observed this time around.
-    complete_picture = hypervisors_ok and nova_services_ok and cinder_services_ok
+    # un-observed this time around. Node/Service sweep depends on every
+    # source that can populate either (hypervisors and all three service
+    # sources, since Neutron agents can register placeholder Nodes exactly
+    # like Nova/Cinder services do). Network/Subnet/Router/FloatingIP sweep
+    # is its own independent guard -- a Neutron outage shouldn't block
+    # Nova/Cinder's sweep, and vice versa.
+    complete_picture = hypervisors_ok and nova_services_ok and cinder_services_ok and neutron_agents_ok
+    network_topology_ok = networks_ok and subnets_ok and routers_ok and floating_ips_ok
     swept_nodes = 0
     swept_services = 0
+    swept_networks = 0
+    swept_subnets = 0
+    swept_routers = 0
+    swept_floating_ips = 0
 
     with graph_db.driver.session() as session:
         if graph_nodes:
@@ -346,33 +755,76 @@ def sync_topology(db: Session) -> dict:
         if graph_services:
             _sync_services_to_graph(session, graph_services)
 
+        if graph_networks:
+            _sync_networks_to_graph(session, graph_networks)
+        if graph_subnets:
+            _sync_subnets_to_graph(session, graph_subnets)
+        if graph_routers:
+            _sync_routers_to_graph(session, graph_routers)
+            _sync_router_gateways_to_graph(session, graph_routers)
+        if graph_floating_ips:
+            _sync_floating_ips_to_graph(session, graph_floating_ips)
+            _sync_floating_ip_routers_to_graph(session, graph_floating_ips)
+        _sync_dhcp_hosting_to_graph(session, dhcp_synced_agent_ids, dhcp_hosting)
+        _sync_l3_hosting_to_graph(session, l3_synced_agent_ids, l3_hosting)
+
         if complete_picture:
             swept_services = _sweep_stale_services(session, {s["id"] for s in graph_services})
             swept_nodes = _sweep_stale_nodes(session, set(graph_nodes.keys()))
         else:
             logger.warning(
-                "topology sync: skipping mark-and-sweep this pass -- incomplete picture "
-                "(hypervisors_ok=%s, nova_services_ok=%s, cinder_services_ok=%s)",
-                hypervisors_ok, nova_services_ok, cinder_services_ok,
+                "topology sync: skipping node/service mark-and-sweep this pass -- incomplete "
+                "picture (hypervisors_ok=%s, nova_services_ok=%s, cinder_services_ok=%s, "
+                "neutron_agents_ok=%s)",
+                hypervisors_ok, nova_services_ok, cinder_services_ok, neutron_agents_ok,
+            )
+
+        if network_topology_ok:
+            swept_networks = _sweep_stale_vertices(session, "Network", {n["id"] for n in graph_networks})
+            swept_subnets = _sweep_stale_vertices(session, "Subnet", {s["id"] for s in graph_subnets})
+            swept_routers = _sweep_stale_vertices(session, "Router", {r["id"] for r in graph_routers})
+            swept_floating_ips = _sweep_stale_vertices(session, "FloatingIP", {f["id"] for f in graph_floating_ips})
+        else:
+            logger.warning(
+                "topology sync: skipping network-topology mark-and-sweep this pass -- "
+                "incomplete picture (networks_ok=%s, subnets_ok=%s, routers_ok=%s, "
+                "floating_ips_ok=%s)",
+                networks_ok, subnets_ok, routers_ok, floating_ips_ok,
             )
 
     logger.info(
         "topology sync: %d hypervisor(s), %d Nova service(s), %d Cinder service(s), "
+        "%d Neutron agent(s), %d network(s), %d subnet(s), %d router(s), %d floating IP(s), "
         "%d new compute node(s) registered, %d unresolved service host(s), "
-        "%d stale node(s)/%d stale service(s) swept",
+        "%d stale node(s)/%d stale service(s)/%d stale network(s)/%d stale subnet(s)/"
+        "%d stale router(s)/%d stale floating IP(s) swept",
         len(hypervisors), len(nova_services), len(cinder_services),
+        len(neutron_agents), len(networks), len(subnets), len(routers), len(floating_ips),
         new_computes, len(unresolved_hosts), swept_nodes, swept_services,
+        swept_networks, swept_subnets, swept_routers, swept_floating_ips,
     )
 
     return {
         "hypervisors": len(hypervisors),
         "nova_services": len(nova_services),
         "cinder_services": len(cinder_services),
+        "neutron_agents": len(neutron_agents),
+        "networks": len(networks),
+        "subnets": len(subnets),
+        "routers": len(routers),
+        "floating_ips": len(floating_ips),
+        "dhcp_hosting_edges": len(dhcp_hosting),
+        "l3_hosting_edges": len(l3_hosting),
         "new_computes": new_computes,
         "graph_nodes": len(graph_nodes),
         "graph_services": len(graph_services),
         "unresolved_hosts": len(unresolved_hosts),
         "complete_picture": complete_picture,
+        "network_topology_ok": network_topology_ok,
         "swept_nodes": swept_nodes,
         "swept_services": swept_services,
+        "swept_networks": swept_networks,
+        "swept_subnets": swept_subnets,
+        "swept_routers": swept_routers,
+        "swept_floating_ips": swept_floating_ips,
     }

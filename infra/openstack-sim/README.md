@@ -17,7 +17,9 @@ Keystone v3 / Nova v2.1 / Cinder v3 / Neutron v2.0 REST surface for
   -- catalog `type` is `block-storage` (that's the literal string
   `openstacksdk`'s `conn.block_storage` proxy looks up, not `cinder` or
   `volume`)
-- Neutron: `GET /networks`, `/subnets`, `/routers`, `/floatingips`, `/agents`
+- Neutron: `GET /networks`, `/subnets`, `/routers`, `/floatingips`, `/agents`,
+  `/agents/{id}/dhcp-networks`, `/agents/{id}/l3-routers` (the DHCP/L3
+  hosting-endpoint calls `topology_sync.py`'s Phase 3 needs)
 
 **Not a real OpenStack** — no writes, no auth checks (any username/password
 in `clouds.sandbox.yaml` is accepted), no other endpoints. It exists purely
@@ -43,9 +45,19 @@ so `topology_sync._parse_cinder_host`'s `host@backend` split has something
 real to exercise).
 
 Plus one network/subnet pair per sandbox subnet (`10.0.1.0/24`,
-`10.0.2.0/24`), one router, and one floating IP. Edit the lists at the top
-of `app.py` directly if you need different/more topology to test against —
-there's no database backing this, it's just Python literals.
+`10.0.2.0/24`), one router (gatewayed onto `sandbox-net`, so `topology_sync`
+has something real to build a Router-[:CONNECTS]->Network edge from), and
+one floating IP (associated with both `sandbox-net` and the router, for the
+FloatingIP CONNECTS edges). The DHCP agent (`a2`) hosts both networks and
+the L3 agent (`a1`) hosts the router -- `DHCP_AGENT_NETWORKS`/
+`L3_AGENT_ROUTERS` at the top of `app.py`, backing the two hosting-endpoint
+routes above -- so a sync produces DHCP/L3 agent Service-[:SERVES]->
+Network/Router edges too. The two `neutron-openvswitch-agent` agents (`a3`,
+`a4`, one per compute node) intentionally have no hosting-endpoint mapping
+-- OVS agents don't have one in real Neutron either, they're only synced as
+plain RUNS_ON services. Edit the lists at the top of `app.py` directly if
+you need different/more topology to test against -- there's no database
+backing this, it's just Python literals.
 
 ## Running it standalone (without the rest of the sandbox stack)
 
@@ -87,17 +99,54 @@ conn = openstack.connect()
 print([h.name for h in conn.compute.hypervisors()])
 print([n.name for n in conn.network.networks()])
 print([(s.binary, s.host) for s in conn.block_storage.services()])
+routers = list(conn.network.routers())
+print([(r.name, r.external_gateway_info['network_id']) for r in routers])
+for a in conn.network.agents():
+    if a.agent_type == 'DHCP agent':
+        print('DHCP', a.host, '->', [n.name for n in conn.network.dhcp_agent_hosting_networks(a)])
+    if a.agent_type == 'L3 agent':
+        print('L3', a.host, '->', [r.name for r in conn.network.agent_hosted_routers(a)])
 "
 ```
 
 Expected: `['compute1-sim', 'compute2-sim']`,
-`['sandbox-net', 'sandbox-storage-net']`, and
-`[('cinder-scheduler', 'controller-sim'), ('cinder-backup', 'storage-sim'), ('cinder-volume', 'storage-sim@lvmdriver-1')]`.
+`['sandbox-net', 'sandbox-storage-net']`,
+`[('cinder-scheduler', 'controller-sim'), ('cinder-backup', 'storage-sim'), ('cinder-volume', 'storage-sim@lvmdriver-1')]`,
+`[('sandbox-router', '8f3f0f4a-0000-0000-0000-000000000001')]`,
+`DHCP controller-sim -> ['sandbox-net', 'sandbox-storage-net']`, and
+`L3 controller-sim -> ['sandbox-router']`.
 
-## Once topology_sync.py exists (Phase 2)
+## Testing the full topology sync (Phases 2 + 3) against this sim
 
-This is what it's for: point `topology_sync.py`'s sync pass at the sandbox
-stack and confirm it `MERGE`s the hypervisors/networks/subnets/routers/
-floating IPs above into Neo4j correctly, and that a second run (with one
-hypervisor removed from the seed list) correctly sweeps the stale vertex —
-all without touching the real RIF SAS OpenStack cluster.
+With the sandbox stack up (`docker compose -f docker-compose.yml -f
+docker-compose.sandbox.yml up -d`), trigger a sync pass and inspect what
+landed in Neo4j:
+
+```bash
+# Run one sync pass (same call main.py's scheduler makes on its interval)
+docker compose exec api python3 -c "
+from app.db import SessionLocal
+from app.services.topology_sync import sync_topology
+import json
+with SessionLocal() as db:
+    print(json.dumps(sync_topology(db), indent=2))
+"
+```
+
+Expect `networks: 2, subnets: 2, routers: 1, floating_ips: 1,
+dhcp_hosting_edges: 2, l3_hosting_edges: 1, network_topology_ok: true` in
+the summary. Then, e.g. via `docker compose exec neo4j cypher-shell`:
+
+```cypher
+// Structural CONNECTS edges: Subnet->Network, Router->Network (gateway),
+// FloatingIP->Network/Router
+MATCH (a)-[:CONNECTS]->(b) RETURN labels(a), a.name, labels(b), b.name;
+
+// Agent hosting: DHCP/L3 agent Service -[:SERVES]-> Network/Router
+MATCH (s:Service)-[:SERVES]->(t) RETURN s.id, labels(t), t.name;
+```
+
+To see the mark-and-sweep in action, comment out `ROUTERS[0]` (or any
+other entity) in `app.py`, restart the `openstack-sim` container, run the
+sync again, and confirm the corresponding vertex (and any CONNECTS/SERVES
+edge pointing at it) is gone from the graph.
