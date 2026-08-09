@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import String, Integer, Boolean, DateTime, CheckConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import Column,  Float, UniqueConstraint
+from sqlalchemy import Column, Float, UniqueConstraint, Text, JSON
 from .db import Base
 
 
@@ -164,4 +164,44 @@ class Baseline(Base):
 
     __table_args__ = (
         UniqueConstraint("hostname", "metric_name", "weekday", "hour", name="uq_baseline_slot"),
+    )
+
+
+class TopologySyncRun(Base):
+    """One row per completed pass of either OpenStack polling loop that
+    feeds the topology graph -- topology_sync.sync_topology() (Phases 2/3)
+    or prometheus_health.sync_prometheus_health() (Phase 4). Backs
+    `GET /api/v1/topology/health` (Phase 5): rather than that endpoint
+    trying to infer "is the sync healthy" from Neo4j state alone (which
+    can't distinguish "everything's fine" from "the last pass silently
+    stopped running"), each periodic pass in main.py now records its own
+    outcome here, so /topology/health can answer from actual run history
+    instead of guessing from a snapshot of the graph.
+
+    Append-only by design (like AnomalyEvent) rather than one upserted row
+    per sync_type -- a short history of recent runs is what makes
+    "did this recover on its own, or has it been down for an hour" answerable
+    from the endpoint instead of just "what's the latest status".
+    """
+    __tablename__ = "topology_sync_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # "openstack" (topology_sync.sync_topology, Phases 2/3) or
+    # "prometheus_health" (prometheus_health.sync_prometheus_health, Phase 4).
+    sync_type = Column(String, nullable=False, index=True)
+    # "ok": ran and every listing/query it depends on succeeded.
+    # "degraded": ran, but at least one dependency was skipped/unreachable
+    #   this pass (summary still reflects whatever partial picture it got).
+    # "failed": raised before producing any summary at all.
+    status = Column(String, nullable=False)
+    summary = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ok','degraded','failed')",
+            name="ck_topology_sync_runs_status_allowed",
+        ),
     )

@@ -52,5 +52,97 @@ class NodeOut(NodeBase):
     updated_at: datetime
 
 
+# --------------------------------------------------------------------------
+# Phase 5 (API) -- topology graph read schemas.
+#
+# These describe the Neo4j-backed read model (see graph_db.py's
+# fetch_graph/fetch_vertex_detail/fetch_services/fetch_networks), not the
+# Postgres `nodes` table above. `properties`/`summary` are left as plain
+# dicts rather than fully-typed models: the graph's vertex properties
+# differ per label (see topology_sync.py's `_sync_*_to_graph` functions)
+# and the sync summary's shape differs per sync_type (topology_sync vs.
+# prometheus_health), so a fixed schema here would just duplicate what
+# those modules already document and would drift the moment either one
+# changes a field.
+# --------------------------------------------------------------------------
+
+class TopologyVertexOut(BaseModel):
+    id: str
+    label: str
+    properties: dict
+
+
+class TopologyEdgeOut(BaseModel):
+    source: str
+    target: str
+    type: str
+
+
+class TopologyGraphOut(BaseModel):
+    nodes: list[TopologyVertexOut]
+    edges: list[TopologyEdgeOut]
+
+
+class TopologyNeighborOut(BaseModel):
+    id: str | None
+    label: str | None
+    relationship: str
+    direction: str
+
+
+class TopologyVertexDetailOut(BaseModel):
+    id: str
+    label: str
+    properties: dict
+    neighbors: list[TopologyNeighborOut]
+
+
+class TopologyServiceOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str
+    node_id: str | None = None
+
+
+class TopologyNetworkOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str
+    subnets: list[dict] = Field(default_factory=list)
+    gateway_routers: list[dict] = Field(default_factory=list)
+    floating_ips: list[dict] = Field(default_factory=list)
+    serving_agents: list[dict] = Field(default_factory=list)
+
+
+class SyncType(str, Enum):
+    openstack = "openstack"
+    prometheus_health = "prometheus_health"
+
+
+class SyncRunStatus(str, Enum):
+    ok = "ok"
+    degraded = "degraded"
+    failed = "failed"
+    unknown = "unknown"  # no run recorded yet for this sync_type
+
+
+class TopologySyncRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    sync_type: str
+    status: str
+    summary: dict | None = None
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime
+
+
+class TopologyHealthOut(BaseModel):
+    """Response for GET /api/v1/topology/health. `status` is the worst of
+    the two sync loops' latest-run status ('unknown' if a loop has never
+    completed a pass -- e.g. right after a fresh deploy); `syncs` gives the
+    latest run per sync_type so a caller can see *which* loop is degraded.
+    """
+    status: SyncRunStatus
+    syncs: dict[str, TopologySyncRunOut | None]
+
+
 
 

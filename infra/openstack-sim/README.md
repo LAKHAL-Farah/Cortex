@@ -206,3 +206,64 @@ Expect `nova-compute@compute1-sim` (and `neutron-openvswitch-agent@compute1-sim`
 to show `openstack_state: up`, `state: unreachable`, and
 `compute1-sim`'s `Node.health` to read `down`. `docker compose start
 compute1-sim` and run another pass to see it flip back to `up`/`up`.
+
+## Testing the topology API (Phase 5) against this sim
+
+`routers/topology.py` is the read-only HTTP surface over everything
+Phases 2-4 write to Neo4j, plus a `GET /health` backed by the new
+`topology_sync_runs` Postgres table (see `models.TopologySyncRun` and
+`main.py`'s `_run_periodic_recorded`). It doesn't talk to `openstack-sim`
+directly, but it's only interesting to look at once at least one Phase 2/3
+sync (and ideally one Phase 4 pass) has actually run against this sim --
+otherwise the graph endpoints just return empty lists and `/health`
+reports `"unknown"` for both sync types.
+
+With the sandbox stack up and at least one of each pass done (see the two
+sections above), curl the five endpoints from the host (the base compose
+file already publishes `api` on `127.0.0.1:8000`):
+
+```bash
+# Whole graph, flattened for a generic graph-viz client
+curl -s http://127.0.0.1:8000/api/v1/topology/graph | python3 -m json.tool
+
+# One vertex (any label -- a hypervisor Node, a Service, a Network, ...)
+# plus its immediate neighbors
+curl -s http://127.0.0.1:8000/api/v1/topology/nodes/compute1-sim | python3 -m json.tool
+
+# Every Service, with the Node it RUNS_ON and both openstack_state (raw,
+# Phase 2/3) and state (Prometheus-reconciled, Phase 4)
+curl -s http://127.0.0.1:8000/api/v1/topology/services | python3 -m json.tool
+
+# Every Network with its subnets/gateway routers/floating IPs/serving
+# DHCP+L3 agents nested inline
+curl -s http://127.0.0.1:8000/api/v1/topology/networks | python3 -m json.tool
+
+# Sync-loop health -- from topology_sync_runs, not a live Neo4j query
+curl -s http://127.0.0.1:8000/api/v1/topology/health | python3 -m json.tool
+```
+
+Expected, once both sync loops have completed at least one pass against
+this sim: `/topology/graph`'s `nodes` includes `compute1-sim` (label
+`Node`) and `sandbox-net` (label `Network`); `/topology/nodes/compute1-sim`
+lists `nova-compute@compute1-sim` and its OVS agent among its incoming
+`RUNS_ON` neighbors; `/topology/networks` shows `sandbox-net` with
+`sandbox-router` in `gateway_routers` and the DHCP agent (`a2`, see the
+seed data above) in `serving_agents` (the L3 agent `a1` SERVES the
+*router*, not the network, so look for it via
+`/topology/nodes/sandbox-router` or `/topology/services` instead); and
+`/topology/health` reports `"status": "ok"` for both `openstack` and
+`prometheus_health` (assuming both sims are up and unmodified).
+
+To see `/topology/health` report something other than `"ok"`, stop
+`openstack-sim` (`docker compose stop openstack-sim`) and wait for the
+next `TOPOLOGY_SYNC_INTERVAL_SECONDS` tick (or trigger one manually, same
+as the Phase 2/3 section above). Every OpenStack listing call in
+`sync_topology` is wrapped individually (see that function's docstring),
+so the pass doesn't raise -- it still returns a summary, just with
+`complete_picture: false` -- which `main.py`'s `_topology_sync_status`
+classifies as `status: "degraded"` rather than `"failed"` (see
+`_run_periodic_recorded`). `"failed"` is reserved for the rarer case of
+the pass raising before returning any summary at all (e.g. a Postgres
+outage, since `sync_topology` also reads/writes `nodes` there). `docker
+compose start openstack-sim` and wait for/trigger another pass to see
+`openstack`'s status recover to `"ok"` on its own.

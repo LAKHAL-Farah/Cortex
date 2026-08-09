@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from fastapi import FastAPI
 from sqlalchemy import text
 from .db import engine, SessionLocal
@@ -12,6 +13,7 @@ from .routers import dashboard
 from .routers import logs
 from .routers import anomalies
 from .routers import baselines
+from .routers import topology
 from .services.anomaly_detector import detect_anomalies
 from .services.baseline_builder import compute_baselines
 from .services.node_seeder import seed_nodes_from_file_sd
@@ -20,7 +22,7 @@ from .routers import forecast
 from .services.forecast_trainer import train_all_models
 from .services.topology_sync import sync_topology
 from .services.prometheus_health import sync_prometheus_health
-from . import graph_db
+from . import crud, graph_db
 logger = logging.getLogger(__name__)
 
 # How often detect_anomalies() re-scores the latest Prometheus values. The
@@ -101,6 +103,79 @@ async def _run_periodic_no_args(fn, interval_seconds: float, name: str) -> None:
             logger.exception("%s pass failed", name)
         await asyncio.sleep(interval_seconds)
 
+
+def _topology_sync_status(summary: dict) -> str:
+    """topology_sync.sync_topology()'s summary carries two independent
+    "did we get a complete picture" flags (see its docstring/return value):
+    `complete_picture` for the Node/Service sweep, `network_topology_ok`
+    for the Network/Subnet/Router/FloatingIP sweep. Either being False
+    means at least one OpenStack listing failed this pass but the pass
+    itself still ran and produced a (partial) summary -- "degraded", not
+    "failed". "failed" is reserved for the pass raising before returning
+    anything at all (caught in _run_periodic_recorded below).
+    """
+    if summary.get("complete_picture") and summary.get("network_topology_ok"):
+        return "ok"
+    return "degraded"
+
+
+def _prometheus_health_status(summary: dict) -> str:
+    """prometheus_health.sync_prometheus_health() returns
+    {"queried": False, ...} (rather than raising) when Prometheus itself
+    was unreachable this pass -- see that function's docstring. That's a
+    normal, self-recovering skip, not a crash, so it's "degraded" here
+    too, on the same reasoning as _topology_sync_status above.
+    """
+    if summary.get("queried"):
+        return "ok"
+    return "degraded"
+
+
+async def _run_periodic_recorded(fn, interval_seconds: float, name: str, sync_type: str, status_fn) -> None:
+    """Same shape as _run_periodic, but for the two OpenStack/Prometheus
+    sync loops (topology_sync.sync_topology, prometheus_health.
+    sync_prometheus_health) whose outcome now also gets appended to the
+    `topology_sync_runs` table (see models.TopologySyncRun and
+    crud.record_topology_sync_run) so GET /api/v1/topology/health has
+    real run history to answer from, not just a snapshot of the graph.
+
+    `status_fn(summary) -> "ok"|"degraded"` classifies a successful pass's
+    own summary dict; a pass that raises is always recorded as "failed"
+    regardless of status_fn, since there's no summary to classify.
+    """
+    while True:
+        started_at = datetime.utcnow()
+        db = SessionLocal()
+        summary: dict | None = None
+        error: str | None = None
+        try:
+            summary = await asyncio.to_thread(fn, db)
+            run_status = status_fn(summary)
+        except Exception as exc:
+            logger.exception("%s pass failed", name)
+            run_status = "failed"
+            error = repr(exc)
+        finally:
+            finished_at = datetime.utcnow()
+            try:
+                crud.record_topology_sync_run(
+                    db,
+                    sync_type=sync_type,
+                    status=run_status,
+                    summary=summary,
+                    error=error,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
+            except Exception:
+                # Recording the run is itself best-effort: a Postgres hiccup
+                # here shouldn't take the sync loop down, and the next tick
+                # will just append another row on top of whatever the last
+                # successfully-recorded one was.
+                logger.exception("failed to record sync-run metadata for %s", name)
+            db.close()
+        await asyncio.sleep(interval_seconds)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # If the DB is empty (fresh deploy, or infra that was provisioned by
@@ -138,13 +213,21 @@ async def lifespan(app: FastAPI):
             _run_periodic_no_args(train_all_models, FORECAST_TRAINING_INTERVAL_SECONDS, "forecast model training")
 ),
         asyncio.create_task(
-            _run_periodic(sync_topology, TOPOLOGY_SYNC_INTERVAL_SECONDS, "topology sync")
+            _run_periodic_recorded(
+                sync_topology,
+                TOPOLOGY_SYNC_INTERVAL_SECONDS,
+                "topology sync",
+                sync_type="openstack",
+                status_fn=_topology_sync_status,
+            )
         ),
         asyncio.create_task(
-            _run_periodic(
+            _run_periodic_recorded(
                 sync_prometheus_health,
                 PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS,
                 "prometheus health sync",
+                sync_type="prometheus_health",
+                status_fn=_prometheus_health_status,
             )
         ),
     ]
@@ -165,6 +248,7 @@ app.include_router(logs.router)
 app.include_router(anomalies.router)
 app.include_router(baselines.router)
 app.include_router(forecast.router)
+app.include_router(topology.router)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 
