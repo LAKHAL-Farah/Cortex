@@ -267,3 +267,67 @@ the pass raising before returning any summary at all (e.g. a Postgres
 outage, since `sync_topology` also reads/writes `nodes` there). `docker
 compose start openstack-sim` and wait for/trigger another pass to see
 `openstack`'s status recover to `"ok"` on its own.
+
+## Testing the topology frontend (Phase 6) against this sim
+
+`services/web/app/topology/page.tsx` is a browser client for the Phase 5
+API above -- a force-directed graph (`components/TopologyGraph.tsx`, via
+`react-force-graph-2d`) with a click-through detail panel
+(`components/TopologyDetailPanel.tsx`) and a sync-staleness badge
+(`components/TopologyHealthBadge.tsx`). It's all read-only, same as the
+API it calls, via three new Next.js proxy routes that mirror the existing
+`/api/dashboard`, `/api/anomalies`, etc. pattern:
+
+| Proxy route                        | Backend endpoint                     |
+|-------------------------------------|---------------------------------------|
+| `GET /api/topology`                 | `GET /api/v1/topology/graph`          |
+| `GET /api/topology/health`          | `GET /api/v1/topology/health`         |
+| `GET /api/topology/nodes/{id}`      | `GET /api/v1/topology/nodes/{id}`     |
+
+With the sandbox stack up and at least one Phase 2/3 sync pass done (see
+above -- the page renders an empty-state message rather than an error if
+the graph is empty, but it's more interesting to look at with real data):
+
+```bash
+cd infra
+docker compose -f docker-compose.yml -f docker-compose.sandbox.yml up -d --build web
+```
+
+Then open `http://127.0.0.1:3000/topology` in a browser (the base compose
+file already publishes `web` there). Expect to see:
+
+- `compute1-sim`/`compute2-sim` (role `compute`, `--role-compute` orange)
+  and `controller-sim` (role `controller`, `--role-controller` purple)
+  as circular markers, colored the same way `NodeCard.tsx` already colors
+  them on the dashboard.
+- `nova-compute@compute1-sim` and friends as smaller `Service`-colored
+  circles, connected to their hypervisor by a solid `RUNS_ON` edge.
+- `sandbox-net`/`sandbox-storage-net` as square `Network` markers, with
+  `sandbox-router` connected by a solid `CONNECTS` edge and the DHCP
+  agent's `Service` vertex connected by a dashed `SERVES` edge.
+- A "Synced Xm ago" badge in the top-right, colored `--ok` green -- backed
+  by `/topology/health`, so it reflects actual sync-run history rather
+  than just "the page loaded fine".
+- Clicking any vertex opens a right-hand detail panel (properties +
+  incoming/outgoing neighbors, via `/api/topology/nodes/{id}`) -- e.g.
+  clicking `compute1-sim` should list `nova-compute@compute1-sim` and its
+  OVS agent among its incoming `RUNS_ON` neighbors, matching the
+  `/topology/nodes/compute1-sim` API example above.
+
+To see the staleness badge turn amber/red, stop `openstack-sim` the same
+way as the Phase 5 section above and wait for/trigger a sync pass -- the
+badge should flip to "Degraded" (amber, `--warn`) and the tooltip should
+name which of the two sync loops (`openstack` vs `prometheus_health`) is
+behind.
+
+No live Neo4j/Postgres needed to sanity-check the frontend code itself
+(lint/typecheck/build) without the rest of the sandbox stack running:
+
+```bash
+cd services/web
+npm ci
+npm run lint
+npx tsc --noEmit
+npm run build
+```
+

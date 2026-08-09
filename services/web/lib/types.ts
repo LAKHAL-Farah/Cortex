@@ -105,3 +105,65 @@ export interface AnomalyEvent {
   is_active: boolean;
 }
 
+// --- Topology (Phase 6 -- see services/api/app/routers/topology.py) -------
+//
+// Mirrors schemas.TopologyGraphOut/TopologyVertexDetailOut/TopologyHealthOut
+// on the API side. `properties` is left as a loose dict rather than typed
+// per-label (the graph has six vertex labels -- Node/Service/Network/
+// Subnet/Router/FloatingIP -- each with its own property shape; see
+// graph_db.py's module docstring) since the frontend only needs a handful
+// of well-known keys (role, state, hostname, ...) off of it, read
+// defensively via lib/topology.ts's helpers.
+
+export type TopologyVertexLabel = "Node" | "Service" | "Network" | "Subnet" | "Router" | "FloatingIP";
+
+export type TopologyEdgeType = "RUNS_ON" | "SERVES" | "CONNECTS";
+
+export interface TopologyVertex {
+  id: string;
+  label: TopologyVertexLabel;
+  properties: Record<string, unknown>;
+}
+
+export interface TopologyEdge {
+  source: string;
+  target: string;
+  type: TopologyEdgeType;
+}
+
+export interface TopologyGraph {
+  nodes: TopologyVertex[];
+  edges: TopologyEdge[];
+}
+
+export interface TopologyNeighbor {
+  id: string | null;
+  label: TopologyVertexLabel | null;
+  relationship: TopologyEdgeType;
+  direction: "incoming" | "outgoing";
+}
+
+export interface TopologyVertexDetail {
+  id: string;
+  label: TopologyVertexLabel;
+  properties: Record<string, unknown>;
+  neighbors: TopologyNeighbor[];
+}
+
+export type TopologySyncType = "openstack" | "prometheus_health";
+export type TopologySyncStatus = "ok" | "degraded" | "failed" | "unknown";
+
+export interface TopologySyncRun {
+  sync_type: string;
+  status: string;
+  summary: Record<string, unknown> | null;
+  error: string | null;
+  started_at: string; // ISO 8601
+  finished_at: string; // ISO 8601
+}
+
+export interface TopologyHealth {
+  status: TopologySyncStatus;
+  syncs: Record<string, TopologySyncRun | null>;
+}
+
