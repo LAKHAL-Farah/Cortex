@@ -71,7 +71,10 @@ export default function TopologyHealthBadge() {
       style={{ color, background: soft }}
       title={tooltip}
     >
-      <span className="status-dot" style={{ background: color }} />
+      <span
+        className={data.status === "ok" ? "status-dot glow-pulse" : "status-dot"}
+        style={{ background: color, ["--pulse-color" as string]: color }}
+      />
       {latest ? `Synced ${formatRelative(latest)}` : label}
     </span>
   );
