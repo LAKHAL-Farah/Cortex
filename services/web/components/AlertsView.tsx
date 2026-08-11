@@ -38,6 +38,7 @@ import {
   formatDetectedAt,
   formatRelative,
   formatZScore,
+  isServiceStateMetric,
   metricLabel,
   zScoreFill,
 } from "@/lib/anomalies";
@@ -335,28 +336,40 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
             <p className="mt-2 text-sm leading-relaxed text-color-text">{buildInsight(a)}</p>
           </div>
 
-          <div className="panel p-4">
-            <div className="eyebrow">Current value</div>
-            <div className="stat-figure mt-1 text-2xl text-color-text">{a.current_value.toFixed(1)}%</div>
-            <div className="mt-3">
-              <ProgressBar value={a.current_value} color={SEVERITY_COLOR[a.severity]} />
-            </div>
-          </div>
+          {/* current_value/z_score are meaningless for a service_state flag --
+             it's a live up/down/unreachable check, not a percentage metric
+             with a statistical deviation, so the value + sigma panels below
+             don't apply and are skipped for it. */}
+          {!isServiceStateMetric(a.metric_name) && (
+            <>
+              <div className="panel p-4">
+                <div className="eyebrow">Current value</div>
+                <div className="stat-figure mt-1 text-2xl text-color-text">{a.current_value.toFixed(1)}%</div>
+                <div className="mt-3">
+                  <ProgressBar value={a.current_value} color={SEVERITY_COLOR[a.severity]} />
+                </div>
+              </div>
 
-          <div className="panel p-4">
-            <div className="flex items-center justify-between">
-              <div className="eyebrow">Deviation</div>
-              <span className="stat-figure text-sm" style={{ color: SEVERITY_COLOR[a.severity] }}>
-                {formatZScore(a.z_score)}
-              </span>
-            </div>
-            <ZScoreMeter z={a.z_score} severity={a.severity} />
-          </div>
+              <div className="panel p-4">
+                <div className="flex items-center justify-between">
+                  <div className="eyebrow">Deviation</div>
+                  <span className="stat-figure text-sm" style={{ color: SEVERITY_COLOR[a.severity] }}>
+                    {formatZScore(a.z_score)}
+                  </span>
+                </div>
+                <ZScoreMeter z={a.z_score} severity={a.severity} />
+              </div>
+            </>
+          )}
 
           <div className="panel divide-y p-1" style={{ borderColor: "var(--border-soft)" }}>
             {[
-              { label: "Detection method", value: METHOD_LABEL[a.method] },
-              { label: "Baseline size", value: a.baseline_n != null ? `${a.baseline_n} samples` : "warming up (EWMA)" },
+              isServiceStateMetric(a.metric_name)
+                ? { label: "Detection method", value: "Live service state check" }
+                : { label: "Detection method", value: METHOD_LABEL[a.method] },
+              ...(isServiceStateMetric(a.metric_name)
+                ? []
+                : [{ label: "Baseline size", value: a.baseline_n != null ? `${a.baseline_n} samples` : "warming up (EWMA)" }]),
               { label: "Detected at", value: formatDetectedAt(a.detected_at) },
               { label: "Relative", value: formatRelative(a.detected_at) },
             ].map((row) => (

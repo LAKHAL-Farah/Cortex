@@ -37,12 +37,25 @@ export const METHOD_LABEL: Record<AnomalyMethod, string> = {
 const METRIC_LABEL: Record<string, string> = {
   cpu_usage: "CPU usage",
   ram_usage: "Memory usage",
+  service_state: "Service state",
 };
 
 /** Human label for a metric_name, falling back to a de-slugged version for
  * metrics the detector adds later that the UI doesn't know about yet. */
 export function metricLabel(metric: string): string {
   return METRIC_LABEL[metric] ?? metric.replace(/_/g, " ");
+}
+
+/** "service_state" flags come from the OpenStack/Prometheus state
+ * cross-check (see services/api/app/services/prometheus_health.py), not
+ * from anomaly_detector.py's baseline/EWMA scoring -- current_value,
+ * z_score, method and baseline_n on these rows are placeholders (1.0 /
+ * 0.0 / "robust_zscore" / 1), not a real statistical read. The UI needs
+ * to know this so it doesn't present a fabricated percentage/sigma/
+ * baseline-sample story for what is actually just "this service isn't
+ * in its expected running state right now". */
+export function isServiceStateMetric(metric: string): boolean {
+  return metric === "service_state";
 }
 
 export function formatZScore(z: number): string {
@@ -98,6 +111,12 @@ export function formatDuration(startIso: string, endIso: string | null): string 
  * not a model call, just the anomaly's numbers put into a sentence so the
  * drawer reads like an explanation instead of a raw record dump. */
 export function buildInsight(a: AnomalyFlag): string {
+  if (isServiceStateMetric(a.metric_name)) {
+    // Live down/unreachable detection, not a deviation from a baseline --
+    // no %, no sigma, no "baseline of N samples" framing here.
+    return `${a.hostname} was flagged ${a.severity} because it isn't reporting its expected running state right now — this is a live service state check, not a statistical metric comparison.`;
+  }
+
   const metric = metricLabel(a.metric_name);
   const dir = a.z_score >= 0 ? "above" : "below";
   const magnitude = Math.abs(a.z_score).toFixed(1);
