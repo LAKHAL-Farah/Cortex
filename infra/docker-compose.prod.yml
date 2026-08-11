@@ -1,0 +1,73 @@
+
+networks:
+  cortex-net:
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: ${CORTEX_DB_PASSWORD}
+      POSTGRES_DB: cortex
+    volumes:
+      - cortex_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortex"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cortex-net
+
+  api:
+    build:
+      context: ../services/api
+      network: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
+      CORTEX_API_KEY: ${CORTEX_API_KEY}
+      # Container-side path, matching the `:/file_sd` mount below -- this was
+      # previously set to the *host* dir (${PROMETHEUS_FILE_SD_HOST_DIR}),
+      # which doesn't exist inside the container and isn't even a file path,
+      # so every regenerate_file_sd() call after a node add/edit/delete was
+      # silently failing and the original Ansible-provisioned nodes.json was
+      # never being overwritten.
+      PROMETHEUS_FILE_SD_PATH: /file_sd/nodes.json
+      CORTEX_ANSIBLE_DIR: ${CORTEX_ANSIBLE_DIR:-/infra/ansible}
+      # Used only to refuse startup if the resolved Ansible dir ever turns
+      # out to be infra/ansible-sandbox -- see ansible_runner.py.
+      CORTEX_ENV: production
+      ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
+      PROMETHEUS_URL: ${PROMETHEUS_URL}
+      PROMETHEUS_RANGE_URL: ${PROMETHEUS_RANGE_URL}
+      LOKI_URL: ${LOKI_URL}
+      FORECAST_DATASET_REFRESH_INTERVAL_SECONDS: ${FORECAST_DATASET_REFRESH_INTERVAL_SECONDS:-86400}
+    volumes:
+      - ../services/api:/app
+      - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd
+      - ${CORTEX_ANSIBLE_HOST_DIR:-../infra/ansible}:/infra/ansible
+      - ${CORTEX_SSH_KEY_HOST_DIR:-./.sandbox-ssh}:/root/.ssh:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - cortex-net
+  web:
+    build:
+      context: ../services/web
+      network: host
+    environment:
+      CORTEX_API_URL: http://api:8000
+      CORTEX_API_KEY: ${CORTEX_API_KEY}
+    ports:
+      - "127.0.0.1:2990:3000"
+    depends_on:
+      - api
+    networks:
+      - cortex-net
+
+volumes:
+  cortex_pgdata:

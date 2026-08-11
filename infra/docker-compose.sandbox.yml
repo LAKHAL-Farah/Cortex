@@ -76,14 +76,24 @@ services:
       cortex-sandbox-storage:
         ipv4_address: 10.0.2.20
     command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
+  
   prometheus:
     image: prom/prometheus:v2.55.1
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
     volumes:
-      - ./prometheus:/etc/prometheus
-      - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd
+      - ./prometheus:/etc/prometheus:ro
+      - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd:ro
+      - cortex_prometheus_data:/prometheus
     ports:
       - "127.0.0.1:9090:9090"
     networks:
-      - cortex-net           # not strictly needed, but lets you curl it from the api container if useful
-      - cortex-sandbox        # to reach controller-sim / compute*-sim
-      - cortex-sandbox-storage # to reach storage-sim
+      - cortex-net
+      - cortex-sandbox
+      - cortex-sandbox-storage
+
+volumes:
+  cortex_prometheus_data:

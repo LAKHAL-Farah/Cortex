@@ -32,7 +32,7 @@ def query_range(promql: str, start: float, end: float, step: str = "15s"):
     response = requests.get(
         RANGE_URL,
         params={"query": promql, "start": start, "end": end, "step": step},
-        timeout=10,
+        timeout=30,
     )
     response.raise_for_status()
     data = response.json()
