@@ -42,7 +42,9 @@ export default function NetworkEntityView({ label, placeholder }: { label: Netwo
   });
 
   const [query, setQuery] = useState("");
-  const [view, setView] = useState<EntityView>("cards");
+  // Table-first, same as ServicesView -- Notion-style dense rows by
+  // default, cards still available via the toggle.
+  const [view, setView] = useState<EntityView>("table");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedVertex, setSelectedVertex] = useState<string | null>(null);
 

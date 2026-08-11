@@ -39,7 +39,9 @@ export default function ServicesView() {
   });
 
   const [query, setQuery] = useState("");
-  const [view, setView] = useState<EntityView>("cards");
+  // Notion-style dense table reads better than cards as the landing view
+  // for a resource list -- cards stay one click away via the toggle.
+  const [view, setView] = useState<EntityView>("table");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [stateFilter, setStateFilter] = useState("all");
   const [hostFilter, setHostFilter] = useState("all");

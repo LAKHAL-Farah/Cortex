@@ -13,6 +13,7 @@
  * docstring and topology_sync.py for the property/edge shapes relied on
  * below.
  */
+import { Cpu, HardDrive, Network as NetworkIcon, type LucideIcon } from "lucide-react";
 import type { TopologyEdge, TopologyGraph, TopologyVertex, TopologyVertexLabel } from "./types";
 import { vertexDisplayName } from "./topology";
 
@@ -133,6 +134,49 @@ export const SERVICE_SOURCE_LABEL: Record<string, string> = {
   cinder: "Cinder",
   neutron: "Neutron",
 };
+
+// One color + one lucide icon per OpenStack project a Service can come
+// from, so the card/table "asset" badge reads as compute (Nova) vs. block
+// storage (Cinder) vs. networking (Neutron) at a glance instead of every
+// Service sharing the same generic Boxes glyph. Cinder reuses
+// --role-storage so it lines up with the same green used for storage :Node
+// roles elsewhere (NodeCard.tsx).
+export const SERVICE_SOURCE_COLOR: Record<string, string> = {
+  nova: "var(--chart-1)",
+  cinder: "var(--role-storage)",
+  neutron: "var(--chart-2)",
+};
+
+export const SERVICE_SOURCE_ICON: Record<string, LucideIcon> = {
+  nova: Cpu,
+  cinder: HardDrive,
+  neutron: NetworkIcon,
+};
+
+// ---------------------------------------------------------------------------
+// "Hosted on" / other free-text tags: a small, fixed color palette hashed
+// off the tag's own text so the same host always renders the same color
+// (no per-host config needed) while still reading as a proper Notion-style
+// color-coded tag instead of a plain link.
+// ---------------------------------------------------------------------------
+
+const TAG_PALETTE = [
+  "var(--chart-1)",
+  "var(--chart-2)",
+  "var(--chart-3)",
+  "var(--chart-4)",
+  "var(--chart-5)",
+  "var(--role-controller)",
+  "var(--role-monitoring)",
+] as const;
+
+export function tagColorForKey(key: string): string {
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) | 0;
+  }
+  return TAG_PALETTE[Math.abs(hash) % TAG_PALETTE.length];
+}
 
 // ---------------------------------------------------------------------------
 // Networks / Subnets / Routers / FloatingIPs (see topology_sync.py's

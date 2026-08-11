@@ -3,7 +3,7 @@
 import React from "react";
 import { Card } from "./Card";
 import SparklineChart from "./SparklineChart";
-import { ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { ArrowUpRight, ArrowDownRight, type LucideIcon } from "lucide-react";
 
 export default function MetricCard({
   title,
@@ -13,6 +13,8 @@ export default function MetricCard({
   trendLabel,
   sparklineData,
   sparklineColor,
+  icon: Icon,
+  iconColor,
 }: {
   title: string;
   value: string | number;
@@ -21,12 +23,28 @@ export default function MetricCard({
   trendLabel?: string;
   sparklineData?: { name: string; value: number }[];
   sparklineColor?: string;
+  /** Small square "asset" badge in the header, same visual pattern as the
+   * per-type icon badges on the Services/Networks list rows -- optional so
+   * existing callers keep working without one. */
+  icon?: LucideIcon;
+  iconColor?: string;
 }) {
   const trendPositive = (trend ?? 0) >= 0;
+  const badgeColor = iconColor ?? sparklineColor ?? "var(--accent)";
   return (
     <Card interactive className="flex flex-col justify-between gap-3">
       <div>
-        <div className="text-sm font-medium text-text-dim">{title}</div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm font-medium text-text-dim">{title}</div>
+          {Icon ? (
+            <span
+              className="grid h-8 w-8 flex-shrink-0 place-items-center rounded-[var(--radius-control)]"
+              style={{ background: `color-mix(in srgb, ${badgeColor} 14%, transparent)` }}
+            >
+              <Icon className="h-4 w-4" style={{ color: badgeColor }} strokeWidth={1.75} />
+            </span>
+          ) : null}
+        </div>
         <div className="mt-2 flex items-baseline gap-2">
           <span className="stat-figure text-[26px] text-color-text">{value}</span>
           {unit ? <span className="text-sm text-text-faint">{unit}</span> : null}
