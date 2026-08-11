@@ -105,6 +105,35 @@ export interface AnomalyEvent {
   is_active: boolean;
 }
 
+// --- Alert correlation (Phase 6 -- see routers/anomalies.py's /incidents,
+// services/alert_correlation.py) ------------------------------------------
+//
+// One incident per GET /api/v1/anomalies/incidents entry. Every open
+// AnomalyFlag comes back nested under exactly one incident -- an alert
+// with no correlated peer is still an incident, just with
+// member_count === 1, so AlertsView.tsx can group by incident_id
+// uniformly instead of special-casing "no incident".
+
+export interface AnomalyIncidentRootCause {
+  vertex_id: string;
+  label: TopologyVertexLabel | null;
+}
+
+export interface AnomalyIncidentGraphPath {
+  vertex_ids: string[];
+  edges: { type: TopologyEdgeType; source: string; target: string }[];
+}
+
+export interface AnomalyIncident {
+  incident_id: string;
+  severity: AnomalySeverity;
+  member_count: number;
+  root_cause_guess: AnomalyIncidentRootCause | null;
+  narrative: string;
+  members: AnomalyFlag[];
+  graph_path: AnomalyIncidentGraphPath | null;
+}
+
 // --- Topology (Phase 6 -- see services/api/app/routers/topology.py) -------
 //
 // Mirrors schemas.TopologyGraphOut/TopologyVertexDetailOut/TopologyHealthOut

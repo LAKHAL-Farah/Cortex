@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from .. import models
 from ..db import get_db
+from ..services import alert_correlation
 
 router = APIRouter(prefix="/api/v1/anomalies", tags=["anomalies"])
 
@@ -72,6 +73,28 @@ def list_anomaly_history(hostname: str | None = None, limit: int = 200, db: Sess
         }
         for r in rows
     ]
+
+
+@router.get("/incidents")
+def list_anomaly_incidents(db: Session = Depends(get_db)):
+    """Phase 6: open anomalies grouped into incidents via the topology
+    graph, instead of one unrelated row per (hostname, metric_name).
+
+    Every open alert from GET /api/v1/anomalies comes back exactly once,
+    nested under an incident -- an alert with no correlated peer is
+    still its own incident, just with `member_count: 1`, so the web app
+    can group by `incident_id` uniformly rather than special-casing
+    "ungrouped" (see AlertsView.tsx). /api/v1/anomalies and /history stay
+    exactly as they are: this endpoint is a grouped *view* over the same
+    AnomalyFlag rows, not a replacement for them.
+
+    Degrades to one incident per alert (identical to today's ungrouped
+    behavior) if the topology graph itself is unreachable, rather than
+    a 503 -- see alert_correlation.build_incidents's docstring. Postgres
+    alerting has to keep working even when Neo4j or its sync loop is
+    down.
+    """
+    return alert_correlation.build_incidents(db)
 
 
 @router.get("/{hostname}")

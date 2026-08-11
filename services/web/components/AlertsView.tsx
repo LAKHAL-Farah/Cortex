@@ -14,6 +14,7 @@ import {
   RefreshCw,
   X,
   ChevronRight,
+  ChevronDown,
   Sparkles,
   Cpu,
   MemoryStick,
@@ -22,8 +23,10 @@ import {
   ShieldCheck,
   Radar,
   History,
+  Link2,
+  Waypoints,
 } from "lucide-react";
-import type { AnomalyFlag, AnomalySeverity } from "@/lib/types";
+import type { AnomalyFlag, AnomalyIncident, AnomalySeverity } from "@/lib/types";
 import {
   ALL_SEVERITIES,
   METHOD_LABEL,
@@ -47,7 +50,7 @@ const fetcher = async (url: string) => {
     const message = (data && (data.detail || data.message)) || `Request failed (${res.status})`;
     throw new Error(message);
   }
-  return data as AnomalyFlag[];
+  return data as AnomalyIncident[];
 };
 
 type IconType = typeof Cpu;
@@ -206,6 +209,79 @@ function AlertRow({ a, onOpen }: { a: AnomalyFlag; onOpen: () => void }) {
   );
 }
 
+/** An incident with more than one member (action plan doc, section 3.3):
+ * a narrative + severity + member count that expands to the same
+ * AlertRow used for a standalone alert, plus a "View on graph" deep link
+ * into /topology when the API resolved a graph_path for it. Incidents
+ * with only one surviving member render as a plain AlertRow instead (see
+ * the grouping logic in AlertsView below) -- this component is only ever
+ * used for genuinely correlated groups.
+ */
+function IncidentCard({
+  incident,
+  members,
+  onOpenMember,
+}: {
+  incident: AnomalyIncident;
+  members: AnomalyFlag[];
+  onOpenMember: (a: AnomalyFlag) => void;
+}) {
+  // Starts expanded (unlike a typical accordion) -- this is a new kind of
+  // row in this list, so it should be obvious at a glance rather than
+  // requiring a click to discover.
+  const [expanded, setExpanded] = useState(true);
+  const graphHref = incident.graph_path
+    ? `/topology?highlight=${incident.graph_path.vertex_ids.map(encodeURIComponent).join(",")}`
+    : null;
+
+  return (
+    <div
+      className="border-b last:border-b-0"
+      style={{ borderColor: "var(--border-soft)", borderLeft: `3px solid ${SEVERITY_COLOR[incident.severity]}`, background: SEVERITY_SOFT[incident.severity] }}
+    >
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="grid w-full grid-cols-[auto_1fr_auto] items-start gap-3 p-4 text-left transition-colors hover:bg-[var(--canvas)]"
+      >
+        <div className="mt-0.5">
+          <SeverityBadge severity={incident.severity} />
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-[0.06em]" style={{ color: SEVERITY_COLOR[incident.severity] }}>
+            <Link2 className="h-3.5 w-3.5 flex-shrink-0" strokeWidth={2.5} />
+            Correlated incident · {members.length} related alerts
+          </div>
+          <p className="mt-1 text-sm font-medium leading-relaxed text-color-text">{incident.narrative}</p>
+        </div>
+        <ChevronDown
+          className={`h-4 w-4 flex-shrink-0 text-text-muted transition-transform ${expanded ? "rotate-180" : ""}`}
+          strokeWidth={2}
+        />
+      </button>
+
+      {expanded && (
+        <div className="space-y-2 pb-3">
+          {graphHref && (
+            <Link
+              href={graphHref}
+              className="mx-4 inline-flex items-center gap-1.5 text-xs font-semibold underline"
+              style={{ color: "var(--accent)" }}
+            >
+              <Waypoints className="h-3.5 w-3.5" strokeWidth={2} />
+              View on graph
+            </Link>
+          )}
+          <div className="mx-4 overflow-hidden rounded-[var(--radius-control)]" style={{ border: "1px solid var(--border-soft)", background: "var(--surface)" }}>
+            {members.map((m) => (
+              <AlertRow key={flagKey(m)} a={m} onOpen={() => onOpenMember(m)} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -329,7 +405,7 @@ export default function AlertsView() {
   const [sort, setSort] = useState<SortKey>("severity");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
-  const { data, error, isLoading, isValidating, mutate } = useSWR<AnomalyFlag[]>("/api/anomalies", fetcher, {
+  const { data, error, isLoading, isValidating, mutate } = useSWR<AnomalyIncident[]>("/api/anomalies/incidents", fetcher, {
     refreshInterval: 5000,
     keepPreviousData: true,
   });
@@ -340,34 +416,58 @@ export default function AlertsView() {
     return () => window.removeEventListener("cortex:refresh", onRefresh);
   }, [mutate]);
 
-  const anomalies = useMemo(() => data ?? [], [data]);
+  const incidents = useMemo(() => data ?? [], [data]);
+
+  // Every open alert, alongside the incident it belongs to -- flattened
+  // back out so counts/search/sort keep working over individual alerts
+  // exactly as they did before incidents existed, per the action plan
+  // doc's "this is additive, not a rewrite of the single-alert case".
+  const flatMembers = useMemo(
+    () => incidents.flatMap((incident) => incident.members.map((member) => ({ member, incident }))),
+    [incidents]
+  );
 
   const counts = useMemo(() => {
     const c: Record<AnomalySeverity, number> = { critical: 0, high: 0, medium: 0 };
     const hosts = new Set<string>();
-    for (const a of anomalies) {
-      c[a.severity] = (c[a.severity] ?? 0) + 1;
-      hosts.add(a.hostname);
+    for (const { member } of flatMembers) {
+      c[member.severity] = (c[member.severity] ?? 0) + 1;
+      hosts.add(member.hostname);
     }
     return { ...c, hosts: hosts.size };
-  }, [anomalies]);
+  }, [flatMembers]);
 
-  const filtered = useMemo(() => {
+  const groups = useMemo(() => {
     const q = search.trim().toLowerCase();
-    let list = anomalies.filter((a) => {
-      if (severity !== "all" && a.severity !== severity) return false;
+    const matches = (m: AnomalyFlag) => {
+      if (severity !== "all" && m.severity !== severity) return false;
       if (!q) return true;
-      return a.hostname.toLowerCase().includes(q) || metricLabel(a.metric_name).toLowerCase().includes(q);
-    });
-    list = [...list].sort((a, b) => {
-      if (sort === "severity") return SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || Math.abs(b.z_score) - Math.abs(a.z_score);
-      if (sort === "zscore") return Math.abs(b.z_score) - Math.abs(a.z_score);
-      return new Date(b.detected_at).getTime() - new Date(a.detected_at).getTime();
+      return m.hostname.toLowerCase().includes(q) || metricLabel(m.metric_name).toLowerCase().includes(q);
+    };
+
+    const byIncident = new Map<string, { incident: AnomalyIncident; members: AnomalyFlag[] }>();
+    for (const { member, incident } of flatMembers) {
+      if (!matches(member)) continue;
+      const existing = byIncident.get(incident.incident_id);
+      if (existing) existing.members.push(member);
+      else byIncident.set(incident.incident_id, { incident, members: [member] });
+    }
+
+    const bestSeverityRank = (ms: AnomalyFlag[]) => Math.max(...ms.map((m) => SEVERITY_RANK[m.severity]));
+    const bestZScore = (ms: AnomalyFlag[]) => Math.max(...ms.map((m) => Math.abs(m.z_score)));
+    const mostRecent = (ms: AnomalyFlag[]) => Math.max(...ms.map((m) => new Date(m.detected_at).getTime()));
+
+    const list = [...byIncident.values()];
+    list.sort((a, b) => {
+      if (sort === "severity") return bestSeverityRank(b.members) - bestSeverityRank(a.members) || bestZScore(b.members) - bestZScore(a.members);
+      if (sort === "zscore") return bestZScore(b.members) - bestZScore(a.members);
+      return mostRecent(b.members) - mostRecent(a.members);
     });
     return list;
-  }, [anomalies, search, severity, sort]);
+  }, [flatMembers, search, severity, sort]);
 
-  const selected = anomalies.find((a) => flagKey(a) === selectedKey) ?? null;
+  const shownCount = useMemo(() => groups.reduce((n, g) => n + g.members.length, 0), [groups]);
+  const selected = flatMembers.find(({ member }) => flagKey(member) === selectedKey)?.member ?? null;
   const hasCritical = counts.critical > 0;
 
   return (
@@ -474,7 +574,7 @@ export default function AlertsView() {
 
         <div className="flex items-center justify-between px-0.5 text-xs text-text-faint">
           <span>
-            {isLoading ? "Loading…" : error ? "—" : `${filtered.length} alert${filtered.length === 1 ? "" : "s"}`}
+            {isLoading ? "Loading…" : error ? "—" : `${shownCount} alert${shownCount === 1 ? "" : "s"}`}
             {!isLoading && !error ? " · live" : ""}
           </span>
           <span>Highest severity first</span>
@@ -507,17 +607,26 @@ export default function AlertsView() {
 
         <div className="max-h-[60vh] overflow-y-auto">
           {isLoading && <p className="p-6 text-sm text-text-faint">Loading…</p>}
-          {!isLoading && !error && filtered.length === 0 && (
+          {!isLoading && !error && groups.length === 0 && (
             <div className="flex flex-col items-center gap-2 p-10 text-center">
               <ShieldCheck className="h-5 w-5" style={{ color: "var(--ok)" }} strokeWidth={1.75} />
               <p className="text-sm text-text-faint">
-                {anomalies.length === 0 ? "No active anomalies — every host is within its normal baseline." : "No alerts match these filters."}
+                {flatMembers.length === 0 ? "No active anomalies — every host is within its normal baseline." : "No alerts match these filters."}
               </p>
             </div>
           )}
-          {filtered.map((a) => (
-            <AlertRow key={flagKey(a)} a={a} onOpen={() => setSelectedKey(flagKey(a))} />
-          ))}
+          {groups.map((g) =>
+            g.members.length > 1 ? (
+              <IncidentCard
+                key={g.incident.incident_id}
+                incident={g.incident}
+                members={g.members}
+                onOpenMember={(m) => setSelectedKey(flagKey(m))}
+              />
+            ) : (
+              <AlertRow key={flagKey(g.members[0])} a={g.members[0]} onOpen={() => setSelectedKey(flagKey(g.members[0]))} />
+            )
+          )}
         </div>
       </div>
 

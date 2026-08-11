@@ -247,7 +247,18 @@ interface RenderedLink extends Omit<TopologyEdge, "source" | "target"> {
   target: string | (GraphNode & Record<string, unknown>);
 }
 
-export default function TopologyGraph({ onSelectVertex }: { onSelectVertex: (id: string) => void }) {
+export default function TopologyGraph({
+  onSelectVertex,
+  highlightIds,
+}: {
+  onSelectVertex: (id: string) => void;
+  /** Vertex ids to highlight on load -- e.g. an Alerts incident's
+   * graph_path.vertex_ids, arriving via /topology?highlight=id1,id2.
+   * Dims every other vertex the same way an active search match does,
+   * and auto-selects the first match so its detail panel opens without
+   * the user having to click it. */
+  highlightIds?: string[];
+}) {
   const { data, error, isLoading } = useSWR<TopologyGraphData>("/api/topology", fetcher, {
     refreshInterval: 30000,
   });
@@ -312,6 +323,35 @@ export default function TopologyGraph({ onSelectVertex }: { onSelectVertex: (id:
     return ids;
   }, [data, query]);
 
+  const highlightSet = useMemo(
+    () => (highlightIds && highlightIds.length > 0 ? new Set(highlightIds) : null),
+    [highlightIds]
+  );
+
+  // A deep-linked highlight dims every other vertex the same way an
+  // active search match does -- but a search the user actually typed
+  // takes priority, since it's a more specific ask than whatever
+  // incident linked here.
+  const dimIds = matchIds ?? highlightSet;
+
+  // Auto-select (and thereby open the detail panel for) the first
+  // highlighted vertex that's actually on the graph, once, the first
+  // time the data + highlight ids are both available -- a ref guard
+  // instead of a selectedId check keeps this from re-firing and
+  // stealing the user's own selection back after they click elsewhere,
+  // including on SWR's periodic refetch.
+  const didAutoFocusHighlight = useRef(false);
+  useEffect(() => {
+    if (didAutoFocusHighlight.current) return;
+    if (!highlightIds || highlightIds.length === 0 || !data) return;
+    const nodeIds = new Set(data.nodes.map((n) => n.id));
+    const first = highlightIds.find((id) => nodeIds.has(id));
+    if (!first) return;
+    didAutoFocusHighlight.current = true;
+    setSelectedId(first);
+    onSelectVertex(first);
+  }, [highlightIds, data, onSelectVertex]);
+
   const graphData = useMemo(() => {
     // Nodes are filtered from `data.nodes` directly (not cloned) so the
     // x/y position react-force-graph settles on survives filter toggles
@@ -351,7 +391,7 @@ export default function TopologyGraph({ onSelectVertex }: { onSelectVertex: (id:
       const color = resolveCssVar(vertexColor(node));
       const isSelected = node.id === selectedId;
       const isHovered = node.id === hoveredId;
-      const isDimmed = matchIds !== null && !matchIds.has(node.id);
+      const isDimmed = dimIds !== null && !dimIds.has(node.id);
       const r = node.label === "Node" || node.label === "Service" ? 7.5 : 6.5;
 
       ctx.save();
@@ -383,7 +423,7 @@ export default function TopologyGraph({ onSelectVertex }: { onSelectVertex: (id:
       }
       ctx.restore();
     },
-    [resolveCssVar, selectedId, hoveredId, matchIds]
+    [resolveCssVar, selectedId, hoveredId, dimIds]
   );
 
   const linkColorFor = useCallback(
