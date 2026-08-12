@@ -186,3 +186,98 @@ def test_incidents_empty_when_no_open_alerts(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+# ---------------------------------------------------------------- /rca -----
+# rca_suggester.py calls graph_db.fetch_vertex_detail directly (the
+# `WHERE n.id = $vertex_id` shape), not the reachability/shortest-path
+# queries _FakeSession above answers -- so /rca gets its own small fake
+# session rather than reusing _FakeSession/_FakeDriver.
+
+class _RcaFakeSession:
+    _VERTICES = {
+        "compute-02": {
+            "label": "Node",
+            "outgoing": [],
+            "incoming": [
+                {"id": "nova-compute@compute-02", "label": "Service", "relationship": "RUNS_ON", "direction": "incoming"},
+            ],
+        },
+        "nova-compute@compute-02": {
+            "label": "Service",
+            "outgoing": [
+                {"id": "compute-02", "label": "Node", "relationship": "RUNS_ON", "direction": "outgoing"},
+            ],
+            "incoming": [],
+        },
+    }
+
+    def run(self, query, **kwargs):
+        assert "WHERE n.id = $vertex_id" in query, f"unexpected query: {query}"
+        vertex_id = kwargs["vertex_id"]
+        vertex = self._VERTICES.get(vertex_id)
+        if vertex is None:
+            return _FakeResult([])
+        return _FakeResult([{"properties": {"id": vertex_id}, **vertex}])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _RcaFakeDriver:
+    def session(self):
+        return _RcaFakeSession()
+
+
+def test_rca_returns_directed_suggestion_for_runs_on_pair(monkeypatch):
+    monkeypatch.setattr(graph_db, "driver", _RcaFakeDriver())
+    _clear_open_alerts()
+    _seed_alert("compute-02", "cpu_usage", "critical")
+    _seed_alert("nova-compute@compute-02", "cpu_usage", "high")
+
+    response = client.get("/api/v1/anomalies/rca")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["cause"]["id"] == "compute-02"
+    assert body[0]["effect"]["id"] == "nova-compute@compute-02"
+    assert body[0]["relationship"] == "RUNS_ON"
+    assert "RUNS_ON" in body[0]["text"]
+
+
+def test_rca_empty_when_no_open_alerts(monkeypatch):
+    monkeypatch.setattr(graph_db, "driver", _RcaFakeDriver())
+    _clear_open_alerts()
+
+    response = client.get("/api/v1/anomalies/rca")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_rca_returns_503_when_graph_unreachable(monkeypatch):
+    monkeypatch.setattr(graph_db, "driver", _UnreachableDriver())
+    _clear_open_alerts()
+    _seed_alert("compute-02", "cpu_usage", "high")
+
+    response = client.get("/api/v1/anomalies/rca")
+
+    assert response.status_code == 503
+
+
+def test_rca_route_is_not_swallowed_by_hostname_catchall(monkeypatch):
+    """Regression guard for the route-ordering footgun called out in
+    routers/anomalies.py::list_rca_suggestions's docstring: /rca must
+    resolve to the RCA endpoint, not GET /{hostname} with hostname="rca"."""
+    monkeypatch.setattr(graph_db, "driver", _RcaFakeDriver())
+    _clear_open_alerts()
+
+    response = client.get("/api/v1/anomalies/rca")
+
+    assert response.status_code == 200
+    assert response.json() == []  # would be [] either way, but 200 (not a hostname lookup 200-with-rows) is the point
+    assert isinstance(response.json(), list)

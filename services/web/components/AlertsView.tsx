@@ -26,7 +26,7 @@ import {
   Link2,
   Waypoints,
 } from "lucide-react";
-import type { AnomalyFlag, AnomalyIncident, AnomalySeverity } from "@/lib/types";
+import type { AnomalyFlag, AnomalyIncident, AnomalySeverity, RcaSuggestion } from "@/lib/types";
 import {
   ALL_SEVERITIES,
   METHOD_LABEL,
@@ -42,6 +42,7 @@ import {
   metricLabel,
   zScoreFill,
 } from "@/lib/anomalies";
+import { relationshipLabel } from "@/lib/rca";
 import { ProgressBar } from "./ui/ProgressBar";
 
 const fetcher = async (url: string) => {
@@ -52,6 +53,18 @@ const fetcher = async (url: string) => {
     throw new Error(message);
   }
   return data as AnomalyIncident[];
+};
+
+/** Same fetcher shape, just typed for /api/anomalies/rca's array-of-
+ * suggestions response instead of an array of incidents. */
+const rcaFetcher = async (url: string) => {
+  const res = await fetch(url);
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message = (data && (data.detail || data.message)) || `Request failed (${res.status})`;
+    throw new Error(message);
+  }
+  return data as RcaSuggestion[];
 };
 
 type IconType = typeof Cpu;
@@ -283,6 +296,63 @@ function IncidentCard({
   );
 }
 
+/** One "X caused Y" suggestion (basic causal RCA -- see
+ * services/api/app/services/rca_suggester.py). Renders the API's own
+ * `text` field directly rather than recomposing it client-side, same
+ * reasoning IncidentCard's narrative and buildInsight() already follow:
+ * one source of truth for the sentence. The relationship badge is a
+ * secondary, glanceable cue on top of that sentence, not a replacement
+ * for it. */
+function RcaSuggestionRow({ suggestion }: { suggestion: RcaSuggestion }) {
+  return (
+    <div
+      className="flex items-start gap-3 border-b p-4 last:border-b-0"
+      style={{ borderColor: "var(--border-soft)" }}
+    >
+      <div
+        className="mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)]"
+        style={{ background: SEVERITY_SOFT[suggestion.effect.severity] }}
+      >
+        <Waypoints className="h-4 w-4" style={{ color: SEVERITY_COLOR[suggestion.effect.severity] }} strokeWidth={1.75} />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-text-faint">
+          <SeverityBadge severity={suggestion.cause.severity} />
+          <span className="truncate font-semibold text-color-text">{suggestion.cause.id}</span>
+          <span>{relationshipLabel(suggestion.relationship)}</span>
+          <span className="truncate font-semibold text-color-text">{suggestion.effect.id}</span>
+        </div>
+        <p className="mt-1.5 text-sm leading-relaxed text-color-text">{suggestion.text}</p>
+      </div>
+    </div>
+  );
+}
+
+/** "RCA suggestions" section, above the alerts list -- see the action
+ * plan doc's step 4. Each row is a single-hop, graph-adjacent cause/effect
+ * pair; this is additive to the incident/alert list below, not a
+ * replacement for it (an incident can have zero RCA suggestions if none
+ * of its members are graph-adjacent, and vice versa). */
+function RcaSuggestionsPanel({ suggestions }: { suggestions: RcaSuggestion[] }) {
+  if (suggestions.length === 0) return null;
+  return (
+    <div className="panel overflow-hidden">
+      <div
+        className="flex items-center gap-1.5 px-4 py-2.5 text-[11px] font-medium uppercase tracking-[0.08em] text-text-muted"
+        style={{ background: "var(--canvas)" }}
+      >
+        <Link2 className="h-3.5 w-3.5" strokeWidth={2} />
+        RCA suggestions · likely root causes
+      </div>
+      <div>
+        {suggestions.map((s) => (
+          <RcaSuggestionRow key={`${s.cause.id}::${s.effect.id}::${s.relationship}`} suggestion={s} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -423,11 +493,25 @@ export default function AlertsView() {
     keepPreviousData: true,
   });
 
+  // Separate SWR key/poll from incidents: the RCA endpoint can 503 when
+  // the graph is briefly unreachable (see routers/anomalies.py's /rca)
+  // even while /incidents keeps serving ungrouped alerts fine, so a
+  // failure here shouldn't be surfaced as a hard error for the whole
+  // page -- just an absent (not shown) suggestions panel.
+  const { data: rcaData, mutate: mutateRca } = useSWR<RcaSuggestion[]>("/api/anomalies/rca", rcaFetcher, {
+    refreshInterval: 5000,
+    keepPreviousData: true,
+    shouldRetryOnError: true,
+  });
+
   useEffect(() => {
-    const onRefresh = () => mutate();
+    const onRefresh = () => {
+      mutate();
+      mutateRca();
+    };
     window.addEventListener("cortex:refresh", onRefresh);
     return () => window.removeEventListener("cortex:refresh", onRefresh);
-  }, [mutate]);
+  }, [mutate, mutateRca]);
 
   const incidents = useMemo(() => data ?? [], [data]);
 
@@ -603,6 +687,13 @@ export default function AlertsView() {
           </button>
         </div>
       )}
+
+      {/* Basic causal RCA suggestions (see rca_suggester.py) -- sits above
+         the alerts list itself, additive to it. Silently absent (not an
+         error banner) when the endpoint 503s or simply has nothing to
+         say yet -- /incidents above is still the source of truth for
+         whether alerting itself is healthy. */}
+      <RcaSuggestionsPanel suggestions={rcaData ?? []} />
 
       <div className="panel overflow-hidden">
         <div

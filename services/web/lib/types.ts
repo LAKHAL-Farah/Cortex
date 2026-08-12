@@ -134,6 +134,29 @@ export interface AnomalyIncident {
   graph_path: AnomalyIncidentGraphPath | null;
 }
 
+// --- RCA suggestions (see services/api/app/routers/anomalies.py's /rca,
+// services/api/app/services/rca_suggester.py) ------------------------------
+//
+// One entry per pair of currently-anomalous, graph-adjacent vertices from
+// GET /api/v1/anomalies/rca. Unlike AnomalyIncident (which just groups
+// alerts), each suggestion is a directed "X caused Y" claim: `text` is the
+// full sentence the API already composed, and always names `relationship`
+// -- never just metric names -- per the feature's acceptance criterion.
+
+export interface RcaEndpoint {
+  id: string;
+  label: TopologyVertexLabel | null;
+  metric_name: string;
+  severity: AnomalySeverity;
+}
+
+export interface RcaSuggestion {
+  cause: RcaEndpoint;
+  effect: RcaEndpoint;
+  relationship: TopologyEdgeType;
+  text: string;
+}
+
 // --- Topology (Phase 6 -- see services/api/app/routers/topology.py) -------
 //
 // Mirrors schemas.TopologyGraphOut/TopologyVertexDetailOut/TopologyHealthOut
