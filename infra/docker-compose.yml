@@ -70,6 +70,13 @@ services:
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-384}
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
+      # Grounded chat generation over the RAG results above (adr-0005) --
+      # NVIDIA NIM chat model called via LangChain's ChatNVIDIA. Only
+      # POST /api/v1/knowledge/chat needs this; everything else still works
+      # with NVIDIA_API_KEY unset.
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY}
+      NVIDIA_NIM_MODEL: ${NVIDIA_NIM_MODEL:-nvidia/nemotron-3-super-120b-a12b}
+      KNOWLEDGE_CHAT_MIN_SCORE: ${KNOWLEDGE_CHAT_MIN_SCORE:-0.2}
     volumes:
       - ../services/api:/app
       - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd

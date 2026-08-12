@@ -168,8 +168,11 @@ class KnowledgeStatus(BaseModel):
 class KnowledgeSearchQuery(BaseModel):
     query: str = Field(min_length=1)
     top_k: int = Field(default=5, ge=1, le=25)
-    # "service-detail" to search only the per-service docs (nova/neutron/glance/
-    # keystone/cinder), or omit to search the whole knowledge base.
+    # One of: "service-detail" (nova/neutron/glance/keystone/cinder), "topology",
+    # "network", "service-catalog", "resource-mgmt", "security-access",
+    # "admin-runbook", "flow-processes", "glossary", "overview" (README.md), or
+    # "general" for any unrecognized top-level file. Omit to search the whole
+    # knowledge base. See loader.py::_TOP_LEVEL_CATEGORIES for the source of truth.
     category: str | None = None
 
 
@@ -184,6 +187,37 @@ class KnowledgeSearchResult(BaseModel):
 
 class KnowledgeSearchResponse(BaseModel):
     results: list[KnowledgeSearchResult]
+
+
+# --------------------------------------------------------------------------
+# Knowledge chat (adr-0005) -- grounded Q&A over docs/knowledge/ via NVIDIA
+# NIM + LangChain, layered on top of the KnowledgeSearch* retrieval above.
+# --------------------------------------------------------------------------
+
+class ChatRole(str, Enum):
+    user = "user"
+    assistant = "assistant"
+
+
+class ChatMessage(BaseModel):
+    role: ChatRole
+    content: str = Field(min_length=1)
+
+
+class ChatQuery(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    # Prior turns, oldest first. Sent by the client on every request -- the
+    # API is stateless across calls (see adr-0005), so this *is* the memory.
+    history: list[ChatMessage] = Field(default_factory=list, max_length=20)
+    category: str | None = None
+    top_k: int = Field(default=5, ge=1, le=15)
+
+
+class ChatSource(BaseModel):
+    source_path: str
+    doc_title: str
+    heading: str | None = None
+    score: float
 
 
 

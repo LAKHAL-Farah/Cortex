@@ -18,3 +18,7 @@ qdrant-client==1.12.1
 # torch and transformers as transitive deps; expect the image to grow by
 # ~500MB-1GB and the first `pip install` to take a while.
 sentence-transformers==3.3.1
+# Grounded chat generation over the retrieved chunks above (adr-0005) --
+# ChatNVIDIA calls the hosted NVIDIA NIM endpoint, no model weights baked
+# into the image (unlike the embedding model).
+langchain-nvidia-ai-endpoints==1.4.3

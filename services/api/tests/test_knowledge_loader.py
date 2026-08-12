@@ -52,8 +52,17 @@ def test_load_knowledge_chunks_walks_subdirectories(tmp_path):
 
     assert sources == {"topology.md", "service-detail/nova.md"}
     categories = {c.source_path: c.category for c in chunks}
-    assert categories["topology.md"] == "general"
+    assert categories["topology.md"] == "topology"
     assert categories["service-detail/nova.md"] == "service-detail"
+
+
+def test_unrecognized_top_level_file_falls_back_to_general(tmp_path):
+    knowledge_dir = tmp_path / "knowledge"
+    knowledge_dir.mkdir()
+    (knowledge_dir / "some-new-doc.md").write_text("# Some New Doc\n\ntext\n")
+
+    chunks = load_knowledge_chunks(knowledge_dir)
+    assert {c.category for c in chunks} == {"general"}
 
 
 def test_load_knowledge_chunks_is_deterministically_ordered(tmp_path):

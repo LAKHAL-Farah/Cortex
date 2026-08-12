@@ -32,6 +32,27 @@ _HEADING_RE = re.compile(r"^(#{1,3})\s+(.*)$", re.MULTILINE)
 # section (e.g. a long command reference or table-heavy section).
 MAX_CHUNK_CHARS = 2000
 
+# Top-level files each get their own category instead of a shared "general"
+# bucket. Before this, every non-service-detail file (topology, network,
+# security-access, admin-runbook, ...) was tagged "general", so the
+# `category` filter already exposed by /api/v1/knowledge/search and
+# qdrant_store.search() could only ever mean "service-detail vs everything
+# else" -- not useful for e.g. a security-focused agent that wants to search
+# security-access.md + admin-runbook.md without pulling in glossary.md hits.
+# Any top-level file not listed here still falls back to "general" (see
+# _category_for below), so adding a new file never breaks ingestion.
+_TOP_LEVEL_CATEGORIES = {
+    "README.md": "overview",
+    "topology.md": "topology",
+    "network.md": "network",
+    "service-catalog.md": "service-catalog",
+    "resource-mgmt.md": "resource-mgmt",
+    "security-access.md": "security-access",
+    "admin-runbook.md": "admin-runbook",
+    "flow-processes.md": "flow-processes",
+    "glossary.md": "glossary",
+}
+
 
 @dataclass
 class KnowledgeChunk:
@@ -124,21 +145,28 @@ def iter_markdown_files(knowledge_dir: Path):
             yield path, path.relative_to(knowledge_dir)
 
 
-def load_knowledge_chunks(knowledge_dir: str | os.PathLike) -> list[KnowledgeChunk]:
-    """Walks knowledge_dir and returns every chunk from every .md file in it.
-
-    A file under a `service-detail/` subdirectory (anywhere in the tree) is
-    tagged category="service-detail"; everything else is "general". This
-    lets the search/ingest API filter to "just the per-service docs" without
-    hardcoding the five current service names -- a sixth service file added
-    later picks up the same tag for free.
+def _category_for(rel_path: Path) -> str:
+    """A file under a `service-detail/` subdirectory (anywhere in the tree) is
+    tagged category="service-detail" -- this lets the search/ingest API filter
+    to "just the per-service docs" without hardcoding the five current service
+    names, so a sixth service file added later picks up the same tag for free.
+    Every other known top-level file gets its own category (see
+    _TOP_LEVEL_CATEGORIES); an unrecognized top-level file falls back to
+    "general" rather than failing ingestion.
     """
+    if "service-detail" in rel_path.parts[:-1]:
+        return "service-detail"
+    return _TOP_LEVEL_CATEGORIES.get(rel_path.name, "general")
+
+
+def load_knowledge_chunks(knowledge_dir: str | os.PathLike) -> list[KnowledgeChunk]:
+    """Walks knowledge_dir and returns every chunk from every .md file in it."""
     knowledge_dir = Path(knowledge_dir)
     all_chunks: list[KnowledgeChunk] = []
     for abs_path, rel_path in iter_markdown_files(knowledge_dir):
         text = abs_path.read_text(encoding="utf-8")
         rel_str = rel_path.as_posix()
-        category = "service-detail" if "service-detail" in rel_path.parts[:-1] else "general"
+        category = _category_for(rel_path)
         title = _extract_title(text, fallback=rel_path.stem)
         all_chunks.extend(chunk_markdown(text, rel_str, title, category))
     return all_chunks

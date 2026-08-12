@@ -219,3 +219,19 @@ export interface TopologyHealth {
   syncs: Record<string, TopologySyncRun | null>;
 }
 
+// -- Knowledge copilot (adr-0005) ------------------------------------------
+
+export type ChatRole = "user" | "assistant";
+
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+}
+
+export interface ChatSource {
+  source_path: string;
+  doc_title: string;
+  heading: string | null;
+  score: number;
+}
+

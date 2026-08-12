@@ -1,9 +1,12 @@
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from .. import schemas
 from ..security import require_api_key
+from ..services.knowledge import chat as knowledge_chat
 from ..services.knowledge import qdrant_store
 from ..services.knowledge.embeddings import EmbeddingError, embed_query
 from ..services.knowledge.ingest import run_ingest
@@ -72,3 +75,65 @@ def search_knowledge(payload: schemas.KnowledgeSearchQuery):
         for p in points
     ]
     return schemas.KnowledgeSearchResponse(results=results)
+
+
+def _sse_event(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _chat_event_stream(message: str, history, chunks):
+    """Generator consumed by StreamingResponse below. Runs after retrieval
+    (and, if chunks is non-empty, the NVIDIA_API_KEY check) already
+    succeeded outside this generator -- see chat_knowledge() -- so
+    everything here streams as a 200 once it starts."""
+    sources = [
+        schemas.ChatSource(
+            source_path=c.source_path,
+            doc_title=c.doc_title,
+            heading=c.heading,
+            score=c.score,
+        ).model_dump()
+        for c in chunks
+    ]
+    yield _sse_event("sources", {"sources": sources})
+    try:
+        for token in knowledge_chat.stream_answer(message, history, chunks):
+            yield _sse_event("token", {"text": token})
+    except knowledge_chat.ChatConfigError as exc:
+        yield _sse_event("error", {"message": str(exc)})
+        return
+    yield _sse_event("done", {})
+
+
+@router.post("/chat", dependencies=[Depends(require_api_key)])
+def chat_knowledge(payload: schemas.ChatQuery):
+    """Grounded Q&A over docs/knowledge/ (adr-0005): retrieves the same way
+    as /search, then streams an NVIDIA NIM-generated answer (via LangChain's
+    ChatNVIDIA) as Server-Sent Events over that retrieved context only.
+
+    Event order: one `sources` event (the chunks the answer is grounded in,
+    possibly empty), then zero or more `token` events, then either `done` or
+    `error`. Streaming means citations only make sense once the client has
+    the full token stream, so `sources` is emitted first and the client
+    should hold onto it and render it once `done` arrives (or immediately,
+    since it never changes mid-stream).
+    """
+    try:
+        chunks = knowledge_chat.retrieve(payload.message, top_k=payload.top_k, category=payload.category)
+    except EmbeddingError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("knowledge chat retrieval failed")
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"retrieval failed: {exc}") from exc
+
+    if chunks:
+        try:
+            knowledge_chat.require_configured()
+        except knowledge_chat.ChatConfigError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    return StreamingResponse(
+        _chat_event_stream(payload.message, payload.history, chunks),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
