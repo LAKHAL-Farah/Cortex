@@ -7,6 +7,7 @@ import { Waypoints } from "lucide-react";
 import TopologyGraph from "@/components/TopologyGraph";
 import TopologyDetailPanel from "@/components/TopologyDetailPanel";
 import TopologyHealthBadge from "@/components/TopologyHealthBadge";
+import TopologyResyncButton from "@/components/TopologyResyncButton";
 
 export default function TopologyView() {
   const [selectedVertex, setSelectedVertex] = useState<string | null>(null);
@@ -42,7 +43,10 @@ export default function TopologyView() {
             </p>
           </div>
         </div>
-        <TopologyHealthBadge />
+        <div className="flex items-center gap-2">
+          <TopologyHealthBadge />
+          <TopologyResyncButton />
+        </div>
       </div>
 
       <TopologyGraph onSelectVertex={setSelectedVertex} highlightIds={highlightIds} />

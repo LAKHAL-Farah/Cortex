@@ -9,6 +9,7 @@ graph_db.py's module docstring); this is just the HTTP-facing read path
 onto it that nothing exposed before Phase 5.
 """
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from .. import crud, graph_db, schemas
 from ..db import get_db
+from ..services.topology_sync import sync_topology
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/topology", tags=["topology"])
@@ -113,3 +115,62 @@ def get_topology_health(db: Session = Depends(get_db)):
             worst = run_status
 
     return schemas.TopologyHealthOut(status=worst, syncs=syncs)
+
+
+def _resync_run_status(summary: dict) -> str:
+    """Same classification main.py's periodic loop applies to a
+    sync_topology() pass (see main.py::_topology_sync_status) -- duplicated
+    rather than imported, since main.py imports this router (topology.py
+    -> main.py would be circular). Kept in sync by hand, same reasoning
+    rca_suggester.py's own duplicated _SEVERITY_RANK gives for why that's
+    an acceptable tradeoff at this size.
+    """
+    if summary.get("complete_picture") and summary.get("network_topology_ok"):
+        return "ok"
+    return "degraded"
+
+
+@router.post("/resync", response_model=schemas.TopologySyncRunOut)
+def trigger_topology_resync(db: Session = Depends(get_db)):
+    """Manually kick one immediate OpenStack topology-sync pass -- the same
+    `sync_topology()` main.py's periodic loop already runs every
+    TOPOLOGY_SYNC_INTERVAL_SECONDS -- for the "Reconverge" control in the
+    web UI's topology top bar. Runs synchronously (a pass is a handful of
+    OpenStack list calls, not a long-running job) and records the outcome
+    to `topology_sync_runs` the exact same way the periodic loop does (see
+    main.py::_run_periodic_recorded), so GET /health reflects a manual
+    resync immediately and it's indistinguishable in history from a
+    scheduled one.
+
+    Deliberately does NOT also trigger a prometheus_health pass -- that
+    loop runs every PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS (30s by
+    default, see main.py), fast enough that a manual OpenStack resync
+    doesn't need to drag it along too.
+
+    Returns the recorded run (200) even when the pass itself failed --
+    the *request* to resync succeeded (we did attempt it and recorded
+    what happened); the caller reads `status`/`error` on the body to tell
+    a completed-but-degraded pass from an outright failure, same as
+    /health already expects callers to do.
+    """
+    started_at = datetime.utcnow()
+    summary: dict | None = None
+    error: str | None = None
+    try:
+        summary = sync_topology(db)
+        run_status = _resync_run_status(summary)
+    except Exception as exc:
+        logger.exception("manual topology resync failed")
+        run_status = "failed"
+        error = repr(exc)
+    finished_at = datetime.utcnow()
+
+    return crud.record_topology_sync_run(
+        db,
+        sync_type=schemas.SyncType.openstack.value,
+        status=run_status,
+        summary=summary,
+        error=error,
+        started_at=started_at,
+        finished_at=finished_at,
+    )

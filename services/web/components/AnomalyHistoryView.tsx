@@ -12,6 +12,7 @@ import {
   RefreshCw,
   AlertTriangle,
   Server,
+  Boxes,
   ShieldCheck,
   CheckCircle2,
   Cpu,
@@ -35,7 +36,10 @@ import {
   formatDuration,
   formatRelative,
   formatZScore,
+  isServiceStateMetric,
   metricLabel,
+  parseServiceId,
+  serviceDisplayName,
   zScoreFill,
 } from "@/lib/anomalies";
 import { ProgressBar } from "./ui/ProgressBar";
@@ -58,6 +62,11 @@ function MetricGlyph({ metric, className }: { metric: string; className?: string
       return <Cpu className={className} strokeWidth={1.75} />;
     case "ram_usage":
       return <MemoryStick className={className} strokeWidth={1.75} />;
+    // Same reasoning as AlertsView.tsx's MetricGlyph -- a service_state
+    // event is a service, not a host metric, so it gets the topology
+    // graph's :Service glyph (see lib/topology.ts's LABEL_ICON.Service).
+    case "service_state":
+      return <Boxes className={className} strokeWidth={1.75} />;
     default:
       return <Activity className={className} strokeWidth={1.75} />;
   }
@@ -103,10 +112,21 @@ function EventRow({ e, onOpen }: { e: AnomalyEvent; onOpen: () => void }) {
 
       <div className="col-span-2 flex items-center gap-3 sm:col-span-1">
         <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)]" style={{ background: "var(--canvas)" }}>
-          <Server className="h-4 w-4 text-text-dim" strokeWidth={1.75} />
+          {isServiceStateMetric(e.metric_name) ? (
+            <Boxes className="h-4 w-4 text-text-dim" strokeWidth={1.75} />
+          ) : (
+            <Server className="h-4 w-4 text-text-dim" strokeWidth={1.75} />
+          )}
         </div>
         <div className="min-w-0">
-          <div className="truncate font-medium text-color-text">{e.hostname}</div>
+          {isServiceStateMetric(e.metric_name) ? (
+            <>
+              <div className="truncate font-medium text-color-text">{serviceDisplayName(e.hostname)}</div>
+              <div className="truncate text-xs text-text-faint">on {parseServiceId(e.hostname)?.host ?? e.hostname}</div>
+            </>
+          ) : (
+            <div className="truncate font-medium text-color-text">{e.hostname}</div>
+          )}
           <div className="mt-0.5 flex items-center gap-1 text-xs text-text-faint sm:hidden">
             <SeverityBadge severity={e.severity} />
           </div>
@@ -119,12 +139,16 @@ function EventRow({ e, onOpen }: { e: AnomalyEvent; onOpen: () => void }) {
       </div>
 
       <div className="hidden sm:block">
-        <span
-          className="stat-figure inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold"
-          style={{ color: SEVERITY_COLOR[e.severity], background: SEVERITY_SOFT[e.severity] }}
-        >
-          {formatZScore(e.z_score)}
-        </span>
+        {isServiceStateMetric(e.metric_name) ? (
+          <span className="text-xs text-text-faint">—</span>
+        ) : (
+          <span
+            className="stat-figure inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold"
+            style={{ color: SEVERITY_COLOR[e.severity], background: SEVERITY_SOFT[e.severity] }}
+          >
+            {formatZScore(e.z_score)}
+          </span>
+        )}
       </div>
 
       <div className="hidden flex-col text-xs text-text-faint sm:flex">
@@ -179,6 +203,19 @@ function ZScoreMeter({ z, severity }: { z: number; severity: AnomalySeverity }) 
  * lib/anomalies.ts::buildInsight but phrased around a peak reading over a
  * (possibly finished) window instead of a single live sample. */
 function buildEventInsight(e: AnomalyEvent): string {
+  const status = e.is_active
+    ? "It's still active."
+    : `It lasted ${formatDuration(e.started_at, e.resolved_at)} before resolving.`;
+
+  if (isServiceStateMetric(e.metric_name)) {
+    // Same distinction as lib/anomalies.ts::buildInsight -- a
+    // service_state episode has no percentage/sigma peak, it's a
+    // stretch of time the service wasn't in its expected running state.
+    const parsed = parseServiceId(e.hostname);
+    const subject = parsed ? `${serviceDisplayName(e.hostname)} on ${parsed.host}` : e.hostname;
+    return `${subject} wasn't reporting its expected running state, peaking at ${SEVERITY_LABEL[e.severity].toLowerCase()} severity — a live service state check, not a statistical metric comparison. ${status}`;
+  }
+
   const metric = metricLabel(e.metric_name);
   const dir = e.z_score >= 0 ? "above" : "below";
   const magnitude = Math.abs(e.z_score).toFixed(1);
@@ -186,14 +223,15 @@ function buildEventInsight(e: AnomalyEvent): string {
     e.method === "ewma_fallback"
       ? "a short-term EWMA estimate, since this host/hour slot didn't have enough history yet"
       : `a baseline of ${e.baseline_n ?? "—"} samples for this weekday and hour`;
-  const status = e.is_active
-    ? "It's still active."
-    : `It lasted ${formatDuration(e.started_at, e.resolved_at)} before resolving.`;
 
   return `${e.hostname}'s ${metric.toLowerCase()} peaked at ${e.current_value.toFixed(1)}%, ${magnitude}σ ${dir} what's typical here — based on ${confidence}. ${status}`;
 }
 
 function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
+  const isService = isServiceStateMetric(e.metric_name);
+  const service = isService ? parseServiceId(e.hostname) : null;
+  const nodeHostname = service?.host ?? e.hostname;
+
   return (
     <>
       <motion.div
@@ -214,15 +252,17 @@ function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
       >
         <div className="glow-surface pointer-events-none absolute inset-0 -z-10" aria-hidden="true" />
         <div className="flex items-start justify-between gap-3 border-b p-5" style={{ borderColor: "var(--border-soft)" }}>
-          <div>
+          <div className="min-w-0">
             <div className="flex items-center gap-1.5">
               <SeverityBadge severity={e.severity} />
               <StatusBadge isActive={e.is_active} />
             </div>
-            <h2 className="font-display mt-2 text-lg font-semibold text-color-text">{e.hostname}</h2>
+            <h2 className="font-display mt-2 truncate text-lg font-semibold text-color-text">
+              {isService ? serviceDisplayName(e.hostname) : e.hostname}
+            </h2>
             <div className="mt-0.5 flex items-center gap-1.5 text-sm text-text-faint">
               <MetricGlyph metric={e.metric_name} className="h-3.5 w-3.5" />
-              {metricLabel(e.metric_name)}
+              {isService ? `Service · runs on ${nodeHostname}` : metricLabel(e.metric_name)}
             </div>
           </div>
           <button
@@ -243,28 +283,63 @@ function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
             <p className="mt-2 text-sm leading-relaxed text-color-text">{buildEventInsight(e)}</p>
           </div>
 
-          <div className="panel p-4">
-            <div className="eyebrow">Peak value</div>
-            <div className="stat-figure mt-1 text-2xl text-color-text">{e.current_value.toFixed(1)}%</div>
-            <div className="mt-3">
-              <ProgressBar value={e.current_value} color={SEVERITY_COLOR[e.severity]} />
+          {isService ? (
+            // Same reasoning as AlertsView.tsx's Detail panel: a
+            // service_state episode never had a percentage/sigma peak to
+            // show, so show what it actually was instead of a fabricated
+            // "Peak value"/"Peak deviation" pair.
+            <div className="panel overflow-hidden">
+              <div className="flex items-center gap-1.5 px-4 py-2.5 text-[11px] font-medium uppercase tracking-[0.08em] text-text-muted" style={{ background: "var(--canvas)" }}>
+                <Boxes className="h-3.5 w-3.5" strokeWidth={2} />
+                Service
+              </div>
+              <div className="divide-y p-1" style={{ borderColor: "var(--border-soft)" }}>
+                <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-sm">
+                  <span className="text-text-faint">Service</span>
+                  <span className="text-color-text">{serviceDisplayName(e.hostname)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-sm">
+                  <span className="text-text-faint">Running on</span>
+                  <Link href={`/topology?highlight=${encodeURIComponent(e.hostname)},${encodeURIComponent(nodeHostname)}`} className="truncate underline" style={{ color: "var(--accent)" }}>
+                    {nodeHostname}
+                  </Link>
+                </div>
+                <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-sm">
+                  <span className="text-text-faint">Peak severity</span>
+                  <span className="font-medium" style={{ color: SEVERITY_COLOR[e.severity] }}>
+                    {SEVERITY_LABEL[e.severity]}
+                  </span>
+                </div>
+              </div>
             </div>
-          </div>
+          ) : (
+            <>
+              <div className="panel p-4">
+                <div className="eyebrow">Peak value</div>
+                <div className="stat-figure mt-1 text-2xl text-color-text">{e.current_value.toFixed(1)}%</div>
+                <div className="mt-3">
+                  <ProgressBar value={e.current_value} color={SEVERITY_COLOR[e.severity]} />
+                </div>
+              </div>
 
-          <div className="panel p-4">
-            <div className="flex items-center justify-between">
-              <div className="eyebrow">Peak deviation</div>
-              <span className="stat-figure text-sm" style={{ color: SEVERITY_COLOR[e.severity] }}>
-                {formatZScore(e.z_score)}
-              </span>
-            </div>
-            <ZScoreMeter z={e.z_score} severity={e.severity} />
-          </div>
+              <div className="panel p-4">
+                <div className="flex items-center justify-between">
+                  <div className="eyebrow">Peak deviation</div>
+                  <span className="stat-figure text-sm" style={{ color: SEVERITY_COLOR[e.severity] }}>
+                    {formatZScore(e.z_score)}
+                  </span>
+                </div>
+                <ZScoreMeter z={e.z_score} severity={e.severity} />
+              </div>
+            </>
+          )}
 
           <div className="panel divide-y p-1" style={{ borderColor: "var(--border-soft)" }}>
             {[
-              { label: "Detection method", value: METHOD_LABEL[e.method] },
-              { label: "Baseline size", value: e.baseline_n != null ? `${e.baseline_n} samples` : "warming up (EWMA)" },
+              isService
+                ? { label: "Detection method", value: "Live service state check" }
+                : { label: "Detection method", value: METHOD_LABEL[e.method] },
+              ...(isService ? [] : [{ label: "Baseline size", value: e.baseline_n != null ? `${e.baseline_n} samples` : "warming up (EWMA)" }]),
               { label: "Started at", value: formatDetectedAt(e.started_at) },
               { label: "Started", value: formatRelative(e.started_at) },
               { label: "Resolved at", value: e.resolved_at ? formatDetectedAt(e.resolved_at) : "Still active" },
@@ -280,12 +355,12 @@ function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
 
         <div className="flex items-center gap-2 border-t p-4" style={{ borderColor: "var(--border-soft)" }}>
           <Link
-            href={`/nodes/${encodeURIComponent(e.hostname)}`}
+            href={`/nodes/${encodeURIComponent(nodeHostname)}`}
             className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 py-2 text-sm font-medium transition-colors hover:bg-[var(--canvas)]"
             style={{ border: "1px solid var(--border)", color: "var(--text)" }}
           >
             <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
-            View node
+            {isService ? "View host" : "View node"}
           </Link>
           <Link
             href="/logs"

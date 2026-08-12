@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from app import graph_db, models
 from app.db import SessionLocal
 from app.main import app
+from app.routers import topology as topology_router
 
 client = TestClient(app)
 
@@ -233,3 +234,60 @@ def test_health_status_reflects_worst_of_the_two_sync_types():
     body = client.get("/api/v1/topology/health").json()
     assert body["status"] == "failed"
     assert body["syncs"]["prometheus_health"]["error"] == "prometheus unreachable"
+
+
+# ------------------------------------------------------------------- /resync --
+# Backs the "Reconverge" control in the topology top bar (TopologyView.tsx).
+# sync_topology() itself talks to OpenStack, so it's monkeypatched here the
+# same way test_topology_sync.py fakes it at the boundary rather than
+# standing up a real cloud.
+
+def test_resync_records_an_ok_run_and_returns_it(monkeypatch):
+    _clear_sync_runs()
+    monkeypatch.setattr(
+        topology_router,
+        "sync_topology",
+        lambda db: {"complete_picture": True, "network_topology_ok": True, "hypervisors": 2},
+    )
+
+    res = client.post("/api/v1/topology/resync")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["sync_type"] == "openstack"
+    assert body["status"] == "ok"
+    assert body["summary"]["hypervisors"] == 2
+
+    # Recorded exactly like a scheduled pass -- /health picks it straight up.
+    health = client.get("/api/v1/topology/health").json()
+    assert health["syncs"]["openstack"]["status"] == "ok"
+
+
+def test_resync_records_degraded_when_summary_reports_a_partial_picture(monkeypatch):
+    _clear_sync_runs()
+    monkeypatch.setattr(
+        topology_router,
+        "sync_topology",
+        lambda db: {"complete_picture": False, "network_topology_ok": True},
+    )
+
+    body = client.post("/api/v1/topology/resync").json()
+    assert body["status"] == "degraded"
+
+
+def test_resync_records_failed_and_still_returns_200_when_the_pass_raises(monkeypatch):
+    _clear_sync_runs()
+
+    def _boom(db):
+        raise RuntimeError("openstack unreachable")
+
+    monkeypatch.setattr(topology_router, "sync_topology", _boom)
+
+    res = client.post("/api/v1/topology/resync")
+    # The API request to *trigger* a resync succeeded -- it's the sync pass
+    # itself that failed, which is surfaced in the body, not as an HTTP
+    # error (mirrors main.py's periodic loop: a failed pass is recorded,
+    # not raised).
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "failed"
+    assert "openstack unreachable" in body["error"]

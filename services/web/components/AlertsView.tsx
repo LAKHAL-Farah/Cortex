@@ -10,6 +10,7 @@ import {
   AlertTriangle,
   Activity,
   Server,
+  Boxes,
   Search,
   RefreshCw,
   X,
@@ -25,6 +26,9 @@ import {
   History,
   Link2,
   Waypoints,
+  ArrowRight,
+  Crosshair,
+  Inbox,
 } from "lucide-react";
 import type { AnomalyFlag, AnomalyIncident, AnomalySeverity, RcaSuggestion } from "@/lib/types";
 import {
@@ -40,6 +44,8 @@ import {
   formatZScore,
   isServiceStateMetric,
   metricLabel,
+  parseServiceId,
+  serviceDisplayName,
   zScoreFill,
 } from "@/lib/anomalies";
 import { relationshipLabel } from "@/lib/rca";
@@ -78,6 +84,12 @@ function MetricGlyph({ metric, className }: { metric: string; className?: string
       return <Cpu className={className} strokeWidth={1.75} />;
     case "ram_usage":
       return <MemoryStick className={className} strokeWidth={1.75} />;
+    // Same glyph the topology graph itself uses for a :Service vertex
+    // (see lib/topology.ts's LABEL_ICON.Service) -- this is a service,
+    // not a scored host metric, so it gets the service icon rather than
+    // a generic pulse.
+    case "service_state":
+      return <Boxes className={className} strokeWidth={1.75} />;
     default:
       return <Activity className={className} strokeWidth={1.75} />;
   }
@@ -187,10 +199,21 @@ function AlertRow({ a, onOpen }: { a: AnomalyFlag; onOpen: () => void }) {
 
       <div className="col-span-2 flex items-center gap-3 sm:col-span-1">
         <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)]" style={{ background: "var(--canvas)" }}>
-          <Server className="h-4 w-4 text-text-dim" strokeWidth={1.75} />
+          {isServiceStateMetric(a.metric_name) ? (
+            <Boxes className="h-4 w-4 text-text-dim" strokeWidth={1.75} />
+          ) : (
+            <Server className="h-4 w-4 text-text-dim" strokeWidth={1.75} />
+          )}
         </div>
         <div className="min-w-0">
-          <div className="truncate font-medium text-color-text">{a.hostname}</div>
+          {isServiceStateMetric(a.metric_name) ? (
+            <>
+              <div className="truncate font-medium text-color-text">{serviceDisplayName(a.hostname)}</div>
+              <div className="truncate text-xs text-text-faint">on {parseServiceId(a.hostname)?.host ?? a.hostname}</div>
+            </>
+          ) : (
+            <div className="truncate font-medium text-color-text">{a.hostname}</div>
+          )}
           <div className="mt-0.5 flex items-center gap-1 text-xs text-text-faint sm:hidden">
             <SeverityBadge severity={a.severity} />
           </div>
@@ -203,17 +226,27 @@ function AlertRow({ a, onOpen }: { a: AnomalyFlag; onOpen: () => void }) {
       </div>
 
       <div className="hidden flex-col gap-1 sm:flex">
-        <span className="stat-figure text-sm text-color-text">{a.current_value.toFixed(1)}%</span>
-        <ProgressBar value={a.current_value} color={SEVERITY_COLOR[a.severity]} />
+        {isServiceStateMetric(a.metric_name) ? (
+          <span className="text-xs text-text-faint">live check</span>
+        ) : (
+          <>
+            <span className="stat-figure text-sm text-color-text">{a.current_value.toFixed(1)}%</span>
+            <ProgressBar value={a.current_value} color={SEVERITY_COLOR[a.severity]} />
+          </>
+        )}
       </div>
 
       <div className="hidden sm:block">
-        <span
-          className="stat-figure inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold"
-          style={{ color: SEVERITY_COLOR[a.severity], background: SEVERITY_SOFT[a.severity] }}
-        >
-          {formatZScore(a.z_score)}
-        </span>
+        {isServiceStateMetric(a.metric_name) ? (
+          <span className="text-xs text-text-faint">—</span>
+        ) : (
+          <span
+            className="stat-figure inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold"
+            style={{ color: SEVERITY_COLOR[a.severity], background: SEVERITY_SOFT[a.severity] }}
+          >
+            {formatZScore(a.z_score)}
+          </span>
+        )}
       </div>
 
       <div className="hidden text-right text-xs text-text-faint sm:block">{formatRelative(a.detected_at)}</div>
@@ -247,6 +280,18 @@ function IncidentCard({
   const graphHref = incident.graph_path
     ? `/topology?highlight=${incident.graph_path.vertex_ids.map(encodeURIComponent).join(",")}`
     : null;
+  // Root-cause-only highlight, distinct from graphHref above (which
+  // highlights the whole connected path) -- a single-vertex deep link so
+  // "show me just the thing that started this" is one click, not "find
+  // the right node in a highlighted subgraph".
+  const rootCauseHref = incident.root_cause_guess
+    ? `/topology?highlight=${encodeURIComponent(incident.root_cause_guess.vertex_id)}`
+    : null;
+  const rootCauseName = incident.root_cause_guess
+    ? incident.root_cause_guess.label === "Service"
+      ? serviceDisplayName(incident.root_cause_guess.vertex_id)
+      : incident.root_cause_guess.vertex_id
+    : null;
 
   return (
     <div
@@ -266,6 +311,15 @@ function IncidentCard({
             Correlated incident · {members.length} related alerts
           </div>
           <p className="mt-1 text-sm font-medium leading-relaxed text-color-text">{incident.narrative}</p>
+          {rootCauseName && (
+            <div
+              className="mt-2 inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-semibold"
+              style={{ color: SEVERITY_COLOR[incident.severity], background: "var(--surface)", border: `1px solid ${SEVERITY_COLOR[incident.severity]}` }}
+            >
+              <Crosshair className="h-3 w-3" strokeWidth={2.5} />
+              Likely root cause: {rootCauseName}
+            </div>
+          )}
         </div>
         <ChevronDown
           className={`h-4 w-4 flex-shrink-0 text-text-muted transition-transform ${expanded ? "rotate-180" : ""}`}
@@ -275,16 +329,28 @@ function IncidentCard({
 
       {expanded && (
         <div className="space-y-2 pb-3">
-          {graphHref && (
-            <Link
-              href={graphHref}
-              className="mx-4 inline-flex items-center gap-1.5 text-xs font-semibold underline"
-              style={{ color: "var(--accent)" }}
-            >
-              <Waypoints className="h-3.5 w-3.5" strokeWidth={2} />
-              View on graph
-            </Link>
-          )}
+          <div className="mx-4 flex flex-wrap items-center gap-x-4 gap-y-1">
+            {rootCauseHref && (
+              <Link
+                href={rootCauseHref}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold underline"
+                style={{ color: SEVERITY_COLOR[incident.severity] }}
+              >
+                <Crosshair className="h-3.5 w-3.5" strokeWidth={2} />
+                Locate root cause on graph
+              </Link>
+            )}
+            {graphHref && (
+              <Link
+                href={graphHref}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold underline"
+                style={{ color: "var(--accent)" }}
+              >
+                <Waypoints className="h-3.5 w-3.5" strokeWidth={2} />
+                View full blast radius on graph
+              </Link>
+            )}
+          </div>
           <div className="mx-4 overflow-hidden rounded-[var(--radius-control)]" style={{ border: "1px solid var(--border-soft)", background: "var(--surface)" }}>
             {members.map((m) => (
               <AlertRow key={flagKey(m)} a={m} onOpen={() => onOpenMember(m)} />
@@ -296,34 +362,67 @@ function IncidentCard({
   );
 }
 
-/** One "X caused Y" suggestion (basic causal RCA -- see
- * services/api/app/services/rca_suggester.py). Renders the API's own
- * `text` field directly rather than recomposing it client-side, same
- * reasoning IncidentCard's narrative and buildInsight() already follow:
- * one source of truth for the sentence. The relationship badge is a
- * secondary, glanceable cue on top of that sentence, not a replacement
- * for it. */
-function RcaSuggestionRow({ suggestion }: { suggestion: RcaSuggestion }) {
+/** Small icon per RCA endpoint label -- a light echo of lib/topology.ts's
+ * vertexIcon (Server for :Node, Boxes for :Service) without importing the
+ * full TopologyVertex-shaped helper, since RcaEndpoint only ever carries
+ * id/label/metric_name/severity, not full graph properties. */
+function EndpointGlyph({ label, className }: { label: RcaSuggestion["cause"]["label"]; className?: string }) {
+  if (label === "Service") return <Boxes className={className} strokeWidth={1.75} />;
+  if (label === "Node" || label === null) return <Server className={className} strokeWidth={1.75} />;
+  return <Waypoints className={className} strokeWidth={1.75} />;
+}
+
+/** One endpoint of a cause->effect pair, as its own visual block rather
+ * than an inline clause -- this is what makes "which one is the cause"
+ * legible at a glance instead of requiring the reader to parse a
+ * sentence. `role` only changes the eyebrow label/color; the shape is
+ * identical for both sides so cause and effect read as visually
+ * comparable, not as a "before/after" hierarchy. */
+function RcaEndpointBlock({ endpoint, role }: { endpoint: RcaSuggestion["cause"]; role: "cause" | "effect" }) {
+  const displayName = endpoint.label === "Service" ? serviceDisplayName(endpoint.id) : endpoint.id;
+  const roleColor = role === "cause" ? SEVERITY_COLOR[endpoint.severity] : "var(--text-faint)";
   return (
     <div
-      className="flex items-start gap-3 border-b p-4 last:border-b-0"
-      style={{ borderColor: "var(--border-soft)" }}
+      className="min-w-0 flex-1 rounded-[var(--radius-control)] p-3"
+      style={{ border: `1px solid ${role === "cause" ? SEVERITY_COLOR[endpoint.severity] : "var(--border-soft)"}`, background: role === "cause" ? SEVERITY_SOFT[endpoint.severity] : "var(--canvas)" }}
     >
-      <div
-        className="mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)]"
-        style={{ background: SEVERITY_SOFT[suggestion.effect.severity] }}
-      >
-        <Waypoints className="h-4 w-4" style={{ color: SEVERITY_COLOR[suggestion.effect.severity] }} strokeWidth={1.75} />
+      <div className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-[0.08em]" style={{ color: roleColor }}>
+        {role === "cause" ? <Crosshair className="h-3 w-3" strokeWidth={2.5} /> : <Radar className="h-3 w-3" strokeWidth={2.5} />}
+        {role === "cause" ? "Root cause" : "Downstream effect"}
       </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-text-faint">
-          <SeverityBadge severity={suggestion.cause.severity} />
-          <span className="truncate font-semibold text-color-text">{suggestion.cause.id}</span>
-          <span>{relationshipLabel(suggestion.relationship)}</span>
-          <span className="truncate font-semibold text-color-text">{suggestion.effect.id}</span>
+      <div className="mt-1.5 flex items-center gap-1.5">
+        <EndpointGlyph label={endpoint.label} className="h-3.5 w-3.5 flex-shrink-0 text-text-faint" />
+        <span className="truncate text-sm font-semibold text-color-text">{displayName}</span>
+      </div>
+      <div className="mt-1 flex items-center gap-1.5">
+        <SeverityBadge severity={endpoint.severity} />
+        <span className="truncate text-xs text-text-faint">{metricLabel(endpoint.metric_name)}</span>
+      </div>
+    </div>
+  );
+}
+
+/** One "X caused Y" suggestion (basic causal RCA -- see
+ * services/api/app/services/rca_suggester.py). Cause and effect render as
+ * two distinct blocks joined by a labeled arrow so the direction of
+ * causality is legible at a glance, not just readable in a sentence --
+ * the API's own `text` field (rendered below the blocks) stays the
+ * single source of truth for the exact wording, same reasoning
+ * IncidentCard's narrative and buildInsight() already follow. */
+function RcaSuggestionRow({ suggestion }: { suggestion: RcaSuggestion }) {
+  return (
+    <div className="border-b p-4 last:border-b-0" style={{ borderColor: "var(--border-soft)" }}>
+      <div className="flex flex-col items-stretch gap-2 sm:flex-row">
+        <RcaEndpointBlock endpoint={suggestion.cause} role="cause" />
+        <div className="flex flex-shrink-0 flex-row items-center justify-center gap-1.5 py-0.5 sm:flex-col sm:gap-0.5 sm:px-1 sm:py-0">
+          <span className="whitespace-nowrap text-[10px] font-medium uppercase tracking-[0.06em] text-text-faint">
+            {relationshipLabel(suggestion.relationship)}
+          </span>
+          <ArrowRight className="h-4 w-4 rotate-90 sm:rotate-0" style={{ color: "var(--accent)" }} strokeWidth={2.5} />
         </div>
-        <p className="mt-1.5 text-sm leading-relaxed text-color-text">{suggestion.text}</p>
+        <RcaEndpointBlock endpoint={suggestion.effect} role="effect" />
       </div>
+      <p className="mt-2.5 text-sm leading-relaxed text-text-dim">{suggestion.text}</p>
     </div>
   );
 }
@@ -360,6 +459,13 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const isService = isServiceStateMetric(a.metric_name);
+  const service = isService ? parseServiceId(a.hostname) : null;
+  // The node an anomalous service actually runs on -- what "View node"
+  // should point at instead of the service id itself, which isn't a
+  // valid /nodes/{hostname} lookup key.
+  const nodeHostname = service?.host ?? a.hostname;
+
   return (
     <>
       <motion.div
@@ -380,12 +486,14 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
       >
         <div className="glow-surface pointer-events-none absolute inset-0 -z-10" aria-hidden="true" />
         <div className="flex items-start justify-between gap-3 border-b p-5" style={{ borderColor: "var(--border-soft)" }}>
-          <div>
+          <div className="min-w-0">
             <SeverityBadge severity={a.severity} />
-            <h2 className="font-display mt-2 text-lg font-semibold text-color-text">{a.hostname}</h2>
+            <h2 className="font-display mt-2 truncate text-lg font-semibold text-color-text">
+              {isService ? serviceDisplayName(a.hostname) : a.hostname}
+            </h2>
             <div className="mt-0.5 flex items-center gap-1.5 text-sm text-text-faint">
               <MetricGlyph metric={a.metric_name} className="h-3.5 w-3.5" />
-              {metricLabel(a.metric_name)}
+              {isService ? `Service · running on ${nodeHostname}` : metricLabel(a.metric_name)}
             </div>
           </div>
           <button
@@ -406,11 +514,38 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
             <p className="mt-2 text-sm leading-relaxed text-color-text">{buildInsight(a)}</p>
           </div>
 
-          {/* current_value/z_score are meaningless for a service_state flag --
-             it's a live up/down/unreachable check, not a percentage metric
-             with a statistical deviation, so the value + sigma panels below
-             don't apply and are skipped for it. */}
-          {!isServiceStateMetric(a.metric_name) && (
+          {isService ? (
+            // A service_state flag has no percentage/sigma to show -- it's
+            // a live up/down/unreachable check, not a statistical metric
+            // (see prometheus_health.py's module docstring). Show what it
+            // *is* instead of hiding the section entirely: which service,
+            // on which node, and that this came from the OpenStack/
+            // Prometheus cross-check rather than the baseline detector.
+            <div className="panel overflow-hidden">
+              <div className="flex items-center gap-1.5 px-4 py-2.5 text-[11px] font-medium uppercase tracking-[0.08em] text-text-muted" style={{ background: "var(--canvas)" }}>
+                <Boxes className="h-3.5 w-3.5" strokeWidth={2} />
+                Service
+              </div>
+              <div className="divide-y p-1" style={{ borderColor: "var(--border-soft)" }}>
+                <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-sm">
+                  <span className="text-text-faint">Service</span>
+                  <span className="text-color-text">{serviceDisplayName(a.hostname)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-sm">
+                  <span className="text-text-faint">Running on</span>
+                  <Link href={`/topology?highlight=${encodeURIComponent(a.hostname)},${encodeURIComponent(nodeHostname)}`} className="truncate underline" style={{ color: "var(--accent)" }}>
+                    {nodeHostname}
+                  </Link>
+                </div>
+                <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-sm">
+                  <span className="text-text-faint">Status</span>
+                  <span className="font-medium" style={{ color: SEVERITY_COLOR[a.severity] }}>
+                    Not in expected running state
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : (
             <>
               <div className="panel p-4">
                 <div className="eyebrow">Current value</div>
@@ -434,10 +569,10 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
 
           <div className="panel divide-y p-1" style={{ borderColor: "var(--border-soft)" }}>
             {[
-              isServiceStateMetric(a.metric_name)
+              isService
                 ? { label: "Detection method", value: "Live service state check" }
                 : { label: "Detection method", value: METHOD_LABEL[a.method] },
-              ...(isServiceStateMetric(a.metric_name)
+              ...(isService
                 ? []
                 : [{ label: "Baseline size", value: a.baseline_n != null ? `${a.baseline_n} samples` : "warming up (EWMA)" }]),
               { label: "Detected at", value: formatDetectedAt(a.detected_at) },
@@ -453,12 +588,12 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
 
         <div className="flex items-center gap-2 border-t p-4" style={{ borderColor: "var(--border-soft)" }}>
           <Link
-            href={`/nodes/${encodeURIComponent(a.hostname)}`}
+            href={`/nodes/${encodeURIComponent(nodeHostname)}`}
             className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 py-2 text-sm font-medium transition-colors hover:bg-[var(--canvas)]"
             style={{ border: "1px solid var(--border)", color: "var(--text)" }}
           >
             <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} />
-            View node
+            {isService ? "View host" : "View node"}
           </Link>
           <Link
             href={`/alerts/history?hostname=${encodeURIComponent(a.hostname)}`}
@@ -479,6 +614,120 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
         </div>
       </motion.aside>
     </>
+  );
+}
+
+
+const NODE_AVATAR_COLORS = ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)"];
+
+/** Deterministic color per vertex id, off the app's existing 5-color
+ * chart palette (see globals.css) rather than a 6th ad hoc scale --
+ * gives each incident's root-cause vertex a stable little "avatar" so
+ * the same host/service reads as the same color across cards, Notion-
+ * board style, without inventing new theme tokens. Plain string hash,
+ * not cryptographic -- collisions across a handful of hostnames are a
+ * cosmetic non-issue here. */
+function nodeAvatarColor(id: string): string {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
+  return NODE_AVATAR_COLORS[Math.abs(hash) % NODE_AVATAR_COLORS.length];
+}
+
+function initialsFor(id: string): string {
+  const cleaned = id.replace(/@.*/, "").replace(/[-_]/g, " ").trim();
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+/** "Recent incidents" preview strip -- sits above the full alert/incident
+ * feed as a fast-scanning summary, GitHub/Notion-card style: one compact
+ * card per correlated incident (member_count > 1 -- a lone alert isn't
+ * an "incident" in this sense, same distinction IncidentCard already
+ * draws), color-coded by its anchor vertex, most-severe/most-recent
+ * first. "View all" jumps straight to the full feed below rather than a
+ * separate page -- incidents are computed fresh on every request rather
+ * than persisted (see alert_correlation.py's module docstring), so
+ * there's no independent incident history to page through yet; the full
+ * feed just underneath *is* the complete current picture. */
+function RecentIncidentsPreview({
+  incidents,
+  onOpen,
+}: {
+  incidents: { incident: AnomalyIncident; members: AnomalyFlag[] }[];
+  onOpen: (a: AnomalyFlag) => void;
+}) {
+  const correlated = useMemo(
+    () =>
+      incidents
+        .filter((g) => g.members.length > 1)
+        .slice()
+        .sort((a, b) => {
+          const rankDiff = SEVERITY_RANK[b.incident.severity] - SEVERITY_RANK[a.incident.severity];
+          if (rankDiff !== 0) return rankDiff;
+          const latestA = Math.max(...a.members.map((m) => new Date(m.detected_at).getTime()));
+          const latestB = Math.max(...b.members.map((m) => new Date(m.detected_at).getTime()));
+          return latestB - latestA;
+        })
+        .slice(0, 3),
+    [incidents]
+  );
+
+  if (correlated.length === 0) return null;
+
+  const scrollToFeed = () => {
+    document.getElementById("incident-feed")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  return (
+    <div className="panel overflow-hidden">
+      <div className="flex items-center justify-between gap-2 px-4 py-2.5" style={{ background: "var(--canvas)" }}>
+        <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-text-muted">
+          <Inbox className="h-3.5 w-3.5" strokeWidth={2} />
+          Recent incidents
+        </div>
+        <button onClick={scrollToFeed} className="text-xs font-semibold underline" style={{ color: "var(--accent)" }}>
+          View all ↓
+        </button>
+      </div>
+      <div className="grid gap-2.5 p-3 sm:grid-cols-2 lg:grid-cols-3">
+        {correlated.map(({ incident, members }) => {
+          const latest = Math.max(...members.map((m) => new Date(m.detected_at).getTime()));
+          const anchorId = incident.root_cause_guess?.vertex_id ?? members[0].hostname;
+          const anchorLabel = incident.root_cause_guess?.label;
+          const displayAnchor = anchorLabel === "Service" ? serviceDisplayName(anchorId) : anchorId;
+          const color = nodeAvatarColor(anchorId);
+          return (
+            <button
+              key={incident.incident_id}
+              onClick={() => onOpen(members[0])}
+              className="panel panel-interactive flex flex-col gap-2 rounded-[var(--radius-panel)] p-3.5 text-left transition-shadow"
+              style={{ borderLeft: `3px solid ${SEVERITY_COLOR[incident.severity]}` }}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className="grid h-6 w-6 flex-shrink-0 place-items-center rounded-full text-[10px] font-bold text-white"
+                  style={{ background: color }}
+                >
+                  {initialsFor(anchorId)}
+                </span>
+                <span className="truncate text-sm font-semibold text-color-text">{displayAnchor}</span>
+                <SeverityBadge severity={incident.severity} />
+              </div>
+              <p className="line-clamp-2 text-xs leading-relaxed text-text-dim">{incident.narrative}</p>
+              <div className="mt-auto flex items-center justify-between text-[11px] text-text-faint">
+                <span className="inline-flex items-center gap-1">
+                  <Link2 className="h-3 w-3" strokeWidth={2} />
+                  {members.length} alerts
+                </span>
+                <span>{formatRelative(new Date(latest).toISOString())}</span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -532,6 +781,20 @@ export default function AlertsView() {
       hosts.add(member.hostname);
     }
     return { ...c, hosts: hosts.size };
+  }, [flatMembers]);
+
+  // Unfiltered incident groups, independent of the search/severity
+  // filters below -- the "Recent incidents" preview strip always shows
+  // what's actually happening across the whole fleet, not just whatever
+  // the alerts list is currently filtered down to.
+  const allGroups = useMemo(() => {
+    const byIncident = new Map<string, { incident: AnomalyIncident; members: AnomalyFlag[] }>();
+    for (const { member, incident } of flatMembers) {
+      const existing = byIncident.get(incident.incident_id);
+      if (existing) existing.members.push(member);
+      else byIncident.set(incident.incident_id, { incident, members: [member] });
+    }
+    return [...byIncident.values()];
   }, [flatMembers]);
 
   const groups = useMemo(() => {
@@ -615,6 +878,8 @@ export default function AlertsView() {
         </div>
       </div>
 
+      <RecentIncidentsPreview incidents={allGroups} onOpen={(m) => setSelectedKey(flagKey(m))} />
+
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard icon={ShieldAlert} label="Critical" value={counts.critical} color="var(--crit)" active={severity === "critical"} onClick={() => setSeverity(severity === "critical" ? "all" : "critical")} />
         <StatCard icon={AlertTriangle} label="High" value={counts.high} color="var(--warn)" active={severity === "high"} onClick={() => setSeverity(severity === "high" ? "all" : "high")} />
@@ -695,7 +960,7 @@ export default function AlertsView() {
          whether alerting itself is healthy. */}
       <RcaSuggestionsPanel suggestions={rcaData ?? []} />
 
-      <div className="panel overflow-hidden">
+      <div id="incident-feed" className="panel overflow-hidden scroll-mt-4">
         <div
           className="hidden grid-cols-[110px_1.6fr_1fr_100px_120px_auto_20px] gap-3 px-4 py-2 text-[11px] font-medium uppercase tracking-[0.08em] text-text-muted sm:grid"
           style={{ background: "var(--canvas)" }}
