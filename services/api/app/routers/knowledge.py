@@ -4,6 +4,7 @@ from ..services.knowledge.ingestion import (
     ingest_knowledge_documents,
 )
 
+
 import logging
 import os
 
@@ -26,6 +27,9 @@ from ..services.knowledge.retriever import (
     search_knowledge,
 )
 
+from ..services.knowledge.chat_service import (
+    KnowledgeChatService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +98,41 @@ class KnowledgeSearchRequest(BaseModel):
         ),
     )
 
+class KnowledgeChatRequest(BaseModel):
+    question: str = Field(
+        min_length=3,
+        max_length=2000,
+        description=(
+            "Question utilisateur envoyée "
+            "au Cortex Copilot."
+        ),
+    )
+
+    service: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+
+    environment: str | None = Field(
+        default="production",
+        max_length=100,
+    )
+
+    document_type: str | None = Field(
+        default="runbook",
+        max_length=100,
+    )
+
+    language: str | None = Field(
+        default="fr",
+        max_length=20,
+    )
+
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=20,
+    )
 
 # ============================================================
 # RESPONSE MODELS
@@ -162,6 +201,32 @@ class KnowledgeIngestionResponse(BaseModel):
     updated: int
     legacy_deleted: int
     documents: list[KnowledgeIngestionDocumentOut]
+
+
+
+class KnowledgeChatSourceOut(BaseModel):
+    point_id: str
+    document_id: str
+    title: str
+    source_path: str
+    chunk_index: int
+    score: float
+    service: str | None = None
+    citation: str
+    snippet: str
+
+
+class KnowledgeChatResponse(BaseModel):
+    answer: str
+
+    grounded: bool
+    llm_called: bool
+
+    top_score: float | None = None
+    model: str | None = None
+
+    sources: list[KnowledgeChatSourceOut]
+
 
 # ============================================================
 # SERIALIZATION
@@ -479,3 +544,124 @@ def ingest_knowledge() -> KnowledgeIngestionResponse:
             ),
         ) from exc
 
+# ============================================================
+# GROUNDED CHAT
+# ============================================================
+
+
+@router.post(
+    "/chat",
+    response_model=KnowledgeChatResponse,
+    dependencies=[
+        Depends(require_api_key)
+    ],
+)
+def chat_knowledge(
+    payload: KnowledgeChatRequest,
+) -> KnowledgeChatResponse:
+    """
+    Chat Q&A grounded dans les runbooks Cortex.
+
+    Pipeline :
+
+        question
+            ↓
+        embedding E5
+            ↓
+        Qdrant
+            ↓
+        relevance gate
+            ↓
+        contexte RAG
+            ↓
+        NVIDIA NIM
+            ↓
+        réponse + citations
+
+    Si aucune information suffisamment pertinente
+    n'est présente dans les runbooks, le LLM
+    n'est pas appelé.
+    """
+
+    try:
+        service = KnowledgeChatService()
+
+        result = service.answer(
+            question=payload.question,
+            service=payload.service,
+            environment=payload.environment,
+            document_type=payload.document_type,
+            language=payload.language,
+            limit=payload.limit,
+        )
+
+        return KnowledgeChatResponse(
+            answer=result["answer"],
+            grounded=result["grounded"],
+            llm_called=result["llm_called"],
+            top_score=result.get(
+                "top_score"
+            ),
+            model=result.get(
+                "model"
+            ),
+            sources=[
+                KnowledgeChatSourceOut(
+                    point_id=source[
+                        "point_id"
+                    ],
+                    document_id=source[
+                        "document_id"
+                    ],
+                    title=source[
+                        "title"
+                    ],
+                    source_path=source[
+                        "source_path"
+                    ],
+                    chunk_index=source[
+                        "chunk_index"
+                    ],
+                    score=source[
+                        "score"
+                    ],
+                    service=source.get(
+                        "service"
+                    ),
+                    citation=source[
+                        "citation"
+                    ],
+                    snippet=source[
+                        "snippet"
+                    ],
+                )
+                for source in result[
+                    "sources"
+                ]
+            ],
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_422_UNPROCESSABLE_ENTITY
+            ),
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        logger.exception(
+            "Knowledge chat failed "
+            "for question: %s",
+            payload.question,
+        )
+
+        raise HTTPException(
+            status_code=(
+                status.HTTP_502_BAD_GATEWAY
+            ),
+            detail=(
+                "Knowledge chat service "
+                "is unavailable."
+            ),
+        ) from exc
