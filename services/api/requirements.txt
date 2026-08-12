@@ -13,3 +13,8 @@ pandas==2.2.3
 scipy==1.13.1
 openstacksdk==4.18.0
 neo4j==5.28.4
+qdrant-client==1.12.1
+# Local embedding model for the knowledge RAG pipeline (adr-0004) -- pulls in
+# torch and transformers as transitive deps; expect the image to grow by
+# ~500MB-1GB and the first `pip install` to take a while.
+sentence-transformers==3.3.1

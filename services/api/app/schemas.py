@@ -144,5 +144,47 @@ class TopologyHealthOut(BaseModel):
     syncs: dict[str, TopologySyncRunOut | None]
 
 
+# --------------------------------------------------------------------------
+# Knowledge RAG (adr-0004) -- docs/knowledge/ -> Qdrant Cloud read/write schemas.
+# --------------------------------------------------------------------------
+
+class KnowledgeIngestResult(BaseModel):
+    knowledge_dir: str
+    collection: str
+    embedding_model: str
+    files_processed: int
+    chunks_embedded: int
+    duration_seconds: float
+
+
+class KnowledgeStatus(BaseModel):
+    collection: str
+    exists: bool
+    points_count: int | None = None
+    vectors_count: int | None = None
+    status: str | None = None
+
+
+class KnowledgeSearchQuery(BaseModel):
+    query: str = Field(min_length=1)
+    top_k: int = Field(default=5, ge=1, le=25)
+    # "service-detail" to search only the per-service docs (nova/neutron/glance/
+    # keystone/cinder), or omit to search the whole knowledge base.
+    category: str | None = None
+
+
+class KnowledgeSearchResult(BaseModel):
+    score: float
+    text: str
+    source_path: str
+    doc_title: str
+    heading: str | None = None
+    category: str
+
+
+class KnowledgeSearchResponse(BaseModel):
+    results: list[KnowledgeSearchResult]
+
+
 
 
