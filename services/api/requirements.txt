@@ -11,3 +11,5 @@ requests==2.32.3
 statsmodels==0.14.4
 pandas==2.2.3
 scipy==1.13.1
+openstacksdk==4.18.0
+neo4j==5.28.4

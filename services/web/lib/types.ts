@@ -105,3 +105,117 @@ export interface AnomalyEvent {
   is_active: boolean;
 }
 
+// --- Alert correlation (Phase 6 -- see routers/anomalies.py's /incidents,
+// services/alert_correlation.py) ------------------------------------------
+//
+// One incident per GET /api/v1/anomalies/incidents entry. Every open
+// AnomalyFlag comes back nested under exactly one incident -- an alert
+// with no correlated peer is still an incident, just with
+// member_count === 1, so AlertsView.tsx can group by incident_id
+// uniformly instead of special-casing "no incident".
+
+export interface AnomalyIncidentRootCause {
+  vertex_id: string;
+  label: TopologyVertexLabel | null;
+}
+
+export interface AnomalyIncidentGraphPath {
+  vertex_ids: string[];
+  edges: { type: TopologyEdgeType; source: string; target: string }[];
+}
+
+export interface AnomalyIncident {
+  incident_id: string;
+  severity: AnomalySeverity;
+  member_count: number;
+  root_cause_guess: AnomalyIncidentRootCause | null;
+  narrative: string;
+  members: AnomalyFlag[];
+  graph_path: AnomalyIncidentGraphPath | null;
+}
+
+// --- RCA suggestions (see services/api/app/routers/anomalies.py's /rca,
+// services/api/app/services/rca_suggester.py) ------------------------------
+//
+// One entry per pair of currently-anomalous, graph-adjacent vertices from
+// GET /api/v1/anomalies/rca. Unlike AnomalyIncident (which just groups
+// alerts), each suggestion is a directed "X caused Y" claim: `text` is the
+// full sentence the API already composed, and always names `relationship`
+// -- never just metric names -- per the feature's acceptance criterion.
+
+export interface RcaEndpoint {
+  id: string;
+  label: TopologyVertexLabel | null;
+  metric_name: string;
+  severity: AnomalySeverity;
+}
+
+export interface RcaSuggestion {
+  cause: RcaEndpoint;
+  effect: RcaEndpoint;
+  relationship: TopologyEdgeType;
+  text: string;
+}
+
+// --- Topology (Phase 6 -- see services/api/app/routers/topology.py) -------
+//
+// Mirrors schemas.TopologyGraphOut/TopologyVertexDetailOut/TopologyHealthOut
+// on the API side. `properties` is left as a loose dict rather than typed
+// per-label (the graph has six vertex labels -- Node/Service/Network/
+// Subnet/Router/FloatingIP -- each with its own property shape; see
+// graph_db.py's module docstring) since the frontend only needs a handful
+// of well-known keys (role, state, hostname, ...) off of it, read
+// defensively via lib/topology.ts's helpers.
+
+export type TopologyVertexLabel = "Node" | "Service" | "Network" | "Subnet" | "Router" | "FloatingIP";
+
+export type TopologyEdgeType = "RUNS_ON" | "SERVES" | "CONNECTS";
+
+export interface TopologyVertex {
+  id: string;
+  label: TopologyVertexLabel;
+  properties: Record<string, unknown>;
+}
+
+export interface TopologyEdge {
+  source: string;
+  target: string;
+  type: TopologyEdgeType;
+}
+
+export interface TopologyGraph {
+  nodes: TopologyVertex[];
+  edges: TopologyEdge[];
+}
+
+export interface TopologyNeighbor {
+  id: string | null;
+  label: TopologyVertexLabel | null;
+  relationship: TopologyEdgeType;
+  direction: "incoming" | "outgoing";
+}
+
+export interface TopologyVertexDetail {
+  id: string;
+  label: TopologyVertexLabel;
+  properties: Record<string, unknown>;
+  neighbors: TopologyNeighbor[];
+}
+
+export type TopologySyncType = "openstack" | "prometheus_health";
+export type TopologySyncStatus = "ok" | "degraded" | "failed" | "unknown";
+
+export interface TopologySyncRun {
+  sync_type: string;
+  status: string;
+  summary: Record<string, unknown> | null;
+  error: string | null;
+  started_at: string; // ISO 8601
+  finished_at: string; // ISO 8601
+}
+
+export interface TopologyHealth {
+  status: TopologySyncStatus;
+  syncs: Record<string, TopologySyncRun | null>;
+}
+

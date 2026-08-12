@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -56,3 +57,51 @@ def set_node_exporter_installed(db: Session, node: models.Node, installed: bool)
     db.commit()
     db.refresh(node)
     return node
+
+
+def record_topology_sync_run(
+    db: Session,
+    *,
+    sync_type: str,
+    status: str,
+    started_at: datetime,
+    finished_at: datetime,
+    summary: dict | None = None,
+    error: str | None = None,
+) -> models.TopologySyncRun:
+    """Appends one row to the sync-run metadata table (see
+    models.TopologySyncRun). Called from main.py's periodic-task wrappers
+    after every topology_sync.sync_topology()/
+    prometheus_health.sync_prometheus_health() pass -- success or failure --
+    so GET /api/v1/topology/health has real run history to answer from.
+    """
+    run = models.TopologySyncRun(
+        sync_type=sync_type,
+        status=status,
+        summary=summary,
+        error=error,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def get_latest_topology_sync_run(db: Session, sync_type: str) -> models.TopologySyncRun | None:
+    return db.scalar(
+        select(models.TopologySyncRun)
+        .where(models.TopologySyncRun.sync_type == sync_type)
+        .order_by(models.TopologySyncRun.finished_at.desc())
+        .limit(1)
+    )
+
+
+def list_recent_topology_sync_runs(db: Session, sync_type: str, limit: int = 5) -> list[models.TopologySyncRun]:
+    return db.scalars(
+        select(models.TopologySyncRun)
+        .where(models.TopologySyncRun.sync_type == sync_type)
+        .order_by(models.TopologySyncRun.finished_at.desc())
+        .limit(limit)
+    ).all()

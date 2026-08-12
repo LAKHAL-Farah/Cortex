@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
-import { Plus } from "lucide-react";
+import { AlertTriangle, Cpu, MemoryStick, Plus, Server } from "lucide-react";
 import NodeCard from "@/components/NodeCard";
 import MetricCard from "@/components/ui/MetricCard";
 import AnalyticsChart from "@/components/AnalyticsChart";
@@ -67,6 +67,7 @@ export default function MetricsPage() {
           trendLabel={`${metrics.active} healthy · ${metrics.offline} offline`}
           sparklineData={sparklineData}
           sparklineColor="var(--chart-1)"
+          icon={Server}
         />
         <MetricCard
           title="Average CPU"
@@ -75,6 +76,7 @@ export default function MetricsPage() {
           trendLabel="7-day trend"
           sparklineData={sparklineData.map((item) => ({ ...item, value: item.value - 2 }))}
           sparklineColor="var(--chart-3)"
+          icon={Cpu}
         />
         <MetricCard
           title="Average memory"
@@ -83,6 +85,7 @@ export default function MetricsPage() {
           trendLabel="Weekly usage"
           sparklineData={sparklineData.map((item) => ({ ...item, value: Math.max(item.value - 4, 0) }))}
           sparklineColor="var(--chart-4)"
+          icon={MemoryStick}
         />
         <MetricCard
           title="Alerts triggered"
@@ -91,6 +94,8 @@ export default function MetricsPage() {
           trendLabel="Active warnings"
           sparklineData={sparklineData.map((item) => ({ ...item, value: Math.min(item.value + 8, 100) }))}
           sparklineColor="var(--chart-5)"
+          icon={AlertTriangle}
+          iconColor="var(--warn)"
         />
       </div>
 

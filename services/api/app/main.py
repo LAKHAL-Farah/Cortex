@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from fastapi import FastAPI
 from sqlalchemy import text
 from .db import engine, SessionLocal
@@ -12,12 +13,16 @@ from .routers import dashboard
 from .routers import logs
 from .routers import anomalies
 from .routers import baselines
+from .routers import topology
 from .services.anomaly_detector import detect_anomalies
 from .services.baseline_builder import compute_baselines
 from .services.node_seeder import seed_nodes_from_file_sd
 from .services.forecast_dataset_builder import build_dataset
 from .routers import forecast
 from .services.forecast_trainer import train_all_models
+from .services.topology_sync import sync_topology
+from .services.prometheus_health import sync_prometheus_health
+from . import crud, graph_db
 logger = logging.getLogger(__name__)
 
 # How often detect_anomalies() re-scores the latest Prometheus values. The
@@ -40,6 +45,20 @@ FORECAST_DATASET_REFRESH_INTERVAL_SECONDS = int(os.getenv("FORECAST_DATASET_REFR
 # Same cadence as the dataset rebuild -- no point retraining more often
 # than the data itself changes.
 FORECAST_TRAINING_INTERVAL_SECONDS = int(os.getenv("FORECAST_TRAINING_INTERVAL_SECONDS", "86400"))
+
+# How often topology_sync polls Nova for hypervisors/services and upserts
+# the topology graph. This is the one OpenStack polling loop (see
+# adr-0002) -- 5 minutes is frequent enough to notice a new hypervisor or a
+# service flipping state without hammering the OpenStack API.
+TOPOLOGY_SYNC_INTERVAL_SECONDS = int(os.getenv("TOPOLOGY_SYNC_INTERVAL_SECONDS", "300"))
+
+# How often sync_prometheus_health() overlays `up{job="node_exporter"}"
+# onto :Node.health and recomputes :Service.state (see adr-0003). Runs far
+# more often than TOPOLOGY_SYNC_INTERVAL_SECONDS -- it only talks to
+# Prometheus (20s scrape interval, see infra/prometheus/prometheus.yml)
+# and Neo4j, never OpenStack, so there's no reason to tie its cadence to
+# the OpenStack poll.
+PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS = int(os.getenv("PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS", "30"))
 
 async def _run_periodic(fn, interval_seconds: float, name: str) -> None:
     """Runs fn(db) in a worker thread on a fixed interval, forever.
@@ -84,6 +103,79 @@ async def _run_periodic_no_args(fn, interval_seconds: float, name: str) -> None:
             logger.exception("%s pass failed", name)
         await asyncio.sleep(interval_seconds)
 
+
+def _topology_sync_status(summary: dict) -> str:
+    """topology_sync.sync_topology()'s summary carries two independent
+    "did we get a complete picture" flags (see its docstring/return value):
+    `complete_picture` for the Node/Service sweep, `network_topology_ok`
+    for the Network/Subnet/Router/FloatingIP sweep. Either being False
+    means at least one OpenStack listing failed this pass but the pass
+    itself still ran and produced a (partial) summary -- "degraded", not
+    "failed". "failed" is reserved for the pass raising before returning
+    anything at all (caught in _run_periodic_recorded below).
+    """
+    if summary.get("complete_picture") and summary.get("network_topology_ok"):
+        return "ok"
+    return "degraded"
+
+
+def _prometheus_health_status(summary: dict) -> str:
+    """prometheus_health.sync_prometheus_health() returns
+    {"queried": False, ...} (rather than raising) when Prometheus itself
+    was unreachable this pass -- see that function's docstring. That's a
+    normal, self-recovering skip, not a crash, so it's "degraded" here
+    too, on the same reasoning as _topology_sync_status above.
+    """
+    if summary.get("queried"):
+        return "ok"
+    return "degraded"
+
+
+async def _run_periodic_recorded(fn, interval_seconds: float, name: str, sync_type: str, status_fn) -> None:
+    """Same shape as _run_periodic, but for the two OpenStack/Prometheus
+    sync loops (topology_sync.sync_topology, prometheus_health.
+    sync_prometheus_health) whose outcome now also gets appended to the
+    `topology_sync_runs` table (see models.TopologySyncRun and
+    crud.record_topology_sync_run) so GET /api/v1/topology/health has
+    real run history to answer from, not just a snapshot of the graph.
+
+    `status_fn(summary) -> "ok"|"degraded"` classifies a successful pass's
+    own summary dict; a pass that raises is always recorded as "failed"
+    regardless of status_fn, since there's no summary to classify.
+    """
+    while True:
+        started_at = datetime.utcnow()
+        db = SessionLocal()
+        summary: dict | None = None
+        error: str | None = None
+        try:
+            summary = await asyncio.to_thread(fn, db)
+            run_status = status_fn(summary)
+        except Exception as exc:
+            logger.exception("%s pass failed", name)
+            run_status = "failed"
+            error = repr(exc)
+        finally:
+            finished_at = datetime.utcnow()
+            try:
+                crud.record_topology_sync_run(
+                    db,
+                    sync_type=sync_type,
+                    status=run_status,
+                    summary=summary,
+                    error=error,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
+            except Exception:
+                # Recording the run is itself best-effort: a Postgres hiccup
+                # here shouldn't take the sync loop down, and the next tick
+                # will just append another row on top of whatever the last
+                # successfully-recorded one was.
+                logger.exception("failed to record sync-run metadata for %s", name)
+            db.close()
+        await asyncio.sleep(interval_seconds)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # If the DB is empty (fresh deploy, or infra that was provisioned by
@@ -98,6 +190,15 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    try:
+        await asyncio.to_thread(graph_db.apply_schema_constraints)
+    except Exception:
+        # Non-fatal: the rest of the API doesn't depend on the topology
+        # graph, and topology_sync's own MERGE calls will keep working even
+        # without constraints (just without the uniqueness guarantee) --
+        # log and move on rather than blocking startup.
+        logger.exception("topology graph schema bootstrap failed")
+
     tasks = [
         asyncio.create_task(
             _run_periodic(detect_anomalies, ANOMALY_DETECTION_INTERVAL_SECONDS, "anomaly detection")
@@ -111,6 +212,24 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(
             _run_periodic_no_args(train_all_models, FORECAST_TRAINING_INTERVAL_SECONDS, "forecast model training")
 ),
+        asyncio.create_task(
+            _run_periodic_recorded(
+                sync_topology,
+                TOPOLOGY_SYNC_INTERVAL_SECONDS,
+                "topology sync",
+                sync_type="openstack",
+                status_fn=_topology_sync_status,
+            )
+        ),
+        asyncio.create_task(
+            _run_periodic_recorded(
+                sync_prometheus_health,
+                PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS,
+                "prometheus health sync",
+                sync_type="prometheus_health",
+                status_fn=_prometheus_health_status,
+            )
+        ),
     ]
     try:
         yield
@@ -118,6 +237,7 @@ async def lifespan(app: FastAPI):
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        graph_db.close_driver()
 
 
 app = FastAPI(title="Cortex API", version="0.1.0", lifespan=lifespan)
@@ -128,6 +248,7 @@ app.include_router(logs.router)
 app.include_router(anomalies.router)
 app.include_router(baselines.router)
 app.include_router(forecast.router)
+app.include_router(topology.router)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 

@@ -35,3 +35,11 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Generated datasets / ML artifacts
+*.pkl
+*.csv
+
+
+
+

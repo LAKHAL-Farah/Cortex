@@ -1,0 +1,18 @@
+# Sandbox-only clouds.yaml -- points openstacksdk at openstack-sim instead of
+# a real OpenStack control plane. Safe to commit: openstack-sim doesn't check
+# the password, and there's no real cluster behind this URL.
+#
+# NEVER copy this pattern for the real .env / CORTEX_OPENSTACK_HOST_DIR setup
+# -- that one holds real cortex-reader credentials and must never be committed
+# (see infra/.env.example and docs/architecture/adr-0002-topology-graph.md).
+clouds:
+  cortex-reader:
+    auth:
+      auth_url: http://openstack-sim:5000/v3
+      username: cortex-reader
+      password: sandbox-sim-doesnt-check-this
+      project_name: admin
+      user_domain_name: Default
+      project_domain_name: Default
+    region_name: RegionOne
+    identity_api_version: 3
