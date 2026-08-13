@@ -14,6 +14,8 @@ from .routers import logs
 from .routers import anomalies
 from .routers import baselines
 from .routers import topology
+from .routers import knowledge
+from .routers import conversations
 from .services.anomaly_detector import detect_anomalies
 from .services.baseline_builder import compute_baselines
 from .services.node_seeder import seed_nodes_from_file_sd
@@ -249,6 +251,17 @@ app.include_router(anomalies.router)
 app.include_router(baselines.router)
 app.include_router(forecast.router)
 app.include_router(topology.router)
+# Not added to the periodic lifespan tasks above on purpose -- unlike anomaly
+# detection/baselines/forecasting/topology sync, the knowledge base doesn't
+# drift on a schedule (see adr-0004), so ingestion is triggered on demand via
+# POST /api/v1/knowledge/ingest (or the ingest_knowledge CLI script) instead
+# of a background timer.
+app.include_router(knowledge.router)
+# Server-side persistence for Copilot chat threads (see routers/conversations.py's
+# module docstring) -- like knowledge.router, not added to the periodic
+# lifespan tasks above since it's plain request/response CRUD, nothing to
+# poll on a schedule.
+app.include_router(conversations.router)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 

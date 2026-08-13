@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Boolean, DateTime, CheckConstraint, func
+from sqlalchemy import String, Integer, Boolean, DateTime, CheckConstraint, ForeignKey, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import Column, Float, UniqueConstraint, Text, JSON
@@ -165,6 +165,63 @@ class Baseline(Base):
     __table_args__ = (
         UniqueConstraint("hostname", "metric_name", "weekday", "hour", name="uq_baseline_slot"),
     )
+
+
+class Conversation(Base):
+    """One Copilot chat thread (adr-0005's knowledge chat is stateless per
+    request -- this is what turns that into something a user can leave and
+    come back to). Scoped by `client_id`, an anonymous per-browser UUID the
+    frontend generates and sends as X-Client-Id (see security.get_client_id)
+    rather than a real account -- there's no login system in Cortex yet, so
+    this is the same "shared secret" trust model the rest of the API already
+    uses for X-API-Key, just one level more granular. Copying that client_id
+    into another browser's storage is how a user "syncs" their history
+    across devices without Cortex needing real auth.
+    """
+    __tablename__ = "conversations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="New conversation")
+    # Mirrors ChatQuery.category (adr-0005) -- which docs/knowledge/ slice
+    # this thread's questions were scoped to, so resuming a conversation
+    # keeps asking the same category by default.
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ConversationMessage(Base):
+    """One turn within a Conversation. `position` (rather than relying on
+    created_at ordering) is the source of truth for transcript order --
+    PUT /api/v1/conversations/{id} replaces a conversation's entire message
+    list in one call (see crud.replace_conversation_messages), so ordering
+    has to survive a delete-and-reinsert rather than depend on insertion
+    timestamps, which can collide within the same request.
+    """
+    __tablename__ = "conversation_messages"
+
+    __table_args__ = (
+        CheckConstraint("role IN ('user','assistant')", name="ck_conversation_messages_role_allowed"),
+        UniqueConstraint("conversation_id", "position", name="uq_conversation_message_position"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # ChatSource[] as dumped JSON (adr-0005) -- same shape the knowledge chat
+    # SSE stream's `sources` event already carries. Null for user turns.
+    sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    errored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class TopologySyncRun(Base):

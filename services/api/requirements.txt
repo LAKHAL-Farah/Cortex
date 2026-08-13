@@ -13,3 +13,12 @@ pandas==2.2.3
 scipy==1.13.1
 openstacksdk==4.18.0
 neo4j==5.28.4
+qdrant-client==1.12.1
+# Local embedding model for the knowledge RAG pipeline (adr-0004) -- pulls in
+# torch and transformers as transitive deps; expect the image to grow by
+# ~500MB-1GB and the first `pip install` to take a while.
+sentence-transformers==3.3.1
+# Grounded chat generation over the retrieved chunks above (adr-0005) --
+# ChatNVIDIA calls the hosted NVIDIA NIM endpoint, no model weights baked
+# into the image (unlike the embedding model).
+langchain-nvidia-ai-endpoints==1.4.3

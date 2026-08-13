@@ -105,3 +105,79 @@ def list_recent_topology_sync_runs(db: Session, sync_type: str, limit: int = 5) 
         .order_by(models.TopologySyncRun.finished_at.desc())
         .limit(limit)
     ).all()
+
+
+# --------------------------------------------------------------------------
+# Copilot conversation history -- server-side counterpart to
+# lib/copilotHistory.ts's localStorage store. Every function below is
+# scoped by client_id so one browser's history is never visible to another
+# (see app.security.get_client_id).
+# --------------------------------------------------------------------------
+
+def list_conversations(db: Session, client_id: str) -> list[models.Conversation]:
+    return db.scalars(
+        select(models.Conversation)
+        .where(models.Conversation.client_id == client_id)
+        .order_by(models.Conversation.updated_at.desc())
+    ).all()
+
+
+def get_conversation(db: Session, client_id: str, conversation_id: uuid.UUID) -> models.Conversation | None:
+    return db.scalar(
+        select(models.Conversation)
+        .where(models.Conversation.id == conversation_id, models.Conversation.client_id == client_id)
+    )
+
+
+def create_conversation(db: Session, client_id: str, payload: schemas.ConversationCreate) -> models.Conversation:
+    conversation = models.Conversation(client_id=client_id, **payload.model_dump())
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+    return conversation
+
+
+def replace_conversation(
+    db: Session, conversation: models.Conversation, payload: schemas.ConversationUpdate
+) -> models.Conversation:
+    """Overwrites a conversation's title/category and its entire message
+    list in one call. Messages are deleted and reinserted rather than
+    diffed against the existing set -- the client always sends its full,
+    current transcript (see schemas.ConversationUpdate's docstring), so a
+    diff would just be more code to reach the same end state.
+    """
+    conversation.title = payload.title
+    conversation.category = payload.category
+
+    db.query(models.ConversationMessage).filter(
+        models.ConversationMessage.conversation_id == conversation.id
+    ).delete()
+
+    for position, message in enumerate(payload.messages):
+        db.add(
+            models.ConversationMessage(
+                conversation_id=conversation.id,
+                role=message.role.value,
+                content=message.content,
+                sources=[s.model_dump() for s in message.sources] if message.sources else None,
+                errored=message.errored,
+                position=position,
+            )
+        )
+
+    db.commit()
+    db.refresh(conversation)
+    return conversation
+
+
+def delete_conversation(db: Session, conversation: models.Conversation) -> None:
+    db.delete(conversation)
+    db.commit()
+
+
+def list_conversation_messages(db: Session, conversation_id: uuid.UUID) -> list[models.ConversationMessage]:
+    return db.scalars(
+        select(models.ConversationMessage)
+        .where(models.ConversationMessage.conversation_id == conversation_id)
+        .order_by(models.ConversationMessage.position.asc())
+    ).all()

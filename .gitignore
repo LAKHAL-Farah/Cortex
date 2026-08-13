@@ -41,5 +41,10 @@ build/
 *.csv
 
 
+docs/knowledge/**
+!docs/knowledge/.gitkeep
+!docs/knowledge/README.md
+
+
 
 

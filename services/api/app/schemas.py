@@ -144,5 +144,132 @@ class TopologyHealthOut(BaseModel):
     syncs: dict[str, TopologySyncRunOut | None]
 
 
+# --------------------------------------------------------------------------
+# Knowledge RAG (adr-0004) -- docs/knowledge/ -> Qdrant Cloud read/write schemas.
+# --------------------------------------------------------------------------
+
+class KnowledgeIngestResult(BaseModel):
+    knowledge_dir: str
+    collection: str
+    embedding_model: str
+    files_processed: int
+    chunks_embedded: int
+    duration_seconds: float
+
+
+class KnowledgeStatus(BaseModel):
+    collection: str
+    exists: bool
+    points_count: int | None = None
+    vectors_count: int | None = None
+    status: str | None = None
+
+
+class KnowledgeSearchQuery(BaseModel):
+    query: str = Field(min_length=1)
+    top_k: int = Field(default=5, ge=1, le=25)
+    # One of: "service-detail" (nova/neutron/glance/keystone/cinder), "topology",
+    # "network", "service-catalog", "resource-mgmt", "security-access",
+    # "admin-runbook", "flow-processes", "glossary", "overview" (README.md), or
+    # "general" for any unrecognized top-level file. Omit to search the whole
+    # knowledge base. See loader.py::_TOP_LEVEL_CATEGORIES for the source of truth.
+    category: str | None = None
+
+
+class KnowledgeSearchResult(BaseModel):
+    score: float
+    text: str
+    source_path: str
+    doc_title: str
+    heading: str | None = None
+    category: str
+
+
+class KnowledgeSearchResponse(BaseModel):
+    results: list[KnowledgeSearchResult]
+
+
+# --------------------------------------------------------------------------
+# Knowledge chat (adr-0005) -- grounded Q&A over docs/knowledge/ via NVIDIA
+# NIM + LangChain, layered on top of the KnowledgeSearch* retrieval above.
+# --------------------------------------------------------------------------
+
+class ChatRole(str, Enum):
+    user = "user"
+    assistant = "assistant"
+
+
+class ChatMessage(BaseModel):
+    role: ChatRole
+    content: str = Field(min_length=1)
+
+
+class ChatQuery(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    # Prior turns, oldest first. Sent by the client on every request -- the
+    # API is stateless across calls (see adr-0005), so this *is* the memory.
+    history: list[ChatMessage] = Field(default_factory=list, max_length=20)
+    category: str | None = None
+    top_k: int = Field(default=5, ge=1, le=15)
+
+
+class ChatSource(BaseModel):
+    source_path: str
+    doc_title: str
+    heading: str | None = None
+    score: float
+
+
+# --------------------------------------------------------------------------
+# Copilot conversation history -- server-side persistence of Copilot threads,
+# scoped by the anonymous X-Client-Id header (see app.security.get_client_id)
+# rather than a real account, since Cortex has no login system yet. Reuses
+# ChatRole/ChatSource above since a stored message is just a chat turn plus
+# the bookkeeping (errored, position) needed to replay a transcript.
+# --------------------------------------------------------------------------
+
+class ConversationMessageIn(BaseModel):
+    role: ChatRole
+    content: str = Field(min_length=1)
+    sources: list[ChatSource] | None = None
+    errored: bool = False
+
+
+class ConversationMessageOut(ConversationMessageIn):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    created_at: datetime
+
+
+class ConversationCreate(BaseModel):
+    title: str = Field(default="New conversation", max_length=200)
+    category: str | None = None
+
+
+class ConversationUpdate(BaseModel):
+    """Full-replace payload for PUT /api/v1/conversations/{id}: the client
+    (see lib/copilotHistory.ts) treats a conversation as one JSON blob it
+    overwrites wholesale on every turn, same as it did against localStorage
+    before this endpoint existed -- so the API mirrors that shape instead of
+    exposing a separate per-message append endpoint the client doesn't need.
+    """
+    title: str = Field(max_length=200)
+    category: str | None = None
+    messages: list[ConversationMessageIn] = Field(default_factory=list, max_length=500)
+
+
+class ConversationSummaryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    category: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationOut(ConversationSummaryOut):
+    messages: list[ConversationMessageOut]
+
+
 
 
