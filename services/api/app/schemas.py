@@ -220,5 +220,56 @@ class ChatSource(BaseModel):
     score: float
 
 
+# --------------------------------------------------------------------------
+# Copilot conversation history -- server-side persistence of Copilot threads,
+# scoped by the anonymous X-Client-Id header (see app.security.get_client_id)
+# rather than a real account, since Cortex has no login system yet. Reuses
+# ChatRole/ChatSource above since a stored message is just a chat turn plus
+# the bookkeeping (errored, position) needed to replay a transcript.
+# --------------------------------------------------------------------------
+
+class ConversationMessageIn(BaseModel):
+    role: ChatRole
+    content: str = Field(min_length=1)
+    sources: list[ChatSource] | None = None
+    errored: bool = False
+
+
+class ConversationMessageOut(ConversationMessageIn):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    created_at: datetime
+
+
+class ConversationCreate(BaseModel):
+    title: str = Field(default="New conversation", max_length=200)
+    category: str | None = None
+
+
+class ConversationUpdate(BaseModel):
+    """Full-replace payload for PUT /api/v1/conversations/{id}: the client
+    (see lib/copilotHistory.ts) treats a conversation as one JSON blob it
+    overwrites wholesale on every turn, same as it did against localStorage
+    before this endpoint existed -- so the API mirrors that shape instead of
+    exposing a separate per-message append endpoint the client doesn't need.
+    """
+    title: str = Field(max_length=200)
+    category: str | None = None
+    messages: list[ConversationMessageIn] = Field(default_factory=list, max_length=500)
+
+
+class ConversationSummaryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    category: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationOut(ConversationSummaryOut):
+    messages: list[ConversationMessageOut]
+
+
 
 

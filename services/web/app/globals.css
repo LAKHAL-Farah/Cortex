@@ -273,3 +273,144 @@ select {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--ring-color, var(--accent)) 45%, transparent),
     0 0 18px -6px var(--ring-color, var(--accent));
 }
+
+/* ---- Copilot panel ambient background ----
+   A fixed, low-opacity wash behind the whole chat panel so the surface
+   reads as "alive" without competing with message text. Same accent/medium
+   mix as .glow-surface, just larger and dimmer since it sits behind an
+   entire panel rather than one card's top edge. */
+.copilot-ambient {
+  position: relative;
+  isolation: isolate;
+}
+.copilot-ambient::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(46% 38% at 18% -6%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%),
+    radial-gradient(38% 32% at 96% 8%, color-mix(in srgb, var(--medium) 13%, transparent), transparent 72%),
+    radial-gradient(50% 40% at 50% 108%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 75%);
+  opacity: 0.9;
+  pointer-events: none;
+}
+.dark .copilot-ambient::before {
+  opacity: 1;
+}
+
+/* Signature empty-state orb: a small "world" the copilot reasons over.
+   Layered radial gradients read as a lit sphere; the outer rings breathe
+   slowly via .orb-halo so it feels ambient rather than looping obviously. */
+.copilot-orb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: radial-gradient(
+      65% 65% at 32% 28%,
+      color-mix(in srgb, var(--accent) 85%, white) 0%,
+      var(--accent) 42%,
+      var(--medium) 78%,
+      color-mix(in srgb, var(--medium) 70%, black) 100%
+    );
+  box-shadow:
+    inset -6px -8px 14px rgba(0, 0, 0, 0.28),
+    inset 4px 4px 10px rgba(255, 255, 255, 0.35),
+    0 0 24px -2px color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: orb-drift 7s ease-in-out infinite;
+}
+.copilot-orb::after {
+  content: "";
+  position: absolute;
+  inset: -14px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  animation: orb-halo 3.6s ease-in-out infinite;
+}
+@keyframes orb-drift {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-3px) rotate(6deg); }
+}
+@keyframes orb-halo {
+  0%, 100% { transform: scale(0.94); opacity: 0.55; }
+  50% { transform: scale(1.08); opacity: 0.15; }
+}
+
+/* ---- Markdown content (assistant messages) ----
+   react-markdown renders semantic elements with no styling of their own;
+   this scopes sensible typography to .md-content instead of a global
+   `prose` reset so it can't leak into unrelated panels. */
+.md-content {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text);
+}
+.md-content > *:first-child { margin-top: 0; }
+.md-content > *:last-child { margin-bottom: 0; }
+.md-content p { margin: 0 0 0.65em; }
+.md-content ul, .md-content ol { margin: 0.35em 0 0.75em; padding-left: 1.35em; }
+.md-content li { margin: 0.2em 0; }
+.md-content li::marker { color: var(--text-muted); }
+.md-content h1, .md-content h2, .md-content h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--text);
+  margin: 1em 0 0.4em;
+  letter-spacing: -0.01em;
+}
+.md-content h1 { font-size: 1.05em; }
+.md-content h2 { font-size: 1em; }
+.md-content h3 { font-size: 0.95em; }
+.md-content strong { font-weight: 600; color: var(--text); }
+.md-content a { color: var(--accent); text-decoration: underline; text-decoration-color: var(--accent-soft); }
+.md-content blockquote {
+  margin: 0.5em 0;
+  padding: 0.1em 0.9em;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--text-faint);
+}
+.md-content code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--canvas);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+}
+.md-content pre {
+  margin: 0.6em 0;
+  padding: 0.75em 0.9em;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border-soft);
+  background: var(--canvas);
+  overflow-x: auto;
+}
+.md-content pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.82em;
+  line-height: 1.55;
+}
+.md-content table {
+  width: 100%;
+  margin: 0.6em 0;
+  border-collapse: collapse;
+  font-size: 0.92em;
+}
+.md-content th, .md-content td {
+  border: 1px solid var(--border-soft);
+  padding: 0.4em 0.6em;
+  text-align: left;
+}
+.md-content th {
+  background: var(--canvas);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.md-content hr {
+  border: none;
+  border-top: 1px solid var(--border-soft);
+  margin: 0.9em 0;
+}

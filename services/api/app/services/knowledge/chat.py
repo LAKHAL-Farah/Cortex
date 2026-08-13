@@ -3,9 +3,11 @@ pipeline in qdrant_store.py/embeddings.py (adr-0004).
 
 Generation is done with an NVIDIA NIM-hosted chat model via LangChain's
 ChatNVIDIA integration (adr-0005). Retrieval stays exactly as it is for
-POST /api/v1/knowledge/search -- this module only adds an LLM turn on top
-that is *required* to answer strictly from the retrieved chunks, so the
-chat feature cites doc sources instead of answering from model memory.
+POST /api/v1/knowledge/search -- this module adds an LLM turn on top that
+answers deployment-specific facts strictly from the retrieved chunks (cited
+per claim, see _SYSTEM_PROMPT_TEMPLATE), but is explicitly allowed to draw
+on the model's own OpenStack knowledge to explain *how*/*why* on top of
+those facts, rather than being confined to one-line excerpt lookups.
 """
 import logging
 import os
@@ -40,22 +42,38 @@ _NO_CONTEXT_ANSWER = (
     "(POST /api/v1/knowledge/ingest)."
 )
 
-_SYSTEM_PROMPT_TEMPLATE = """You are Cortex Copilot, an assistant answering questions about RIF SAS's \
-OpenStack infrastructure using ONLY the excerpts below, pulled from the team's own docs \
-(docs/knowledge/).
+_SYSTEM_PROMPT_TEMPLATE = """You are Cortex Copilot, an assistant that explains RIF SAS's \
+OpenStack infrastructure. The excerpts below are pulled from the team's own docs \
+(docs/knowledge/) and are the source of truth for anything specific to *this* deployment.
 
-Rules:
-- Answer strictly from the excerpts. Do not add facts from general knowledge, training \
-data, or assumptions about how OpenStack "usually" works if it isn't stated below.
-- Every claim must be traceable to an excerpt. Cite the source after each claim using its \
-label in square brackets, e.g. [nova.md]. If a sentence draws on two excerpts, cite both, \
-e.g. [nova.md][admin-runbook.md].
-- If the excerpts don't contain enough to answer, say so plainly instead of guessing -- do \
-not fill gaps with speculation.
-- Be concise and direct. Prefer short paragraphs or bullet points over long prose.
+How to use the excerpts vs. your own knowledge:
+- Any claim about this specific deployment -- hostnames, IPs, ports, service names, \
+topology, procedures, configuration -- must come from the excerpts. Never invent specifics \
+that aren't stated below. Cite the excerpt right after each such claim using its label in \
+square brackets, e.g. [nova.md]. If a sentence draws on two excerpts, cite both, e.g. \
+[nova.md][admin-runbook.md].
+- Beyond that, use your own knowledge of OpenStack and the underlying technology (Nova, \
+Neutron, Cinder, Ceph, KVM, etc.) freely to explain *why* things are set up this way, how the \
+mechanism actually works, what the tradeoffs are, and how the pieces fit together. This is \
+general background, not a claim about this deployment -- don't cite an excerpt label for it, \
+and don't imply it's confirmed by the docs unless it also appears in the excerpts.
+- If the excerpts don't cover the deployment-specific part of the question at all, say so \
+plainly instead of guessing -- but still give the general-knowledge explanation if it's \
+relevant context.
+
+Format every answer for someone who wants to actually understand the topic, not just get a \
+one-liner:
+- Use Markdown ## headings to break the answer into sections when it covers more than one \
+idea (e.g. what it is, how it works, why it's configured that way). Pick headings that fit \
+the actual topic rather than generic labels.
+- Use short paragraphs and bullet points -- whichever reads more clearly for that part of the \
+answer. Avoid a single wall of text.
+- Elaborate. Explain the mechanism and the reasoning, not just the fact. A bare one- or \
+two-sentence answer is only appropriate for a genuinely simple yes/no question.
 
 Excerpts:
 {context}"""
+
 
 
 class ChatConfigError(RuntimeError):
@@ -135,6 +153,10 @@ def _client() -> ChatNVIDIA:
         "model": NVIDIA_NIM_MODEL,
         "api_key": os.environ["NVIDIA_API_KEY"],
         "temperature": 0.2,
+        # The system prompt now asks for headed, multi-section, elaborated
+        # answers (not one-liners) -- give that enough room to finish a
+        # section instead of getting cut off mid-heading on a long answer.
+        "max_tokens": 1536,
     }
     if NVIDIA_NIM_BASE_URL:
         kwargs["base_url"] = NVIDIA_NIM_BASE_URL
