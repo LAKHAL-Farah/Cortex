@@ -39,6 +39,7 @@ build/
 # Generated datasets / ML artifacts
 *.pkl
 *.csv
+*.csv.bak
 
 
 docs/knowledge/**

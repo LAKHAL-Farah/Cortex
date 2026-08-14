@@ -80,14 +80,31 @@ export interface BaselineSlot {
   updated_at: string | null;
 }
 export interface ForecastPoint {
-  day: "tomorrow" | "7_days" | "30_days";
+  horizon_hours: number;
+  timestamp: string;
+  predicted: number;
+  lower: number;
+  upper: number;
+}
+
+export interface ForecastActualPoint {
+  timestamp: string;
   value: number;
 }
 
 export interface ForecastResult {
   hostname: string;
   metric: string;
+  /** "ml_quantile" when there's enough recent history to trust the pooled
+   * quantile model, "fallback_seasonal_persistence" for hosts too new/thin
+   * for that -- surfaced so the UI can label a fallback forecast as such. */
+  model_type: "ml_quantile" | "fallback_seasonal_persistence";
+  generated_at: string;
+  n_points_used: number;
+  /** Hourly resolution for the first 24h, daily resolution out to 7 days. */
   forecast: ForecastPoint[];
+  /** Recent hourly-resampled actuals, for the "prediction vs actual" chart. */
+  actual: ForecastActualPoint[];
 }
 /** One row per anomaly episode (Alerts > History), as opposed to AnomalyFlag
  * which only ever reflects the current state per host/metric. */

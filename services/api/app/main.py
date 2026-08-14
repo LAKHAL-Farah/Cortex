@@ -37,16 +37,17 @@ ANOMALY_DETECTION_INTERVAL_SECONDS = int(os.getenv("ANOMALY_DETECTION_INTERVAL_S
 BASELINE_REFRESH_INTERVAL_SECONDS = int(os.getenv("BASELINE_REFRESH_INTERVAL_SECONDS", "3600"))
 
 # How often the forecasting dataset (cpu/memory/disk history CSV) is rebuilt
-# from Prometheus. Forecasting looks at day/week-scale trends (tomorrow, 7d,
-# 30d out), so unlike anomaly detection or baselines this doesn't need to be
-# frequent -- daily is enough to track the trend and keeps the 14-day
-# range-query cheap and infrequent on Prometheus.
-FORECAST_DATASET_REFRESH_INTERVAL_SECONDS = int(os.getenv("FORECAST_DATASET_REFRESH_INTERVAL_SECONDS", "86400"))
+# from Prometheus. build_dataset() is incremental (it only fetches since the
+# last stored point), so an hourly cadence is cheap on Prometheus and is what
+# lets the "value_now"/short-lag features forecast_service.py builds actually
+# reflect the last hour, not yesterday's data -- see adr-0006.
+FORECAST_DATASET_REFRESH_INTERVAL_SECONDS = int(os.getenv("FORECAST_DATASET_REFRESH_INTERVAL_SECONDS", "3600"))
 
-# How often forecasting models are retrained from the latest dataset.
-# Same cadence as the dataset rebuild -- no point retraining more often
-# than the data itself changes.
-FORECAST_TRAINING_INTERVAL_SECONDS = int(os.getenv("FORECAST_TRAINING_INTERVAL_SECONDS", "86400"))
+# How often forecasting models are retrained from the latest dataset. Same
+# hourly cadence as the dataset rebuild -- the pooled HistGradientBoosting
+# quantile models train in low single-digit seconds even with several hosts'
+# worth of history, so there's no cost reason to lag the dataset refresh.
+FORECAST_TRAINING_INTERVAL_SECONDS = int(os.getenv("FORECAST_TRAINING_INTERVAL_SECONDS", "3600"))
 
 # How often topology_sync polls Nova for hypervisors/services and upserts
 # the topology graph. This is the one OpenStack polling loop (see

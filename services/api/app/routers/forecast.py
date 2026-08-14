@@ -15,9 +15,11 @@ def forecast(hostname: str, metric_name: str, db: Session = Depends(get_db)):
 
     result = get_forecast(node.ip_address, metric_name)
     if result is None:
-        raise HTTPException(status_code=404, detail="Aucun modèle disponible pour ce nœud/métrique")
+        raise HTTPException(status_code=404, detail="Pas assez de données pour ce nœud/métrique")
 
     # On renvoie le hostname logique demandé, pas l'IP interne utilisée
-    # pour retrouver le fichier modèle — le frontend n'a pas besoin de le savoir.
+    # pour retrouver le fichier modèle/dataset — le frontend n'a pas besoin
+    # de le savoir. Everything else (model_type, forecast[], actual[], ...)
+    # comes straight from forecast_service.get_forecast().
     result["hostname"] = hostname
     return result
