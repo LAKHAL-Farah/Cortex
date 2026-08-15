@@ -43,13 +43,51 @@ ROLL_HOURS = [1, 6, 24]
 # Horizons sampled when building the *training* set. Log-ish spaced so the
 # model sees short-range (high signal) and long-range (high uncertainty)
 # examples without paying for 168 separate horizon values per anchor.
-TRAIN_HORIZONS_HOURS = [1, 2, 4, 6, 9, 12, 18, 24, 36, 48, 72, 96, 120, 144, 168]
+#
+# The tail past 168h (7d) -- out to 2160h/90d -- is what lets the pooled
+# quantile model pick up real long-horizon signal (2.8: 30/90-day forecast
+# horizon) *once* forecast_dataset_builder.RETENTION_DAYS worth of history
+# (90 days) has actually accumulated for a metric. Early on, or for a fresh
+# deployment, there just won't be enough grid span for make_training_rows to
+# emit rows out that far -- see forecast_trainer._train_metric's
+# max_supported_horizon_hours, which is what keeps forecast_service.py from
+# serving an ML prediction at a horizon the pooled model never actually saw
+# training examples for.
+LONG_HORIZON_TRAIN_DAYS = [10, 14, 21, 30, 45, 60, 75, 90]
+TRAIN_HORIZONS_HOURS = [1, 2, 4, 6, 9, 12, 18, 24, 36, 48, 72, 96, 120, 144, 168] + [
+    d * 24 for d in LONG_HORIZON_TRAIN_DAYS
+]
 
-# Horizons actually returned by the API: hourly resolution for the first day
-# (matches the "next 24h" part of the spec), daily resolution out to 7 days
-# (matches "next ... 7 days") -- keeps the payload/chart to ~30 points
-# instead of 168.
-SERVE_HORIZONS_HOURS = list(range(1, 25)) + [48, 72, 96, 120, 144, 168]
+# Daily checkpoints used by build_serve_horizons() beyond the first day, out
+# to 90 days. Spacing widens with distance (weekly-ish past 7d, ~biweekly
+# past 30d) so a 90-day request still renders as a readable ~35-40 point
+# chart instead of paying for 2160 hourly points.
+DAILY_HORIZON_DAYS = [2, 3, 4, 5, 6, 7, 10, 14, 21, 30, 45, 60, 75, 90]
+
+MIN_HORIZON_DAYS = 1
+MAX_HORIZON_DAYS = 90
+
+
+def build_serve_horizons(max_days: float | int) -> list[int]:
+    """Horizon set (in hours) to serve for a request asking for up to
+    `max_days` of forecast (2.8: selectable horizon up to 90 days).
+    `max_days` is clamped to [MIN_HORIZON_DAYS, MAX_HORIZON_DAYS].
+
+    Hourly resolution for day 1, then the DAILY_HORIZON_DAYS checkpoints up
+    to `max_days`. `build_serve_horizons(7)` reproduces the original fixed
+    7-day horizon list exactly, so existing callers asking for the default
+    are unaffected byte-for-byte."""
+    max_days = max(MIN_HORIZON_DAYS, min(MAX_HORIZON_DAYS, int(round(max_days))))
+    hourly = range(1, min(24, max_days * 24) + 1)
+    daily = (d * 24 for d in DAILY_HORIZON_DAYS if d <= max_days)
+    return sorted(set(hourly) | set(daily))
+
+
+# Default/legacy horizon set -- hourly resolution for the first day, daily
+# resolution out to 7 days -- kept as a module-level constant for callers
+# that don't care about the longer horizons build_serve_horizons() can now
+# produce. Equivalent to build_serve_horizons(7).
+SERVE_HORIZONS_HOURS = build_serve_horizons(7)
 
 FEATURE_COLUMNS = [
     "value_now",

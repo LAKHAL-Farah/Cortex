@@ -85,6 +85,11 @@ export interface ForecastPoint {
   predicted: number;
   lower: number;
   upper: number;
+  /** True (2.8) when this point falls past whatever horizon the ML model
+   * actually had training support for, and was instead produced by the
+   * widening seasonal-persistence extension -- lets the UI mark the part of
+   * a 30/90-day forecast that's genuinely less certain than the rest. */
+  extrapolated: boolean;
 }
 
 export interface ForecastActualPoint {
@@ -92,16 +97,29 @@ export interface ForecastActualPoint {
   value: number;
 }
 
+/** Selectable forecast horizons (2.8: "Extend forecast horizon to 30/90
+ * days"). Passed as `?horizon_days=` to the API. */
+export const FORECAST_HORIZON_DAYS = [7, 30, 90] as const;
+export type ForecastHorizonDays = (typeof FORECAST_HORIZON_DAYS)[number];
+
 export interface ForecastResult {
   hostname: string;
   metric: string;
   /** "ml_quantile" when there's enough recent history to trust the pooled
    * quantile model, "fallback_seasonal_persistence" for hosts too new/thin
-   * for that -- surfaced so the UI can label a fallback forecast as such. */
+   * for that -- surfaced so the UI can label a fallback forecast as such.
+   * Still "ml_quantile" (2.8) when only *some* points -- the ones within the
+   * model's training-supported range -- actually used it; check each
+   * point's `extrapolated` flag for that detail. */
   model_type: "ml_quantile" | "fallback_seasonal_persistence";
   generated_at: string;
   n_points_used: number;
-  /** Hourly resolution for the first 24h, daily resolution out to 7 days. */
+  /** Echoes the requested horizon (2.8), clamped to [1, 90]. */
+  horizon_days: number;
+  /** Horizon, in hours, of the furthest-out point actually served. */
+  max_horizon_hours: number;
+  /** Hourly resolution for the first 24h, then daily-to-fortnightly
+   * checkpoints out to `horizon_days` (2.8: up to 90). */
   forecast: ForecastPoint[];
   /** Recent hourly-resampled actuals, for the "prediction vs actual" chart. */
   actual: ForecastActualPoint[];

@@ -9,7 +9,11 @@ export async function GET(
   const { hostname, metric } = await params;
   const { searchParams } = new URL(req.url);
   const threshold = searchParams.get("threshold");
-  const qs = threshold ? `?threshold=${encodeURIComponent(threshold)}` : "";
+  const horizonDays = searchParams.get("horizon_days");
+  const qsParams = new URLSearchParams();
+  if (threshold) qsParams.set("threshold", threshold);
+  if (horizonDays) qsParams.set("horizon_days", horizonDays);
+  const qs = qsParams.toString() ? `?${qsParams.toString()}` : "";
   const res = await fetch(
     `${API_URL}/api/v1/forecast/${encodeURIComponent(hostname)}/${encodeURIComponent(metric)}/threshold${qs}`,
     { cache: "no-store" }

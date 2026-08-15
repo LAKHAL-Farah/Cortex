@@ -29,10 +29,22 @@ Both tiers are always clipped to [0, 100] (these are all percentage metrics)
 at serving time, not just at training time, because a model trained on
 in-range data can still extrapolate out of range for horizons/feature
 combinations it never saw.
+
+2.8 (30/90-day horizon): TRAIN_HORIZONS_HOURS now extends out to 2160h/90d,
+so the pooled model *can* learn a long-horizon quantile spread once enough
+history has accumulated (forecast_dataset_builder.RETENTION_DAYS = 90 days).
+Each bundle records `max_supported_horizon_hours` -- the longest horizon that
+actually had `MIN_ROWS_PER_HORIZON` pooled training examples -- and
+forecast_service.get_forecast() only serves the ML tier up to that point;
+anything a request asks for beyond it is served by the same
+seasonal-persistence math as the fallback tier, whose interval keeps widening
+with sqrt(horizon) rather than silently flattening the way a tree
+regressor's extrapolation would past the range it was fit on.
 """
 
 import logging
 import os
+from collections import Counter
 from datetime import datetime, timezone
 
 import joblib
@@ -83,6 +95,16 @@ MIN_TRAINING_ROWS = 500
 # points of a freshly bootstrapped node. It can still be *served* (via the
 # fallback tier, or the ML tier once it clears this bar) well before that.
 MIN_HOST_HOURS_TO_CONTRIBUTE = 2.0
+
+# A specific horizon (e.g. 2160h/90d) needs at least this many pooled rows
+# actually observed at that horizon before forecast_service is allowed to
+# serve an ML prediction that far out (2.8). Below this, TRAIN_HORIZONS_HOURS
+# includes the horizon, but there simply wasn't enough retained history yet
+# for the model to have learned it -- see max_supported_horizon_hours below,
+# which is how forecast_service knows to fall back to the honest
+# seasonal-persistence extrapolation for those horizons instead of serving a
+# tree regressor's extrapolation past the range it was actually fit on.
+MIN_ROWS_PER_HORIZON = 30
 
 QUANTILES = {"q10": 0.1, "q50": 0.5, "q90": 0.9}
 
@@ -190,11 +212,23 @@ def _train_metric(metric_name: str, host_frames: dict) -> dict:
 
     models = _fit_quantile_models(X, y)
 
+    # Longest horizon with real support in the pooled training rows (2.8) --
+    # forecast_service uses this, not TRAIN_HORIZONS_HOURS itself, to decide
+    # how far out it can trust this bundle's ML tier before switching a given
+    # request's longer horizons over to the seasonal-persistence extension.
+    # A bundle with no key at all (pre-2.8) is treated by forecast_service as
+    # capped at the old fixed 168h/7d ceiling, so nothing changes for it
+    # until it's retrained.
+    horizon_counts = Counter(round(float(row["horizon_hours"])) for row in all_rows)
+    supported_horizons = [h for h, c in horizon_counts.items() if c >= MIN_ROWS_PER_HORIZON]
+    max_supported_horizon_hours = float(max(supported_horizons)) if supported_horizons else float(min(TRAIN_HORIZONS_HOURS))
+
     bundle = {
         "type": "ml_quantile",
         "metric": metric_name,
         "feature_columns": FEATURE_COLUMNS,
         "train_horizons_hours": TRAIN_HORIZONS_HOURS,
+        "max_supported_horizon_hours": max_supported_horizon_hours,
         "bounds": METRIC_BOUNDS[metric_name],
         "n_rows": len(all_rows),
         "n_hosts": len(host_frames),

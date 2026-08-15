@@ -24,7 +24,8 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
-import type { ForecastResult, DashboardNode, ThresholdWarning } from "@/lib/types";
+import type { ForecastResult, ForecastHorizonDays, DashboardNode, ThresholdWarning } from "@/lib/types";
+import { FORECAST_HORIZON_DAYS } from "@/lib/types";
 import { thresholdEtaLabel, metricLabel } from "@/lib/thresholds";
 import {
   ComposedChart,
@@ -37,6 +38,7 @@ import {
   YAxis,
   Brush,
   ReferenceLine,
+  ReferenceArea,
 } from "recharts";
 
 const FORECAST_METRICS = ["cpu_percent", "memory_percent", "disk_percent"] as const;
@@ -46,18 +48,42 @@ const MODEL_TYPE_LABELS: Record<string, string> = {
   fallback_seasonal_persistence: "Fallback model (limited history)",
 };
 
+const HORIZON_LABELS: Record<ForecastHorizonDays, string> = {
+  7: "7 days",
+  30: "30 days",
+  90: "90 days",
+};
+
 // Palette note: deliberately avoids --chart-3 (green) across this whole page —
 // "actual" uses the blue and "predicted" uses the orange/red so the two
 // series stay readable against each other without reaching for green at all.
 const COLOR_ACTUAL = "var(--neutral)";
 const COLOR_PREDICTED = "var(--medium)";
 
-const ZOOM_PRESETS = [
-  { label: "24h", hoursBack: 6, hoursForward: 24 },
-  { label: "3d", hoursBack: 24, hoursForward: 72 },
-  { label: "7d", hoursBack: 48, hoursForward: 168 },
-  { label: "All", hoursBack: null, hoursForward: null },
-] as const;
+// Zoom-preset windows scale with the selected forecast horizon (2.8) — a 90-
+// day forecast dwarfed by a "7d" zoom cap would look like a flat sliver, so
+// each horizon gets its own short/medium/long/all set rather than one fixed
+// list.
+const ZOOM_PRESETS_BY_HORIZON: Record<ForecastHorizonDays, readonly { label: string; hoursBack: number | null; hoursForward: number | null }[]> = {
+  7: [
+    { label: "24h", hoursBack: 6, hoursForward: 24 },
+    { label: "3d", hoursBack: 24, hoursForward: 72 },
+    { label: "7d", hoursBack: 48, hoursForward: 168 },
+    { label: "All", hoursBack: null, hoursForward: null },
+  ],
+  30: [
+    { label: "7d", hoursBack: 24, hoursForward: 168 },
+    { label: "14d", hoursBack: 48, hoursForward: 336 },
+    { label: "30d", hoursBack: 48, hoursForward: 720 },
+    { label: "All", hoursBack: null, hoursForward: null },
+  ],
+  90: [
+    { label: "14d", hoursBack: 48, hoursForward: 336 },
+    { label: "30d", hoursBack: 72, hoursForward: 720 },
+    { label: "90d", hoursBack: 72, hoursForward: 2160 },
+    { label: "All", hoursBack: null, hoursForward: null },
+  ],
+};
 
 
 
@@ -113,6 +139,7 @@ type ChartRow = {
   lower?: number;
   upper?: number;
   band?: number;
+  extrapolated?: boolean;
 };
 
 function ChartTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: ChartRow }> }) {
@@ -142,6 +169,11 @@ function ChartTooltip({ active, payload }: { active?: boolean; payload?: Array<{
             80% interval: {p.lower.toFixed(1)}% – {p.upper.toFixed(1)}%
           </div>
         )}
+        {p.extrapolated && (
+          <div className="text-xs font-medium" style={{ color: "var(--warn)" }}>
+            Beyond the model&apos;s trained range — wider, less certain
+          </div>
+        )}
       </div>
     </div>
   );
@@ -158,14 +190,22 @@ export default function ForecastExplorer() {
   const [host, setHost] = useState<string>(searchParams.get("host") ?? "");
   const [metric, setMetric] = useState<string>(searchParams.get("metric") ?? FORECAST_METRICS[0]);
 
+  // Selectable forecast horizon (2.8: "Extend forecast horizon to 30/90
+  // days"). Falls back to the 7-day default for a missing/unrecognized URL
+  // param rather than an arbitrary raw number.
+  const horizonParam = Number(searchParams.get("horizon"));
+  const [horizonDays, setHorizonDays] = useState<ForecastHorizonDays>(
+    (FORECAST_HORIZON_DAYS as readonly number[]).includes(horizonParam) ? (horizonParam as ForecastHorizonDays) : 7
+  );
+
   const effectiveHost = host && hostnames.includes(host) ? host : hostnames[0] ?? "";
   const effectiveNode = useMemo(() => (nodes ?? []).find((n) => n.hostname === effectiveHost), [nodes, effectiveHost]);
 
   useEffect(() => {
     if (!effectiveHost) return;
-    const params = new URLSearchParams({ host: effectiveHost, metric });
+    const params = new URLSearchParams({ host: effectiveHost, metric, horizon: String(horizonDays) });
     router.replace(`/forecast?${params.toString()}`, { scroll: false });
-  }, [effectiveHost, metric, router]);
+  }, [effectiveHost, metric, horizonDays, router]);
 
   const {
     data: result,
@@ -174,19 +214,27 @@ export default function ForecastExplorer() {
     isValidating,
     mutate,
   } = useSWR<ForecastResult>(
-    effectiveHost ? `/api/forecast/${encodeURIComponent(effectiveHost)}/${encodeURIComponent(metric)}` : null,
+    effectiveHost
+      ? `/api/forecast/${encodeURIComponent(effectiveHost)}/${encodeURIComponent(metric)}?horizon_days=${horizonDays}`
+      : null,
     fetcher,
     { refreshInterval: 5 * 60 * 1000 } // models retrain hourly server-side; polling every 5min is plenty
   );
+
+  const zoomPresets = ZOOM_PRESETS_BY_HORIZON[horizonDays];
 
   const forecastPoints = useMemo(() => result?.forecast ?? [], [result]);
   const actualPoints = useMemo(() => result?.actual ?? [], [result]);
 
   // Threshold-breach ETA (2.5) for whichever node/metric is currently
   // selected -- same data the dashboard's warnings panel is built from, just
-  // scoped to one resource and rendered alongside its chart here.
+  // scoped to one resource and rendered alongside its chart here. Searches
+  // out to the same horizon selected for the chart (2.8) rather than always
+  // being capped at 7 days.
   const { data: thresholdWarning } = useSWR<ThresholdWarning | null>(
-    effectiveHost ? `/api/forecast/${encodeURIComponent(effectiveHost)}/${encodeURIComponent(metric)}/threshold` : null,
+    effectiveHost
+      ? `/api/forecast/${encodeURIComponent(effectiveHost)}/${encodeURIComponent(metric)}/threshold?horizon_days=${horizonDays}`
+      : null,
     thresholdFetcher,
     { refreshInterval: 5 * 60 * 1000 }
   );
@@ -209,6 +257,7 @@ export default function ForecastExplorer() {
         lower: f.lower,
         upper: f.upper,
         band: f.upper - f.lower,
+        extrapolated: f.extrapolated,
       });
     }
     return Array.from(rows.values()).sort((a, b) => a.ts - b.ts);
@@ -218,13 +267,21 @@ export default function ForecastExplorer() {
   // and as the anchor point for the zoom presets below.
   const nowTs = result?.generated_at ? new Date(result.generated_at).getTime() : chartData[chartData.length - 1]?.ts;
 
-  const [zoomPreset, setZoomPreset] = useState<(typeof ZOOM_PRESETS)[number]["label"]>("All");
+  const [zoomPreset, setZoomPreset] = useState<string>("All");
   const [brushKey, setBrushKey] = useState(0); // bumping this remounts <Brush>, resetting a manual drag-zoom
+
+  // The preset label set differs per horizon (e.g. "3d" doesn't exist in the
+  // 90-day set) -- reset to "All" whenever the horizon selection changes so
+  // a stale label from the previous set never lingers.
+  useEffect(() => {
+    setZoomPreset("All");
+    setBrushKey((k) => k + 1);
+  }, [horizonDays]);
 
   const zoomRange = useMemo(() => {
     if (!chartData.length || !nowTs) return null;
-    const preset = ZOOM_PRESETS.find((p) => p.label === zoomPreset);
-    if (!preset || preset.hoursBack === null) return null; // "All"
+    const preset = zoomPresets.find((p) => p.label === zoomPreset);
+    if (!preset || preset.hoursBack === null || preset.hoursForward === null) return null; // "All"
     const from = nowTs - preset.hoursBack * 3600_000;
     const to = nowTs + preset.hoursForward * 3600_000;
     let startIndex = chartData.findIndex((d) => d.ts >= from);
@@ -237,18 +294,26 @@ export default function ForecastExplorer() {
       }
     }
     return { startIndex, endIndex: Math.max(endIndex, startIndex + 1) };
-  }, [chartData, nowTs, zoomPreset]);
+  }, [chartData, nowTs, zoomPreset, zoomPresets]);
 
   const next24h = forecastPoints.find((p) => p.horizon_hours === 24);
   const next48h = forecastPoints.find((p) => p.horizon_hours === 48);
   const next72h = forecastPoints.find((p) => p.horizon_hours === 72);
   const next7d = forecastPoints.find((p) => p.horizon_hours === 168);
+  const next30d = forecastPoints.find((p) => p.horizon_hours === 720);
+  const next90d = forecastPoints.find((p) => p.horizon_hours === 2160);
   const horizonRows = [
     { label: "In 24 hours", point: next24h },
     { label: "In 2 days", point: next48h },
     { label: "In 3 days", point: next72h },
     { label: "In 7 days", point: next7d },
+    ...(next30d ? [{ label: "In 30 days", point: next30d }] : []),
+    ...(next90d ? [{ label: "In 90 days", point: next90d }] : []),
   ];
+  // First point the API flagged as extrapolated (2.8) -- past the ML
+  // model's training-supported range -- used to shade that part of the
+  // chart and to drive the "extrapolated beyond ~Nd" note below it.
+  const firstExtrapolated = forecastPoints.find((p) => p.extrapolated);
   const lastActual = actualPoints[actualPoints.length - 1];
   const trend = lastActual && next7d ? next7d.predicted - lastActual.value : null;
   const trend24h = lastActual && next24h ? next24h.predicted - lastActual.value : null;
@@ -356,7 +421,7 @@ export default function ForecastExplorer() {
                       style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
                     >
                       <ZoomIn className="ml-1.5 h-3.5 w-3.5 text-text-faint" strokeWidth={2} />
-                      {ZOOM_PRESETS.map((p) => (
+                      {zoomPresets.map((p) => (
                         <button
                           key={p.label}
                           onClick={() => {
@@ -423,6 +488,21 @@ export default function ForecastExplorer() {
                         }}
                       />
                     )}
+                    {firstExtrapolated && chartData.length > 0 && (
+                      <ReferenceArea
+                        x1={formatTick(firstExtrapolated.timestamp)}
+                        x2={chartData[chartData.length - 1].label}
+                        stroke="none"
+                        fill="var(--warn)"
+                        fillOpacity={0.05}
+                        label={{
+                          value: "extrapolated",
+                          position: "insideTopLeft",
+                          fill: "var(--warn)",
+                          fontSize: 10,
+                        }}
+                      />
+                    )}
                     {/* Confidence-interval band: an invisible base area up to `lower`, then a visible
                         gradient-filled area for the `band` (upper - lower) stacked on top of it. */}
                     <Area type="monotone" dataKey="lower" stackId="ci" stroke="none" fill="transparent" isAnimationActive={false} />
@@ -482,6 +562,11 @@ export default function ForecastExplorer() {
                   <span className="flex items-center gap-1.5">
                     <span className="h-2.5 w-4 rounded" style={{ background: COLOR_PREDICTED, opacity: 0.4 }} /> 80% interval
                   </span>
+                  {firstExtrapolated && (
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-4 rounded" style={{ background: "var(--warn)", opacity: 0.15 }} /> Extrapolated (beyond trained range)
+                    </span>
+                  )}
                   <span className="ml-auto text-text-faint/80">Drag the handles below the chart to zoom into a custom range</span>
                 </div>
               </section>
@@ -536,6 +621,15 @@ export default function ForecastExplorer() {
                       { label: "Node", value: effectiveHost || "—" },
                       { label: "Metric", value: metricLabel(metric) },
                       { label: "Model", value: isFallback ? "Fallback (seasonal persistence)" : "ML (pooled, quantile)" },
+                      { label: "Horizon requested", value: result ? `${result.horizon_days} days` : "—" },
+                      {
+                        label: "Trusted ML range",
+                        value: firstExtrapolated
+                          ? `First ${Math.round((firstExtrapolated.horizon_hours - 1) / 24)}d — beyond that is extrapolated`
+                          : result
+                            ? "Full requested horizon"
+                            : "—",
+                      },
                       { label: "Training points used", value: result ? String(result.n_points_used) : "—" },
                       {
                         label: "Generated",
@@ -585,6 +679,28 @@ export default function ForecastExplorer() {
                   ))}
                 </select>
               </label>
+              <div className="grid gap-1">
+                <span className="text-xs text-text-faint">Horizon</span>
+                <div
+                  className="flex items-center gap-0.5 rounded-[var(--radius-control)] p-0.5"
+                  style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
+                >
+                  {FORECAST_HORIZON_DAYS.map((days) => (
+                    <button
+                      key={days}
+                      onClick={() => setHorizonDays(days)}
+                      className="flex-1 rounded-[calc(var(--radius-control)-2px)] py-1.5 text-xs font-medium transition-colors"
+                      style={
+                        horizonDays === days
+                          ? { background: "var(--medium)", color: "#fff" }
+                          : { color: "var(--text-faint)" }
+                      }
+                    >
+                      {days}d
+                    </button>
+                  ))}
+                </div>
+              </div>
               <button
                 onClick={() => mutate()}
                 className="mt-1 inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-control)] py-2 text-sm font-medium text-text-dim transition-colors hover:bg-[var(--canvas)]"
@@ -674,7 +790,7 @@ export default function ForecastExplorer() {
                 </>
               ) : (
                 <div className="mt-2 text-sm text-text-faint">
-                  Not projected to hit {thresholdWarning.threshold}% within the next 7 days (now at {thresholdWarning.current_value}%).
+                  Not projected to hit {thresholdWarning.threshold}% within the next {horizonDays} days (now at {thresholdWarning.current_value}%).
                 </div>
               )}
             </div>
@@ -712,6 +828,16 @@ export default function ForecastExplorer() {
                       This node has limited history so far ({result.n_points_used} points) — the forecast is based
                       on its own recent pattern rather than the trained model, and the interval is wider to reflect
                       that.
+                    </span>
+                  </li>
+                )}
+                {!isFallback && firstExtrapolated && (
+                  <li className="flex gap-2">
+                    <span className="mt-2 h-1 w-1 flex-shrink-0 rounded-full" style={{ background: "var(--text-muted)" }} />
+                    <span>
+                      Past {Math.round((firstExtrapolated.horizon_hours - 1) / 24)} days out, there isn&apos;t enough
+                      retained history yet for the trained model to have learned that far — the shaded part of the
+                      chart widens to reflect the extra uncertainty instead of guessing confidently.
                     </span>
                   </li>
                 )}
