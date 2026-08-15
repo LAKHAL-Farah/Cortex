@@ -106,6 +106,29 @@ export interface ForecastResult {
   /** Recent hourly-resampled actuals, for the "prediction vs actual" chart. */
   actual: ForecastActualPoint[];
 }
+
+// -- Threshold-breach ETA (2.5: "X will hit threshold in ~N days") --------
+//
+// GET /api/v1/forecast/{hostname}/{metric}/threshold returns one of these;
+// GET /api/v1/forecast/warnings returns a list, already filtered to
+// will_breach === true and sorted soonest-first (see
+// forecast_service.list_threshold_warnings on the API side).
+
+export interface ThresholdWarning {
+  hostname: string;
+  metric: string;
+  model_type: "ml_quantile" | "fallback_seasonal_persistence";
+  threshold: number;
+  current_value: number;
+  will_breach: boolean;
+  /** True when the metric is already at/above threshold right now. */
+  already_breached: boolean;
+  /** Hours until the projected crossing, or null when not projected to
+   * cross within the served 7-day horizon. 0 when already_breached. */
+  eta_hours: number | null;
+  eta_days: number | null;
+  crossing_timestamp: string | null;
+}
 /** One row per anomaly episode (Alerts > History), as opposed to AnomalyFlag
  * which only ever reflects the current state per host/metric. */
 export interface AnomalyEvent {

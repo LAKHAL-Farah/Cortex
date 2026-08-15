@@ -21,8 +21,11 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   LineChart,
+  ShieldAlert,
+  ShieldCheck,
 } from "lucide-react";
-import type { ForecastResult, DashboardNode } from "@/lib/types";
+import type { ForecastResult, DashboardNode, ThresholdWarning } from "@/lib/types";
+import { thresholdEtaLabel, metricLabel } from "@/lib/thresholds";
 import {
   ComposedChart,
   Area,
@@ -56,18 +59,7 @@ const ZOOM_PRESETS = [
   { label: "All", hoursBack: null, hoursForward: null },
 ] as const;
 
-function metricLabel(metric: string): string {
-  switch (metric) {
-    case "cpu_percent":
-      return "CPU usage";
-    case "memory_percent":
-      return "Memory usage";
-    case "disk_percent":
-      return "Disk usage";
-    default:
-      return metric;
-  }
-}
+
 
 function MetricGlyph({ metric, className }: { metric: string; className?: string }) {
   switch (metric) {
@@ -93,6 +85,16 @@ const fetcher = async (url: string) => {
 };
 
 const nodesFetcher = (url: string) => fetch(url).then((r) => r.json());
+
+// Threshold-ETA (2.5) is treated as "no opinion" rather than an error when
+// the API 404s (e.g. a metric with no default threshold) -- unlike the main
+// forecast fetcher, this one resolves to null instead of throwing so a
+// missing threshold doesn't put the whole page into an error state.
+const thresholdFetcher = async (url: string): Promise<ThresholdWarning | null> => {
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  return res.json();
+};
 
 const selectClass = "rounded-[var(--radius-control)] px-3 py-2 text-sm text-color-text outline-none transition-colors";
 const selectStyle = { border: "1px solid var(--border)", background: "var(--canvas)" } as const;
@@ -179,6 +181,15 @@ export default function ForecastExplorer() {
 
   const forecastPoints = useMemo(() => result?.forecast ?? [], [result]);
   const actualPoints = useMemo(() => result?.actual ?? [], [result]);
+
+  // Threshold-breach ETA (2.5) for whichever node/metric is currently
+  // selected -- same data the dashboard's warnings panel is built from, just
+  // scoped to one resource and rendered alongside its chart here.
+  const { data: thresholdWarning } = useSWR<ThresholdWarning | null>(
+    effectiveHost ? `/api/forecast/${encodeURIComponent(effectiveHost)}/${encodeURIComponent(metric)}/threshold` : null,
+    thresholdFetcher,
+    { refreshInterval: 5 * 60 * 1000 }
+  );
 
   const chartData = useMemo<ChartRow[]>(() => {
     const rows = new Map<string, ChartRow>();
@@ -398,6 +409,20 @@ export default function ForecastExplorer() {
                         label={{ value: "now", position: "insideTopRight", fill: "var(--text-faint)", fontSize: 10 }}
                       />
                     )}
+                    {thresholdWarning && (
+                      <ReferenceLine
+                        y={thresholdWarning.threshold}
+                        stroke="var(--crit)"
+                        strokeDasharray="4 3"
+                        strokeOpacity={0.6}
+                        label={{
+                          value: `${thresholdWarning.threshold}% threshold`,
+                          position: "insideBottomLeft",
+                          fill: "var(--crit)",
+                          fontSize: 10,
+                        }}
+                      />
+                    )}
                     {/* Confidence-interval band: an invisible base area up to `lower`, then a visible
                         gradient-filled area for the `band` (upper - lower) stacked on top of it. */}
                     <Area type="monotone" dataKey="lower" stackId="ci" stroke="none" fill="transparent" isAnimationActive={false} />
@@ -607,6 +632,49 @@ export default function ForecastExplorer() {
                   {trend > 0 ? <ArrowUpRight className="h-3.5 w-3.5" strokeWidth={2.5} /> : <ArrowDownRight className="h-3.5 w-3.5" strokeWidth={2.5} />}
                   {trend >= 0 ? "+" : ""}
                   {trend.toFixed(1)} pts over 7d
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Threshold-breach ETA widget (2.5) -- "X will hit threshold in
+              ~N days" for the currently selected node/metric, or a calm
+              all-clear when nothing's projected to cross within 7 days. */}
+          {!isLoading && !error && result && thresholdWarning && (
+            <div
+              className="panel border-l-[3px] p-4"
+              style={{
+                borderLeftColor: thresholdWarning.will_breach
+                  ? thresholdWarning.already_breached
+                    ? "var(--crit)"
+                    : "var(--warn)"
+                  : "var(--ok)",
+              }}
+            >
+              <div className="eyebrow flex items-center gap-1.5">
+                {thresholdWarning.will_breach ? (
+                  <ShieldAlert className="h-3.5 w-3.5" style={{ color: thresholdWarning.already_breached ? "var(--crit)" : "var(--warn)" }} />
+                ) : (
+                  <ShieldCheck className="h-3.5 w-3.5" style={{ color: "var(--ok)" }} />
+                )}
+                Threshold ({thresholdWarning.threshold}%)
+              </div>
+              {thresholdWarning.will_breach ? (
+                <>
+                  <div className="mt-2 text-sm text-color-text">
+                    <span className="font-medium">{effectiveHost}</span> will hit {thresholdWarning.threshold}%{" "}
+                    <span
+                      className="font-semibold"
+                      style={{ color: thresholdWarning.already_breached ? "var(--crit)" : "var(--warn)" }}
+                    >
+                      {thresholdEtaLabel(thresholdWarning)}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-text-faint">now at {thresholdWarning.current_value}%</div>
+                </>
+              ) : (
+                <div className="mt-2 text-sm text-text-faint">
+                  Not projected to hit {thresholdWarning.threshold}% within the next 7 days (now at {thresholdWarning.current_value}%).
                 </div>
               )}
             </div>

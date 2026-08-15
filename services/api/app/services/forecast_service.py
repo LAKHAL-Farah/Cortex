@@ -40,6 +40,16 @@ METRIC_BOUNDS = {
     "disk_percent": (0.0, 100.0),
 }
 
+# Default "capacity" threshold per metric used by the threshold-ETA warning
+# (2.5: "X will hit threshold in ~N days"). Callers can override per request;
+# these are just the sane defaults a dashboard-wide scan uses.
+DEFAULT_THRESHOLDS = {
+    "cpu_percent": 90.0,
+    "memory_percent": 90.0,
+    "disk_percent": 90.0,
+}
+
+
 Z_80 = 1.2816  # z-score for an 80% interval (p10 / p90)
 
 # History window loaded per request: covers the longest lag feature (7 days)
@@ -230,3 +240,139 @@ def get_forecast(hostname: str, metric_name: str) -> dict | None:
         "forecast": forecast_points,
         "actual": _actual_series(grid),
     }
+
+
+def _interpolate_crossing_hour(h0: float, v0: float, h1: float, v1: float, threshold: float) -> float:
+    """Linear interpolation of the horizon (hours) within (h0, h1] at which
+    the segment from v0 to v1 crosses `threshold`. Callers only call this on
+    a segment they've already established brackets the threshold (v0 <
+    threshold <= v1), so this is just where along that segment, not whether
+    it happens."""
+    if v1 == v0:
+        return h1
+    frac = (threshold - v0) / (v1 - v0)
+    frac = min(max(frac, 0.0), 1.0)
+    return h0 + frac * (h1 - h0)
+
+
+def estimate_threshold_eta(forecast: dict, threshold: float | None = None) -> dict | None:
+    """First-passage-time over the median (`predicted`) trajectory `get_forecast`
+    already returns: walks forward from now and reports the first horizon at
+    which the metric is projected to cross `threshold`, linearly interpolated
+    between the two bracketing served points for a smoother N-days estimate
+    than snapping to the nearest served horizon.
+
+    This is the answer to adr-0006's "Revisit when" callout -- a hard,
+    SLA-style "will we breach X% within N days" bound -- computed as a
+    first-passage-time over the existing quantile trajectory rather than a
+    dedicated survival model. It rides on whatever `predicted` already means
+    for this hostname/metric (ml_quantile or fallback), so it inherits that
+    tier's caveats (e.g. a flat fallback trajectory will only "breach" if
+    already past threshold).
+
+    Returns None only when there's no threshold configured for this metric
+    (no opinion to give). An already-breached metric, or one never projected
+    to cross within the served 7-day horizon, still returns a dict --
+    `will_breach` distinguishes the two so callers can filter.
+    """
+    metric = forecast.get("metric")
+    thr = threshold if threshold is not None else DEFAULT_THRESHOLDS.get(metric)
+    if thr is None:
+        return None
+
+    points = forecast.get("forecast") or []
+    actual = forecast.get("actual") or []
+    if actual:
+        now_value = float(actual[-1]["value"])
+    elif points:
+        # No recent actuals resampled (unlikely, but be defensive) -- use the
+        # nearest served prediction as the closest thing to "now" we have.
+        now_value = float(points[0]["predicted"])
+    else:
+        return None
+
+    base = {
+        "threshold": float(thr),
+        "current_value": round(now_value, 2),
+    }
+
+    if now_value >= thr:
+        return {
+            **base,
+            "will_breach": True,
+            "already_breached": True,
+            "eta_hours": 0.0,
+            "eta_days": 0.0,
+            "crossing_timestamp": forecast.get("generated_at"),
+        }
+
+    prev_h, prev_v = 0.0, now_value
+    for p in points:
+        h, v = float(p["horizon_hours"]), float(p["predicted"])
+        if v >= thr:
+            eta_h = _interpolate_crossing_hour(prev_h, prev_v, h, v, thr)
+            crossing_ts = pd.Timestamp(forecast["generated_at"]) + pd.Timedelta(hours=eta_h)
+            return {
+                **base,
+                "will_breach": True,
+                "already_breached": False,
+                "eta_hours": round(eta_h, 1),
+                "eta_days": round(eta_h / 24.0, 1),
+                "crossing_timestamp": crossing_ts.isoformat(),
+            }
+        prev_h, prev_v = h, v
+
+    return {
+        **base,
+        "will_breach": False,
+        "already_breached": False,
+        "eta_hours": None,
+        "eta_days": None,
+        "crossing_timestamp": None,
+    }
+
+
+def get_threshold_warning(hostname: str, metric_name: str, threshold: float | None = None) -> dict | None:
+    """Convenience wrapper combining get_forecast + estimate_threshold_eta for
+    a single (hostname, metric) -- used by both the per-resource router
+    endpoint and the fleet-wide warnings scan below. `hostname` follows the
+    same convention as get_forecast: the dataset/model identifier (i.e. the
+    node's ip_address), not the logical hostname -- callers translate."""
+    forecast = get_forecast(hostname, metric_name)
+    if forecast is None:
+        return None
+    eta = estimate_threshold_eta(forecast, threshold)
+    if eta is None:
+        return None
+    return {
+        "hostname": hostname,
+        "metric": metric_name,
+        "model_type": forecast["model_type"],
+        **eta,
+    }
+
+
+def list_threshold_warnings(
+    nodes: list[tuple[str, str]],
+    metric_names: list[str] | None = None,
+    threshold: float | None = None,
+) -> list[dict]:
+    """Scans every (logical_hostname, dataset_hostname) pair in `nodes` across
+    `metric_names` (defaults to every metric with a DEFAULT_THRESHOLDS entry)
+    and returns only the warnings actually projected to breach within the
+    served horizon (`will_breach=True`), soonest first. This is what backs
+    the dashboard's "X will hit threshold in ~N days" banner (2.5) --
+    already-fine resources are filtered out here rather than left for the
+    frontend to sift through."""
+    metric_names = metric_names or list(DEFAULT_THRESHOLDS.keys())
+    warnings: list[dict] = []
+    for logical_hostname, dataset_hostname in nodes:
+        for metric_name in metric_names:
+            warning = get_threshold_warning(dataset_hostname, metric_name, threshold)
+            if warning is None or not warning["will_breach"]:
+                continue
+            warning["hostname"] = logical_hostname  # swap dataset id back for logical hostname
+            warnings.append(warning)
+
+    warnings.sort(key=lambda w: w["eta_hours"] if w["eta_hours"] is not None else float("inf"))
+    return warnings
