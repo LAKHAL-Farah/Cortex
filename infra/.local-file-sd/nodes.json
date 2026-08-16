@@ -28,6 +28,15 @@
   },
   {
     "targets": [
+      "10.0.1.25:9100"
+    ],
+    "labels": {
+      "role": "storage",
+      "node": "fake-node-sim"
+    }
+  },
+  {
+    "targets": [
       "10.0.2.20:9100"
     ],
     "labels": {

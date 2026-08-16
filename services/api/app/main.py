@@ -16,7 +16,9 @@ from .routers import baselines
 from .routers import topology
 from .routers import knowledge
 from .routers import conversations
+from .routers import quotas
 from .services.anomaly_detector import detect_anomalies
+from .services.quota_budget_monitor import check_quota_and_budget
 from .services.baseline_builder import compute_baselines
 from .services.node_seeder import seed_nodes_from_file_sd
 from .services.forecast_dataset_builder import build_dataset
@@ -37,16 +39,17 @@ ANOMALY_DETECTION_INTERVAL_SECONDS = int(os.getenv("ANOMALY_DETECTION_INTERVAL_S
 BASELINE_REFRESH_INTERVAL_SECONDS = int(os.getenv("BASELINE_REFRESH_INTERVAL_SECONDS", "3600"))
 
 # How often the forecasting dataset (cpu/memory/disk history CSV) is rebuilt
-# from Prometheus. Forecasting looks at day/week-scale trends (tomorrow, 7d,
-# 30d out), so unlike anomaly detection or baselines this doesn't need to be
-# frequent -- daily is enough to track the trend and keeps the 14-day
-# range-query cheap and infrequent on Prometheus.
-FORECAST_DATASET_REFRESH_INTERVAL_SECONDS = int(os.getenv("FORECAST_DATASET_REFRESH_INTERVAL_SECONDS", "86400"))
+# from Prometheus. build_dataset() is incremental (it only fetches since the
+# last stored point), so an hourly cadence is cheap on Prometheus and is what
+# lets the "value_now"/short-lag features forecast_service.py builds actually
+# reflect the last hour, not yesterday's data -- see adr-0006.
+FORECAST_DATASET_REFRESH_INTERVAL_SECONDS = int(os.getenv("FORECAST_DATASET_REFRESH_INTERVAL_SECONDS", "3600"))
 
-# How often forecasting models are retrained from the latest dataset.
-# Same cadence as the dataset rebuild -- no point retraining more often
-# than the data itself changes.
-FORECAST_TRAINING_INTERVAL_SECONDS = int(os.getenv("FORECAST_TRAINING_INTERVAL_SECONDS", "86400"))
+# How often forecasting models are retrained from the latest dataset. Same
+# hourly cadence as the dataset rebuild -- the pooled HistGradientBoosting
+# quantile models train in low single-digit seconds even with several hosts'
+# worth of history, so there's no cost reason to lag the dataset refresh.
+FORECAST_TRAINING_INTERVAL_SECONDS = int(os.getenv("FORECAST_TRAINING_INTERVAL_SECONDS", "3600"))
 
 # How often topology_sync polls Nova for hypervisors/services and upserts
 # the topology graph. This is the one OpenStack polling loop (see
@@ -61,6 +64,14 @@ TOPOLOGY_SYNC_INTERVAL_SECONDS = int(os.getenv("TOPOLOGY_SYNC_INTERVAL_SECONDS",
 # and Neo4j, never OpenStack, so there's no reason to tie its cadence to
 # the OpenStack poll.
 PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS = int(os.getenv("PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS", "30"))
+
+# How often check_quota_and_budget() re-polls Nova/Cinder limits per
+# project. Quotas/estimated spend don't swing nearly as fast as raw
+# node_exporter metrics, so this defaults far less frequent than
+# ANOMALY_DETECTION_INTERVAL_SECONDS -- 5 minutes, same cadence as
+# TOPOLOGY_SYNC_INTERVAL_SECONDS since it's the same class of "poll
+# OpenStack" job.
+QUOTA_BUDGET_CHECK_INTERVAL_SECONDS = int(os.getenv("QUOTA_BUDGET_CHECK_INTERVAL_SECONDS", "300"))
 
 async def _run_periodic(fn, interval_seconds: float, name: str) -> None:
     """Runs fn(db) in a worker thread on a fixed interval, forever.
@@ -232,6 +243,11 @@ async def lifespan(app: FastAPI):
                 status_fn=_prometheus_health_status,
             )
         ),
+        asyncio.create_task(
+            _run_periodic(
+                check_quota_and_budget, QUOTA_BUDGET_CHECK_INTERVAL_SECONDS, "quota/budget check"
+            )
+        ),
     ]
     try:
         yield
@@ -251,6 +267,7 @@ app.include_router(anomalies.router)
 app.include_router(baselines.router)
 app.include_router(forecast.router)
 app.include_router(topology.router)
+app.include_router(quotas.router)
 # Not added to the periodic lifespan tasks above on purpose -- unlike anomaly
 # detection/baselines/forecasting/topology sync, the knowledge base doesn't
 # drift on a schedule (see adr-0004), so ingestion is triggered on demand via

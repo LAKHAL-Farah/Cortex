@@ -80,14 +80,72 @@ export interface BaselineSlot {
   updated_at: string | null;
 }
 export interface ForecastPoint {
-  day: "tomorrow" | "7_days" | "30_days";
+  horizon_hours: number;
+  timestamp: string;
+  predicted: number;
+  lower: number;
+  upper: number;
+  /** True (2.8) when this point falls past whatever horizon the ML model
+   * actually had training support for, and was instead produced by the
+   * widening seasonal-persistence extension -- lets the UI mark the part of
+   * a 30/90-day forecast that's genuinely less certain than the rest. */
+  extrapolated: boolean;
+}
+
+export interface ForecastActualPoint {
+  timestamp: string;
   value: number;
 }
+
+/** Selectable forecast horizons (2.8: "Extend forecast horizon to 30/90
+ * days"). Passed as `?horizon_days=` to the API. */
+export const FORECAST_HORIZON_DAYS = [7, 30, 90] as const;
+export type ForecastHorizonDays = (typeof FORECAST_HORIZON_DAYS)[number];
 
 export interface ForecastResult {
   hostname: string;
   metric: string;
+  /** "ml_quantile" when there's enough recent history to trust the pooled
+   * quantile model, "fallback_seasonal_persistence" for hosts too new/thin
+   * for that -- surfaced so the UI can label a fallback forecast as such.
+   * Still "ml_quantile" (2.8) when only *some* points -- the ones within the
+   * model's training-supported range -- actually used it; check each
+   * point's `extrapolated` flag for that detail. */
+  model_type: "ml_quantile" | "fallback_seasonal_persistence";
+  generated_at: string;
+  n_points_used: number;
+  /** Echoes the requested horizon (2.8), clamped to [1, 90]. */
+  horizon_days: number;
+  /** Horizon, in hours, of the furthest-out point actually served. */
+  max_horizon_hours: number;
+  /** Hourly resolution for the first 24h, then daily-to-fortnightly
+   * checkpoints out to `horizon_days` (2.8: up to 90). */
   forecast: ForecastPoint[];
+  /** Recent hourly-resampled actuals, for the "prediction vs actual" chart. */
+  actual: ForecastActualPoint[];
+}
+
+// -- Threshold-breach ETA (2.5: "X will hit threshold in ~N days") --------
+//
+// GET /api/v1/forecast/{hostname}/{metric}/threshold returns one of these;
+// GET /api/v1/forecast/warnings returns a list, already filtered to
+// will_breach === true and sorted soonest-first (see
+// forecast_service.list_threshold_warnings on the API side).
+
+export interface ThresholdWarning {
+  hostname: string;
+  metric: string;
+  model_type: "ml_quantile" | "fallback_seasonal_persistence";
+  threshold: number;
+  current_value: number;
+  will_breach: boolean;
+  /** True when the metric is already at/above threshold right now. */
+  already_breached: boolean;
+  /** Hours until the projected crossing, or null when not projected to
+   * cross within the served 7-day horizon. 0 when already_breached. */
+  eta_hours: number | null;
+  eta_days: number | null;
+  crossing_timestamp: string | null;
 }
 /** One row per anomaly episode (Alerts > History), as opposed to AnomalyFlag
  * which only ever reflects the current state per host/metric. */
@@ -217,6 +275,50 @@ export interface TopologySyncRun {
 export interface TopologyHealth {
   status: TopologySyncStatus;
   syncs: Record<string, TopologySyncRun | null>;
+}
+
+// -- Quota / budget breach alerts (distinct from AnomalyFlag) --------------
+//
+// See services/api/app/models.py::QuotaAlert. Two unrelated kinds of "cap"
+// a project can hit, always labeled explicitly rather than as one generic
+// "threshold exceeded" alert:
+//   - "capacity_cap": an actual OpenStack quota (Nova/Cinder `GET /limits`).
+//   - "budget_cap": a configured estimated-spend ceiling (no real billing
+//     system on a self-hosted cloud, so this is a chargeback estimate).
+
+export type QuotaBreachType = "capacity_cap" | "budget_cap";
+export type QuotaSeverity = "normal" | "warning" | "critical";
+
+// Matches services/api/app/services/quota_budget_monitor.py's resource keys.
+export type QuotaResource =
+  | "instances"
+  | "vcpus"
+  | "ram_mb"
+  | "floating_ips"
+  | "volumes"
+  | "gigabytes"
+  | "estimated_cost_eur";
+
+export interface QuotaAlert {
+  project_id: string;
+  project_name: string;
+  breach_type: QuotaBreachType;
+  resource: QuotaResource;
+  used: number;
+  limit: number;
+  ratio: number; // used / limit
+  severity: QuotaSeverity;
+  message: string | null; // null while severity === "normal"
+  detected_at: string; // ISO 8601
+}
+
+export interface QuotaResyncSummary {
+  status: string;
+  summary: {
+    projects_checked: number;
+    warning_count: number;
+    critical_count: number;
+  };
 }
 
 // -- Knowledge copilot (adr-0005) ------------------------------------------

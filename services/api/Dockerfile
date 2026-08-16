@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client git \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 # infra/ansible*/requirements.yml declares this collection (used by the node_exporter
 # role's ufw task) but nothing installed it -- ansible-playbook fails module resolution
 # for it at parse time even when that task is skipped by `when: ufw_enabled`.

@@ -9,8 +9,9 @@ import MetricCard from "@/components/ui/MetricCard";
 import AnalyticsChart from "@/components/AnalyticsChart";
 import RadialProgressCard from "@/components/ui/RadialProgressCard";
 import RecentIssuesPanel, { type Issue } from "@/components/RecentIssuesPanel";
+import ThresholdWarningsPanel from "@/components/ThresholdWarningsPanel";
 import { parseLevel } from "@/lib/logs";
-import type { DashboardNode, LogEntry } from "@/lib/types";
+import type { DashboardNode, LogEntry, ThresholdWarning } from "@/lib/types";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -23,6 +24,13 @@ export default function DashboardPage() {
   // already returns newest-first, so this is just a cheap filter+slice.
   const { data: logEntries } = useSWR<LogEntry[]>("/api/logs?minutes=60&limit=300", fetcher, {
     refreshInterval: 5000,
+  });
+  // Threshold-breach ETA warnings (2.5) -- already filtered to
+  // will_breach === true and sorted soonest-first by the API, so this is
+  // ready to render as-is. Refreshes on the same cadence as the rest of the
+  // dashboard rather than every forecast retrain (hourly), which is plenty.
+  const { data: thresholdWarnings } = useSWR<ThresholdWarning[]>("/api/forecast/warnings", fetcher, {
+    refreshInterval: 30000,
   });
 
   const metrics = useMemo(() => {
@@ -146,6 +154,7 @@ export default function DashboardPage() {
             value={Math.round((metrics.active / Math.max(nodes.length, 1)) * 100)}
             description={`${metrics.active} of ${nodes.length} nodes responding normally`}
           />
+          <ThresholdWarningsPanel warnings={thresholdWarnings ?? []} />
           <RecentIssuesPanel issues={topIssues} totalCount={issues.length} />
         </aside>
       </div>
