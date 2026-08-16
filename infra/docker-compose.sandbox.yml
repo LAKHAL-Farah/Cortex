@@ -17,6 +17,19 @@ services:
       LOKI_URL: http://controller-sim:3100
       CORTEX_ANSIBLE_HOST_DIR: /infra/ansible-sandbox
       CORTEX_ENV: sandbox
+      # Gives the "admin" sandbox project (see openstack-sim's PROJECTS/
+      # NOVA_ABSOLUTE_LIMITS seed data) a budget_cap to check its estimated
+      # spend against, alongside the capacity_cap checks its Nova/Cinder
+      # quotas already get for free -- so both alert kinds in
+      # services/quota_budget_monitor.py have something real to fire on in
+      # the sandbox, not just capacity_cap. 5 EUR is deliberately low: the
+      # seed usage (18 vCPUs, 24 GB RAM, 160 GB volumes) already estimates
+      # well over that at the default QUOTA_COST_PER_*_MONTH_EUR rates, so
+      # a fresh sandbox has a budget_cap breach to look at immediately too.
+      QUOTA_PROJECT_BUDGETS_EUR: '{"sandbox-project": 5, "admin": 5}'
+      # Faster than the 300s production default, so a manual "Check now"
+      # (or just waiting a bit) shows a result quickly during local testing.
+      QUOTA_BUDGET_CHECK_INTERVAL_SECONDS: '60'
 
     volumes:
       - ../ansible-sandbox:/infra/ansible-sandbox

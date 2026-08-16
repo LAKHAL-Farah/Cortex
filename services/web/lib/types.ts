@@ -277,6 +277,50 @@ export interface TopologyHealth {
   syncs: Record<string, TopologySyncRun | null>;
 }
 
+// -- Quota / budget breach alerts (distinct from AnomalyFlag) --------------
+//
+// See services/api/app/models.py::QuotaAlert. Two unrelated kinds of "cap"
+// a project can hit, always labeled explicitly rather than as one generic
+// "threshold exceeded" alert:
+//   - "capacity_cap": an actual OpenStack quota (Nova/Cinder `GET /limits`).
+//   - "budget_cap": a configured estimated-spend ceiling (no real billing
+//     system on a self-hosted cloud, so this is a chargeback estimate).
+
+export type QuotaBreachType = "capacity_cap" | "budget_cap";
+export type QuotaSeverity = "normal" | "warning" | "critical";
+
+// Matches services/api/app/services/quota_budget_monitor.py's resource keys.
+export type QuotaResource =
+  | "instances"
+  | "vcpus"
+  | "ram_mb"
+  | "floating_ips"
+  | "volumes"
+  | "gigabytes"
+  | "estimated_cost_eur";
+
+export interface QuotaAlert {
+  project_id: string;
+  project_name: string;
+  breach_type: QuotaBreachType;
+  resource: QuotaResource;
+  used: number;
+  limit: number;
+  ratio: number; // used / limit
+  severity: QuotaSeverity;
+  message: string | null; // null while severity === "normal"
+  detected_at: string; // ISO 8601
+}
+
+export interface QuotaResyncSummary {
+  status: string;
+  summary: {
+    projects_checked: number;
+    warning_count: number;
+    critical_count: number;
+  };
+}
+
 // -- Knowledge copilot (adr-0005) ------------------------------------------
 
 export type ChatRole = "user" | "assistant";

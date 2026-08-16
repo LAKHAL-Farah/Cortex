@@ -169,6 +169,36 @@ L3_AGENT_ROUTERS = {
     "a1": [ROUTERS[0]],
 }
 
+# ---- quota/budget monitor seed data (services/quota_budget_monitor.py) ----
+# One project (matches the token's scoped project above: id
+# "sandbox-project", name "admin"), with quotas from infra.md's "Quotas
+# par projet" table (100 VMs / 20 vCPUs / 50 GB RAM / 50 floating IPs,
+# unlimited volumes/storage). `totalCoresUsed` is deliberately set to 90%
+# of `maxTotalCores` so a fresh sandbox already has one real capacity_cap
+# warning to look at (GET /api/v1/quotas/alerts) without needing to hand-
+# edit this file first -- everything else is comfortably under its cap.
+PROJECTS = [
+    {"id": "sandbox-project", "name": "admin", "domain_id": "default", "enabled": True},
+]
+
+NOVA_ABSOLUTE_LIMITS = {
+    "maxTotalInstances": 100,
+    "totalInstancesUsed": 5,
+    "maxTotalCores": 20,
+    "totalCoresUsed": 18,
+    "maxTotalRAMSize": 51200,  # 50 GB, in MB
+    "totalRAMUsed": 24576,  # 24 GB
+    "maxTotalFloatingIps": 50,
+    "totalFloatingIpsUsed": 1,
+}
+
+CINDER_ABSOLUTE_LIMITS = {
+    "maxTotalVolumes": -1,  # "illimité" per infra.md -- unlimited quota
+    "totalVolumesUsed": 3,
+    "maxTotalVolumeGigabytes": -1,
+    "totalGigabytesUsed": 160,
+}
+
 
 def _now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -188,6 +218,16 @@ def identity_version():
             "links": [{"rel": "self", "href": IDENTITY_URL}],
         }
     }
+
+
+@app.get("/v3/projects")
+def list_projects():
+    # openstacksdk's identity.projects() -- backs
+    # quota_budget_monitor._list_projects(). Real Keystone also accepts
+    # filters (?domain_id=, ?name=, ...) as query params; the sim ignores
+    # them and always returns the one seed project, same simplification
+    # every other list endpoint here makes.
+    return {"projects": PROJECTS}
 
 
 @app.post("/v3/auth/tokens")
@@ -297,6 +337,15 @@ def list_services():
     return {"services": NOVA_SERVICES}
 
 
+@app.get("/v2.1/limits")
+def get_compute_limits(tenant_id: str | None = None):
+    # `tenant_id` is what openstacksdk's compute.get_limits(project_id=...)
+    # actually sends (Limits._query_mapping maps project_id -> tenant_id,
+    # see openstack.compute.v2.limits.Limits) -- accepted and ignored here,
+    # same one-project simplification as GET /v3/projects above.
+    return {"limits": {"rate": [], "absolute": NOVA_ABSOLUTE_LIMITS}}
+
+
 # -------------------------------------------------------------- cinder --
 @app.get("/volume/v3")
 def block_storage_version():
@@ -316,6 +365,11 @@ def block_storage_version():
 @app.get("/volume/v3/os-services")
 def list_cinder_services():
     return {"services": CINDER_SERVICES}
+
+
+@app.get("/volume/v3/limits")
+def get_volume_limits(project_id: str | None = None):
+    return {"limits": {"rate": [], "absolute": CINDER_ABSOLUTE_LIMITS}}
 
 
 # ---------------------------------------------------------------- neutron --

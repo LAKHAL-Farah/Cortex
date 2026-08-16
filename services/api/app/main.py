@@ -16,7 +16,9 @@ from .routers import baselines
 from .routers import topology
 from .routers import knowledge
 from .routers import conversations
+from .routers import quotas
 from .services.anomaly_detector import detect_anomalies
+from .services.quota_budget_monitor import check_quota_and_budget
 from .services.baseline_builder import compute_baselines
 from .services.node_seeder import seed_nodes_from_file_sd
 from .services.forecast_dataset_builder import build_dataset
@@ -62,6 +64,14 @@ TOPOLOGY_SYNC_INTERVAL_SECONDS = int(os.getenv("TOPOLOGY_SYNC_INTERVAL_SECONDS",
 # and Neo4j, never OpenStack, so there's no reason to tie its cadence to
 # the OpenStack poll.
 PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS = int(os.getenv("PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS", "30"))
+
+# How often check_quota_and_budget() re-polls Nova/Cinder limits per
+# project. Quotas/estimated spend don't swing nearly as fast as raw
+# node_exporter metrics, so this defaults far less frequent than
+# ANOMALY_DETECTION_INTERVAL_SECONDS -- 5 minutes, same cadence as
+# TOPOLOGY_SYNC_INTERVAL_SECONDS since it's the same class of "poll
+# OpenStack" job.
+QUOTA_BUDGET_CHECK_INTERVAL_SECONDS = int(os.getenv("QUOTA_BUDGET_CHECK_INTERVAL_SECONDS", "300"))
 
 async def _run_periodic(fn, interval_seconds: float, name: str) -> None:
     """Runs fn(db) in a worker thread on a fixed interval, forever.
@@ -233,6 +243,11 @@ async def lifespan(app: FastAPI):
                 status_fn=_prometheus_health_status,
             )
         ),
+        asyncio.create_task(
+            _run_periodic(
+                check_quota_and_budget, QUOTA_BUDGET_CHECK_INTERVAL_SECONDS, "quota/budget check"
+            )
+        ),
     ]
     try:
         yield
@@ -252,6 +267,7 @@ app.include_router(anomalies.router)
 app.include_router(baselines.router)
 app.include_router(forecast.router)
 app.include_router(topology.router)
+app.include_router(quotas.router)
 # Not added to the periodic lifespan tasks above on purpose -- unlike anomaly
 # detection/baselines/forecasting/topology sync, the knowledge base doesn't
 # drift on a schedule (see adr-0004), so ingestion is triggered on demand via

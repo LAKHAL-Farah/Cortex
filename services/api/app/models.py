@@ -167,6 +167,76 @@ class Baseline(Base):
     )
 
 
+class QuotaAlert(Base):
+    """Quota/budget breach alerts -- distinct from `AnomalyFlag`.
+
+    `AnomalyFlag` answers "is this host's *measured resource usage*
+    (cpu_usage/ram_usage from node_exporter) behaving abnormally versus
+    its own history". This table answers a completely different
+    question: "is this OpenStack *project* running up against a hard
+    ceiling" -- and there are two unrelated ceilings a project can hit:
+
+    - `capacity_cap`: an OpenStack quota (Nova/Cinder `GET /limits`) --
+      e.g. a project physically cannot boot another VM because it's at
+      its `maxTotalInstances`. This is an infrastructure limit; raising
+      it costs nothing by itself, an admin just has to run
+      `openstack quota set`.
+    - `budget_cap`: an estimated-cost ceiling configured per project
+      (services/quota_budget_monitor.py's `PROJECT_BUDGETS_EUR`) --
+      e.g. the stagiaires-ete-2026 project's *estimated* monthly spend
+      has crossed the amount RIF SAS is willing to allocate it. This is
+      a spending limit; the project may still have plenty of quota
+      headroom left when this fires.
+
+    A project silently allocating right up to a hard quota and a project
+    quietly costing more than intended are different problems needing
+    different responses, so `breach_type` and the row's `message` always
+    say which one this is -- never a bare "threshold exceeded".
+
+    One row per (project_id, breach_type, resource) "slot", upserted on
+    every check_quota_and_budget() pass -- same convention as
+    AnomalyFlag: the row is kept (with severity="normal") even once a
+    breach clears, rather than deleted, so a slot's last-known state is
+    always a single lookup away instead of "absent = fine, but was it
+    ever checked at all?".
+    """
+    __tablename__ = "quota_alerts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(String, nullable=False, index=True)
+    project_name = Column(String, nullable=False)
+    # "capacity_cap" (OpenStack quota, e.g. Nova/Cinder limits) or
+    # "budget_cap" (configured estimated-cost ceiling).
+    breach_type = Column(String, nullable=False)
+    # For capacity_cap: "instances" | "vcpus" | "ram_mb" | "floating_ips" |
+    # "volumes" | "gigabytes". For budget_cap: always "estimated_cost_eur".
+    resource = Column(String, nullable=False)
+    used = Column(Float, nullable=False)
+    limit = Column(Float, nullable=False)
+    ratio = Column(Float, nullable=False)  # used / limit
+    severity = Column(String, nullable=False)  # "normal" | "warning" | "critical"
+    # Human-readable sentence that always names which cap this is --
+    # "capacity cap" or "budget cap" -- never a generic "limit reached".
+    # Precomputed here (rather than only in the router) so it survives a
+    # direct DB read/export unchanged.
+    message = Column(Text, nullable=True)
+    detected_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "breach_type IN ('capacity_cap','budget_cap')",
+            name="ck_quota_alerts_breach_type_allowed",
+        ),
+        CheckConstraint(
+            "severity IN ('normal','warning','critical')",
+            name="ck_quota_alerts_severity_allowed",
+        ),
+        UniqueConstraint(
+            "project_id", "breach_type", "resource", name="uq_quota_alert_slot"
+        ),
+    )
+
+
 class Conversation(Base):
     """One Copilot chat thread (adr-0005's knowledge chat is stateless per
     request -- this is what turns that into something a user can leave and

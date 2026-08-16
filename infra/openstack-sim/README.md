@@ -11,12 +11,16 @@ Keystone v3 / Nova v2.1 / Cinder v3 / Neutron v2.0 REST surface for
 `openstacksdk`'s list calls to work:
 
 - Keystone: `POST /v3/auth/tokens` (issues a fake token + service catalog
-  pointing back at itself for compute/block-storage/network)
-- Nova: `GET /os-hypervisors[/detail]`, `GET /os-services`
+  pointing back at itself for compute/block-storage/network), `GET
+  /v3/projects` (one seed project, `id: sandbox-project` / `name: admin`
+  -- what `quota_budget_monitor.py`'s project loop iterates over)
+- Nova: `GET /os-hypervisors[/detail]`, `GET /os-services`, `GET /limits`
+  (absolute quota usage/caps for the seed project -- what
+  `quota_budget_monitor.py`'s capacity_cap check reads)
 - Cinder: `GET /volume/v3` (version discovery), `GET /volume/v3/os-services`
   -- catalog `type` is `block-storage` (that's the literal string
   `openstacksdk`'s `conn.block_storage` proxy looks up, not `cinder` or
-  `volume`)
+  `volume`), `GET /volume/v3/limits` (volume/gigabyte quota usage/caps)
 - Neutron: `GET /networks`, `/subnets`, `/routers`, `/floatingips`, `/agents`,
   `/agents/{id}/dhcp-networks`, `/agents/{id}/l3-routers` (the DHCP/L3
   hosting-endpoint calls `topology_sync.py`'s Phase 3 needs)
@@ -268,7 +272,75 @@ outage, since `sync_topology` also reads/writes `nodes` there). `docker
 compose start openstack-sim` and wait for/trigger another pass to see
 `openstack`'s status recover to `"ok"` on its own.
 
-## Testing the topology frontend (Phase 6) against this sim
+## Testing the quota/budget monitor against this sim
+
+`services/quota_budget_monitor.py` (Phase 7) doesn't touch Neo4j/Postgres'
+topology tables at all -- it only reads `GET /v3/projects` + `GET
+/v2.1/limits` + `GET /volume/v3/limits` from `openstack-sim` and writes
+`quota_alerts` rows to Postgres. It has no dependency on a Phase 2/3 sync
+having run first.
+
+With the sandbox stack up (`docker compose -f docker-compose.yml -f
+docker-compose.sandbox.yml up -d`), the `api` service's
+`QUOTA_PROJECT_BUDGETS_EUR` override (see `docker-compose.sandbox.yml`)
+gives the seed project a 5 EUR/month budget, deliberately low so both
+alert kinds have something to fire on immediately:
+
+```bash
+docker compose exec api python3 -c "
+from app.db import SessionLocal
+from app.services.quota_budget_monitor import check_quota_and_budget
+import json
+with SessionLocal() as db:
+    print(json.dumps(check_quota_and_budget(db), indent=2))
+"
+```
+
+Expect `{"projects_checked": 1, "warning_count": 1, "critical_count": 1}`
+-- `NOVA_ABSOLUTE_LIMITS`'s `totalCoresUsed: 18` against `maxTotalCores:
+20` (90%) is a capacity_cap **warning**, and the estimated cost of that
+same usage (18 vCPUs + 24 GB RAM + 160 GB volumes, at
+`QUOTA_COST_PER_*_MONTH_EUR`'s default rates) comes out well over the 5
+EUR budget, so it's also a budget_cap **critical**. Then hit the API
+directly:
+
+```bash
+curl -s http://127.0.0.1:8000/api/v1/quotas/alerts | python3 -m json.tool
+```
+
+Expect two rows for `project_id: "sandbox-project"` -- one
+`breach_type: "capacity_cap"`, `resource: "vcpus"`, `severity: "warning"`,
+message starting `CAPACITY CAP breach:`; one `breach_type: "budget_cap"`,
+`resource: "estimated_cost_eur"`, `severity: "critical"`, message starting
+`BUDGET CAP breach:`. Edit `NOVA_ABSOLUTE_LIMITS`/`CINDER_ABSOLUTE_LIMITS`
+in `app.py` (or `QUOTA_PROJECT_BUDGETS_EUR` in `docker-compose.sandbox.yml`)
+and re-run the check to see a row settle back to `severity: "normal"`
+(`message: null`) instead of disappearing -- same upsert-not-delete
+convention as `anomaly_flags`.
+
+## Testing the quota/budget frontend against this sim
+
+`services/web/app/quotas/page.tsx` (`components/QuotaBudgetView.tsx`) is a
+browser client for the API above -- summary tiles, a filterable/searchable
+list or per-project grouped view of current breaches, and a "Check now"
+button (`components/QuotaResyncButton.tsx`) that triggers
+`POST /api/v1/quotas/resync` on demand, via three proxy routes:
+
+| Proxy route                          | Backend endpoint                        |
+|----------------------------------------|-------------------------------------------|
+| `GET /api/quotas/alerts`               | `GET /api/v1/quotas/alerts`               |
+| `GET /api/quotas/alerts/{projectId}`   | `GET /api/v1/quotas/alerts/{project_id}`  |
+| `POST /api/quotas/resync`              | `POST /api/v1/quotas/resync`              |
+
+With the sandbox stack up and at least one `check_quota_and_budget()` pass
+done (see above -- or just click "Check now" on the page itself), open
+`http://127.0.0.1:3000/quotas`. Expect the "Critical breaches" and
+"Warnings" tiles to both read 1, one card for `sandbox-project`'s vCPUs
+(capacity cap, ~90%) and one for its estimated cost (budget cap, well over
+100%), and each card's message to explicitly say `CAPACITY CAP` or
+`BUDGET CAP` rather than a generic "threshold exceeded".
+
+
 
 `services/web/app/topology/page.tsx` is a browser client for the Phase 5
 API above -- a force-directed graph (`components/TopologyGraph.tsx`, via
