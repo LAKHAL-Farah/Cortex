@@ -2,8 +2,8 @@ import uuid
 from datetime import datetime
 from enum import Enum
 from ipaddress import ip_address, ip_network
+from typing import Literal
 from pydantic import BaseModel, Field, field_validator, ConfigDict
-from ipaddress import ip_address, ip_network
 
 MANAGED_SUBNETS = [
     ip_network("10.0.1.0/24"),   # controller, compute1, compute2
@@ -110,6 +110,31 @@ class TopologyNetworkOut(BaseModel):
     gateway_routers: list[dict] = Field(default_factory=list)
     floating_ips: list[dict] = Field(default_factory=list)
     serving_agents: list[dict] = Field(default_factory=list)
+
+
+class NetworkLatencyOut(BaseModel):
+    hostname: str
+    ip_address: str | None = None
+    port: int
+    latency_ms: float | None = None
+    reachable: bool
+    error: str | None = None
+
+
+class NetworkHealthOut(BaseModel):
+    """Summary panel for story 3.6 -- router/floating-IP/port health plus
+    inter-node latency, condensed from the topology graph (routers/
+    floating_ips/ports) and a live TCP-timing pass (latencies) rather than
+    just the raw graph listing /api/v1/topology/* already exposes.
+    """
+    status: Literal["ok", "degraded"]
+    # False means Neo4j could not be queried. Empty anomaly lists alone do
+    # not then mean the topology is healthy.
+    graph_available: bool = True
+    routers_down: list[dict] = Field(default_factory=list)
+    floating_ips_orphaned: list[dict] = Field(default_factory=list)
+    ports_down: list[dict] = Field(default_factory=list)
+    latencies: list[NetworkLatencyOut] = Field(default_factory=list)
 
 
 class SyncType(str, Enum):
@@ -269,7 +294,6 @@ class ConversationSummaryOut(BaseModel):
 
 class ConversationOut(ConversationSummaryOut):
     messages: list[ConversationMessageOut]
-
 
 
 

@@ -325,6 +325,8 @@ export default function CopilotChat() {
   const [busy, setBusy] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const launchedInvestigation = useRef(false);
+  const sendRef = useRef<(question: string) => Promise<void> | undefined>(undefined);
 
   // Load this browser's history on mount. A failure here (backend
   // unreachable, etc.) degrades to an empty, unsaved chat rather than
@@ -505,6 +507,21 @@ export default function CopilotChat() {
       textareaRef.current?.focus();
     }
   }
+
+  sendRef.current = send;
+
+  // Network-health (and future cockpit panels) can hand a concrete incident
+  // to Copilot through ?investigate=. Consume it once, then remove it from
+  // the URL so a browser refresh doesn't start the same investigation again.
+  useEffect(() => {
+    if (launchedInvestigation.current) return;
+    const prompt = new URLSearchParams(window.location.search).get("investigate")?.trim();
+    if (!prompt) return;
+
+    launchedInvestigation.current = true;
+    window.history.replaceState({}, "", "/copilot");
+    void sendRef.current?.(prompt);
+  }, []);
 
   function updateLast(list: DisplayMessage[], fn: (m: DisplayMessage) => DisplayMessage): DisplayMessage[] {
     if (list.length === 0) return list;

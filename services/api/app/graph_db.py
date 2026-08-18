@@ -35,6 +35,7 @@ SCHEMA_CONSTRAINTS = [
     "CREATE CONSTRAINT subnet_id IF NOT EXISTS FOR (s:Subnet) REQUIRE s.id IS UNIQUE",
     "CREATE CONSTRAINT router_id IF NOT EXISTS FOR (r:Router) REQUIRE r.id IS UNIQUE",
     "CREATE CONSTRAINT fip_id IF NOT EXISTS FOR (f:FloatingIP) REQUIRE f.id IS UNIQUE",
+    "CREATE CONSTRAINT port_id IF NOT EXISTS FOR (p:Port) REQUIRE p.id IS UNIQUE",
 ]
 
 
@@ -204,3 +205,56 @@ def fetch_networks() -> list[dict]:
             }
             for record in records
         ]
+
+
+def fetch_network_anomalies() -> dict:
+    """Condensed anomaly view for the network-health panel (story 3.6):
+    routers not ACTIVE, floating IPs with no Router CONNECTS edge
+    (orphaned -- allocated but not associated, see
+    _sync_floating_ip_routers_to_graph), and ports not ACTIVE. Separate
+    from fetch_networks (which nests everything, healthy or not, for the
+    full topology view) -- this is specifically the "what's wrong right
+    now" read the panel needs, not the full structural listing.
+    """
+    with driver.session() as session:
+        routers_down = session.run(
+            """
+            MATCH (r:Router)
+            WHERE r.status IS NOT NULL AND r.status <> 'ACTIVE'
+            RETURN properties(r) AS router
+            ORDER BY r.id
+            """
+        )
+        floating_ips_orphaned = session.run(
+            """
+            MATCH (f:FloatingIP)
+            WHERE NOT (f)-[:CONNECTS]->(:Router)
+            RETURN properties(f) AS fip
+            ORDER BY f.id
+            """
+        )
+        ports_down = session.run(
+            """
+            MATCH (p:Port)
+            WHERE p.status IS NOT NULL AND p.status <> 'ACTIVE'
+            OPTIONAL MATCH (p)-[:CONNECTS]->(net:Network)
+            OPTIONAL MATCH (p)-[:ATTACHED_TO]->(device)
+            RETURN properties(p) AS port,
+                   properties(net) AS network,
+                   properties(device) AS device
+            ORDER BY p.id
+            """
+        )
+
+        return {
+            "routers_down": [_serialize(r["router"]) for r in routers_down],
+            "floating_ips_orphaned": [_serialize(r["fip"]) for r in floating_ips_orphaned],
+            "ports_down": [
+                {
+                    **_serialize(r["port"]),
+                    "network": _serialize(r["network"]) if r["network"] else None,
+                    "device": _serialize(r["device"]) if r["device"] else None,
+                }
+                for r in ports_down
+            ],
+        }

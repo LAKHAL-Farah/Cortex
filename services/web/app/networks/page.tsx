@@ -6,6 +6,7 @@ import { Network as NetworkIcon, Grid2x2, Router as RouterIcon, Globe } from "lu
 import type { TopologyGraph as TopologyGraphData } from "@/lib/types";
 import { slugForNetworkEntity } from "@/lib/entities";
 import NetworkCategoryCard from "@/components/NetworkCategoryCard";
+import NetworkHealthPanel from "@/components/NetworkHealthPanel";
 import TopologyHealthBadge from "@/components/TopologyHealthBadge";
 
 const fetcher = async (url: string) => {
@@ -96,6 +97,7 @@ export default function NetworksPage() {
           />
         ))}
       </div>
+      <NetworkHealthPanel />
     </main>
   );
 }

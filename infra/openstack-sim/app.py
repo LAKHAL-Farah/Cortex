@@ -148,6 +148,64 @@ FLOATING_IPS = [
     },
 ]
 
+PORTS = [
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000041",
+        "name": "compute1-sim-port",
+        "network_id": "8f3f0f4a-0000-0000-0000-000000000001",
+        "device_id": "compute1-sim",
+        "device_owner": "compute:nova",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:41",
+        "fixed_ips": [
+            {"subnet_id": "8f3f0f4a-0000-0000-0000-000000000011", "ip_address": "10.0.1.21"}
+        ],
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000042",
+        "name": "compute2-sim-port",
+        "network_id": "8f3f0f4a-0000-0000-0000-000000000001",
+        "device_id": "compute2-sim",
+        "device_owner": "compute:nova",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:42",
+        "fixed_ips": [
+            {"subnet_id": "8f3f0f4a-0000-0000-0000-000000000011", "ip_address": "10.0.1.22"}
+        ],
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000043",
+        "name": "sandbox-router-interface",
+        "network_id": "8f3f0f4a-0000-0000-0000-000000000001",
+        "device_id": "8f3f0f4a-0000-0000-0000-000000000021",
+        "device_owner": "network:router_interface",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:43",
+        "fixed_ips": [
+            {"subnet_id": "8f3f0f4a-0000-0000-0000-000000000011", "ip_address": "10.0.1.1"}
+        ],
+    },
+    {
+        # Port volontairement DOWN -- permet de tester la detection d'anomalie
+        # sans devoir casser quelque chose manuellement.
+        "id": "8f3f0f4a-0000-0000-0000-000000000044",
+        "name": "storage-sim-port",
+        "network_id": "8f3f0f4a-0000-0000-0000-000000000002",
+        "device_id": "storage-sim",
+        "device_owner": "compute:nova",
+        "status": "DOWN",
+        "status_reason": "Intentional sandbox anomaly: this port is seeded DOWN to validate network-health detection.",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:44",
+        "fixed_ips": [
+            {"subnet_id": "8f3f0f4a-0000-0000-0000-000000000012", "ip_address": "10.0.2.21"}
+        ],
+    },
+]
+
 NEUTRON_AGENTS = [
     {"id": "a1", "binary": "neutron-l3-agent", "host": "controller-sim", "agent_type": "L3 agent", "alive": True, "admin_state_up": True},
     {"id": "a2", "binary": "neutron-dhcp-agent", "host": "controller-sim", "agent_type": "DHCP agent", "alive": True, "admin_state_up": True},
@@ -349,6 +407,11 @@ def list_routers():
 @app.get("/v2.0/floatingips")
 def list_floating_ips():
     return {"floatingips": FLOATING_IPS}
+
+
+@app.get("/v2.0/ports")
+def list_ports():
+    return {"ports": PORTS}
 
 
 @app.get("/v2.0/agents")

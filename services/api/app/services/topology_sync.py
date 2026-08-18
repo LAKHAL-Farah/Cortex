@@ -257,6 +257,7 @@ def _sync_routers_to_graph(session, routers: list[dict]) -> None:
         SET router.name = r.name,
             router.status = r.status,
             router.admin_state_up = r.admin_state_up,
+            router.status_reason = r.status_reason,
             router.project_id = r.project_id,
             router.last_synced_at = datetime()
         """,
@@ -308,6 +309,7 @@ def _sync_floating_ips_to_graph(session, floating_ips: list[dict]) -> None:
         SET f.floating_ip_address = fip.floating_ip_address,
             f.fixed_ip_address = fip.fixed_ip_address,
             f.status = fip.status,
+            f.status_reason = fip.status_reason,
             f.last_synced_at = datetime()
         WITH f, fip
         MATCH (net:Network {id: fip.network_id})
@@ -340,6 +342,72 @@ def _sync_floating_ip_routers_to_graph(session, floating_ips: list[dict]) -> Non
             MERGE (f)-[:CONNECTS]->(r)
             """,
             fips=associated,
+        )
+
+
+def _sync_ports_to_graph(session, ports: list[dict]) -> None:
+    # A port's network_id is fixed at creation time (like a Subnet's), so a
+    # plain MERGE is enough here -- same reasoning as
+    # _sync_subnets_to_graph/_sync_floating_ips_to_graph.
+    session.run(
+        """
+        UNWIND $ports AS p
+        MERGE (port:Port {id: p.id})
+        SET port.name = p.name,
+            port.status = p.status,
+            port.admin_state_up = p.admin_state_up,
+            port.device_owner = p.device_owner,
+            port.device_id = p.device_id,
+            port.status_reason = p.status_reason,
+            port.mac_address = p.mac_address,
+            port.fixed_ips = p.fixed_ips,
+            port.last_synced_at = datetime()
+        WITH port, p
+        MATCH (net:Network {id: p.network_id})
+        MERGE (port)-[:CONNECTS]->(net)
+        """,
+        ports=ports,
+    )
+
+
+def _sync_port_devices_to_graph(session, ports: list[dict]) -> None:
+    """A port's device (the Node or Router it's attached to) can change --
+    a VM's port can be deleted/recreated against a different host, a
+    router's own port a different router -- so this needs the same
+    clear-then-recreate treatment as router gateways / floating IP
+    associations, split by device type since a port attaches to exactly
+    one kind of vertex depending on device_owner.
+    """
+    session.run(
+        """
+        UNWIND $ports AS p
+        MATCH (port:Port {id: p.id})
+        OPTIONAL MATCH (port)-[old:ATTACHED_TO]->()
+        DELETE old
+        """,
+        ports=ports,
+    )
+    on_node = [p for p in ports if p["device_type"] == "node"]
+    on_router = [p for p in ports if p["device_type"] == "router"]
+    if on_node:
+        session.run(
+            """
+            UNWIND $ports AS p
+            MATCH (port:Port {id: p.id})
+            MATCH (n:Node {id: p.device_id})
+            MERGE (port)-[:ATTACHED_TO]->(n)
+            """,
+            ports=on_node,
+        )
+    if on_router:
+        session.run(
+            """
+            UNWIND $ports AS p
+            MATCH (port:Port {id: p.id})
+            MATCH (r:Router {id: p.device_id})
+            MERGE (port)-[:ATTACHED_TO]->(r)
+            """,
+            ports=on_router,
         )
 
 
@@ -492,8 +560,10 @@ def sync_topology(db: Session) -> dict:
     routers: list = []
     floating_ips: list = []
     neutron_agents: list = []
+    ports: list = []
     hypervisors_ok = nova_services_ok = cinder_services_ok = False
     networks_ok = subnets_ok = routers_ok = floating_ips_ok = neutron_agents_ok = False
+    ports_ok = False
 
     try:
         hypervisors = list(conn.compute.hypervisors(details=True))
@@ -542,6 +612,12 @@ def sync_topology(db: Session) -> dict:
         neutron_agents_ok = True
     except Exception:
         logger.exception("topology sync: failed to list Neutron agents")
+
+    try:
+        ports = list(conn.network.ports())
+        ports_ok = True
+    except Exception:
+        logger.exception("topology sync: failed to list Neutron ports")
 
     existing_by_hostname = {n.hostname: n for n in crud.list_nodes(db)}
 
@@ -732,6 +808,7 @@ def sync_topology(db: Session) -> dict:
             "name": getattr(router, "name", None),
             "status": getattr(router, "status", None),
             "admin_state_up": getattr(router, "is_admin_state_up", None),
+            "status_reason": getattr(router, "status_reason", None),
             "project_id": getattr(router, "project_id", None),
             "gateway_network_id": _gateway_network_id(router),
         }
@@ -743,11 +820,42 @@ def sync_topology(db: Session) -> dict:
             "floating_ip_address": getattr(fip, "floating_ip_address", None),
             "fixed_ip_address": getattr(fip, "fixed_ip_address", None),
             "status": getattr(fip, "status", None),
+            "status_reason": getattr(fip, "status_reason", None),
             "network_id": getattr(fip, "floating_network_id", None),
             "router_id": getattr(fip, "router_id", None),
         }
         for fip in floating_ips
     ]
+
+    # device_owner prefix tells us what kind of vertex a port's device_id
+    # refers to -- "network:*" ports (router interfaces/gateways) attach to
+    # a Router, everything else (compute:*, unbound DHCP ports, etc.)
+    # attaches to a Node. Ports with no device_id (unbound) are skipped for
+    # the ATTACHED_TO edge but still synced as a vertex.
+    def _port_device_type(owner: str | None) -> str | None:
+        if owner and owner.startswith("network:router"):
+            return "router"
+        return "node"
+
+    graph_ports = []
+    for port in ports:
+        device_id = getattr(port, "device_id", None) or None
+        owner = getattr(port, "device_owner", None)
+        graph_ports.append(
+            {
+                "id": port.id,
+                "name": getattr(port, "name", None),
+                "status": getattr(port, "status", None),
+                "admin_state_up": getattr(port, "is_admin_state_up", None),
+                "device_owner": owner,
+                "status_reason": getattr(port, "status_reason", None),
+                "fixed_ips": getattr(port, "fixed_ips", None) or [],
+                "mac_address": getattr(port, "mac_address", None),
+                "network_id": getattr(port, "network_id", None),
+                "device_id": device_id,
+                "device_type": _port_device_type(owner) if device_id else None,
+            }
+        )
 
     # Only trust this pass to sweep if every listing it depends on actually
     # succeeded -- a partial picture (e.g. Cinder unreachable this tick)
@@ -759,13 +867,14 @@ def sync_topology(db: Session) -> dict:
     # is its own independent guard -- a Neutron outage shouldn't block
     # Nova/Cinder's sweep, and vice versa.
     complete_picture = hypervisors_ok and nova_services_ok and cinder_services_ok and neutron_agents_ok
-    network_topology_ok = networks_ok and subnets_ok and routers_ok and floating_ips_ok
+    network_topology_ok = networks_ok and subnets_ok and routers_ok and floating_ips_ok and ports_ok
     swept_nodes = 0
     swept_services = 0
     swept_networks = 0
     swept_subnets = 0
     swept_routers = 0
     swept_floating_ips = 0
+    swept_ports = 0
 
     with graph_db.driver.session() as session:
         if graph_nodes:
@@ -783,6 +892,9 @@ def sync_topology(db: Session) -> dict:
         if graph_floating_ips:
             _sync_floating_ips_to_graph(session, graph_floating_ips)
             _sync_floating_ip_routers_to_graph(session, graph_floating_ips)
+        if graph_ports:
+            _sync_ports_to_graph(session, graph_ports)
+            _sync_port_devices_to_graph(session, graph_ports)
         _sync_dhcp_hosting_to_graph(session, dhcp_synced_agent_ids, dhcp_hosting)
         _sync_l3_hosting_to_graph(session, l3_synced_agent_ids, l3_hosting)
 
@@ -802,6 +914,7 @@ def sync_topology(db: Session) -> dict:
             swept_subnets = _sweep_stale_vertices(session, "Subnet", {s["id"] for s in graph_subnets})
             swept_routers = _sweep_stale_vertices(session, "Router", {r["id"] for r in graph_routers})
             swept_floating_ips = _sweep_stale_vertices(session, "FloatingIP", {f["id"] for f in graph_floating_ips})
+            swept_ports = _sweep_stale_vertices(session, "Port", {p["id"] for p in graph_ports})
         else:
             logger.warning(
                 "topology sync: skipping network-topology mark-and-sweep this pass -- "
@@ -813,13 +926,13 @@ def sync_topology(db: Session) -> dict:
     logger.info(
         "topology sync: %d hypervisor(s), %d Nova service(s), %d Cinder service(s), "
         "%d Neutron agent(s), %d network(s), %d subnet(s), %d router(s), %d floating IP(s), "
-        "%d new compute node(s) registered, %d unresolved service host(s), "
+        "%d port(s), %d new compute node(s) registered, %d unresolved service host(s), "
         "%d stale node(s)/%d stale service(s)/%d stale network(s)/%d stale subnet(s)/"
-        "%d stale router(s)/%d stale floating IP(s) swept",
+        "%d stale router(s)/%d stale floating IP(s)/%d stale port(s) swept",
         len(hypervisors), len(nova_services), len(cinder_services),
         len(neutron_agents), len(networks), len(subnets), len(routers), len(floating_ips),
-        new_computes, len(unresolved_hosts), swept_nodes, swept_services,
-        swept_networks, swept_subnets, swept_routers, swept_floating_ips,
+        len(ports), new_computes, len(unresolved_hosts), swept_nodes, swept_services,
+        swept_networks, swept_subnets, swept_routers, swept_floating_ips, swept_ports,
     )
 
     return {
@@ -831,6 +944,7 @@ def sync_topology(db: Session) -> dict:
         "subnets": len(subnets),
         "routers": len(routers),
         "floating_ips": len(floating_ips),
+        "ports": len(ports),
         "dhcp_hosting_edges": len(dhcp_hosting),
         "l3_hosting_edges": len(l3_hosting),
         "new_computes": new_computes,
@@ -845,4 +959,5 @@ def sync_topology(db: Session) -> dict:
         "swept_subnets": swept_subnets,
         "swept_routers": swept_routers,
         "swept_floating_ips": swept_floating_ips,
+        "swept_ports": swept_ports,
     }

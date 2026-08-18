@@ -14,6 +14,7 @@ from .routers import logs
 from .routers import anomalies
 from .routers import baselines
 from .routers import topology
+from .routers import network
 from .routers import knowledge
 from .routers import conversations
 from .services.anomaly_detector import detect_anomalies
@@ -251,6 +252,7 @@ app.include_router(anomalies.router)
 app.include_router(baselines.router)
 app.include_router(forecast.router)
 app.include_router(topology.router)
+app.include_router(network.router)
 # Not added to the periodic lifespan tasks above on purpose -- unlike anomaly
 # detection/baselines/forecasting/topology sync, the knowledge base doesn't
 # drift on a schedule (see adr-0004), so ingestion is triggered on demand via

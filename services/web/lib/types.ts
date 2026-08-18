@@ -235,3 +235,30 @@ export interface ChatSource {
   score: number;
 }
 
+// -- Network health panel (story 3.6 -- see services/api/app/routers/network.py) --
+//
+// Mirrors schemas.NetworkHealthOut/NetworkLatencyOut on the API side.
+// routers_down/floating_ips_orphaned/ports_down are left as loose dicts
+// (same reasoning as TopologyVertex.properties in the topology block
+// above) since the panel only needs a handful of well-known keys
+// (id, status, name, ...) off each, read defensively.
+
+export type NetworkHealthStatus = "ok" | "degraded";
+
+export interface NetworkLatency {
+  hostname: string;
+  ip_address: string | null;
+  port: number;
+  latency_ms: number | null;
+  reachable: boolean;
+  error: string | null;
+}
+
+export interface NetworkHealth {
+  status: NetworkHealthStatus;
+  graph_available: boolean;
+  routers_down: Record<string, unknown>[];
+  floating_ips_orphaned: Record<string, unknown>[];
+  ports_down: Record<string, unknown>[];
+  latencies: NetworkLatency[];
+}
