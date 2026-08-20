@@ -97,6 +97,14 @@ MIN_MAD_FLOOR = 1.0
 # sensitive to noise. This value updates roughly over ~1-2 hours of 1-minute ticks.
 EWMA_ALPHA = 0.02
 
+# Story 3.8: how much pooled history a (role, weekday, hour) slot needs
+# before it's trusted as a host's fallback, one tier above EWMA. Same
+# shape as MIN_BASELINE_SAMPLES/MIN_BASELINE_DAYS but for role_baselines --
+# a role slot pools points across every host of that role, so it clears
+# these floors much sooner than a single host's own slot does.
+MIN_ROLE_BASELINE_SAMPLES = 10
+MIN_ROLE_BASELINE_HOSTS = 2
+
 
 def fetch_instant(promql_query: str) -> list[dict]:
     """Query Prometheus for the current value (no history).
@@ -153,8 +161,14 @@ def score_current_value(db: Session, hostname: str, metric_name: str, current_va
                          weekday: int, hour: int) -> tuple[float, str, str, int | None]:
     """
     Returns (z_score, severity, method, baseline_n).
-    method is "robust_zscore" when a sufficiently-populated baseline slot exists,
-    else "ewma_fallback".
+    method is:
+      - "robust_zscore" when this host's own (weekday, hour) baseline slot
+        is sufficiently populated,
+      - "role_zscore" (story 3.8) when the host's own slot isn't trusted yet
+        but its role's pooled (weekday, hour) slot is -- e.g. a newly-added
+        compute node gets compared against "what's normal for a compute
+        node at this hour" instead of no context at all,
+      - "ewma_fallback" when neither is available.
     """
     baseline = (
         db.query(models.Baseline)
@@ -177,7 +191,28 @@ def score_current_value(db: Session, hostname: str, metric_name: str, current_va
         z = (current_value - baseline.median) / (MAD_SCALE * effective_mad)
         return z, severity_from_zscore(z), "robust_zscore", baseline.sample_count
 
-    # Fallback: EWMA, no (weekday, hour) table needed.
+    # Tier 2 (story 3.8): this host doesn't have enough of its own history
+    # yet -- fall back to what's normal for its *role* at this (weekday,
+    # hour) instead of skipping straight to the role/host-agnostic EWMA.
+    node = crud.get_node_by_hostname(db, hostname)
+    if node is not None and node.role:
+        role_baseline = (
+            db.query(models.RoleBaseline)
+            .filter_by(role=node.role, metric_name=metric_name, weekday=weekday, hour=hour)
+            .first()
+        )
+        use_role_baseline = (
+            role_baseline is not None
+            and role_baseline.sample_count >= MIN_ROLE_BASELINE_SAMPLES
+            and role_baseline.distinct_hosts >= MIN_ROLE_BASELINE_HOSTS
+            and role_baseline.mad > 0
+        )
+        if use_role_baseline:
+            effective_mad = max(role_baseline.mad, MIN_MAD_FLOOR)
+            z = (current_value - role_baseline.median) / (MAD_SCALE * effective_mad)
+            return z, severity_from_zscore(z), "role_zscore", role_baseline.sample_count
+
+    # Tier 3: EWMA, no (weekday, hour) table needed at all.
     state = _get_or_init_ewma(db, hostname, metric_name, seed_value=current_value)
     std = state.var ** 0.5
     z = (current_value - state.mean) / std if std > 0 else 0.0

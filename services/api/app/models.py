@@ -167,6 +167,37 @@ class Baseline(Base):
     )
 
 
+class RoleBaseline(Base):
+    """Same idea as Baseline, but grouped by Node.role instead of a single
+    hostname (see anomaly_detector.score_current_value's second tier, story
+    3.8). Lets a host with too little of its own history yet (e.g. just
+    brought online) still get compared against "what's normal for a
+    compute/controller/storage/monitoring node at this (weekday, hour)"
+    instead of falling straight through to the context-free EWMA fallback.
+    """
+    __tablename__ = "role_baselines"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    role = Column(String, nullable=False, index=True)
+    metric_name = Column(String, nullable=False)
+    weekday = Column(Integer, nullable=False)  # 0=Monday ... 6=Sunday
+    hour = Column(Integer, nullable=False)     # 0-23
+    mean = Column(Float, nullable=False)
+    stddev = Column(Float, nullable=False)
+    median = Column(Float, nullable=False)
+    mad = Column(Float, nullable=False)
+    sample_count = Column(Integer, nullable=False, default=0)
+    # Distinct hostnames that contributed to this slot -- same reasoning as
+    # Baseline.distinct_days: enough raw points can come from just one or
+    # two hosts, which isn't actually "what's normal for this role" yet.
+    distinct_hosts = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("role", "metric_name", "weekday", "hour", name="uq_role_baseline_slot"),
+    )
+
+
 class Conversation(Base):
     """One Copilot chat thread (adr-0005's knowledge chat is stateless per
     request -- this is what turns that into something a user can leave and
