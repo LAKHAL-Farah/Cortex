@@ -273,3 +273,55 @@ class ConversationOut(ConversationSummaryOut):
 
 
 
+
+# --------------------------------------------------------------------------
+# Auth (app/auth.py, routers/auth.py) -- username/password accounts.
+
+class UserRole(str, Enum):
+    admin = "admin"
+    viewer = "viewer"
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    username: str
+    role: UserRole
+    is_active: bool
+    must_change_password: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=256)
+    role: UserRole = UserRole.viewer
+
+
+class UserUpdate(BaseModel):
+    """Admin-only edits to another account. All fields optional -- only the
+    ones the admin actually set in the request body are applied (see
+    routers/auth.py::update_user)."""
+    role: UserRole | None = None
+    is_active: bool | None = None
+    # Setting a new password here always also sets must_change_password=True
+    # on the target account -- an admin-set password is a temporary one by
+    # definition (see models.User's docstring).
+    new_password: str | None = Field(default=None, min_length=8, max_length=256)

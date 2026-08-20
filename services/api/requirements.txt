@@ -1,5 +1,9 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
+# Username/password auth (app/auth.py): bcrypt for password hashing, PyJWT
+# for signing/verifying the session tokens issued by POST /api/v1/auth/login.
+bcrypt==4.2.0
+PyJWT==2.9.0
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.9
 alembic==1.13.2

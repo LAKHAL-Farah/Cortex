@@ -8,6 +8,46 @@ from sqlalchemy import Column, Float, UniqueConstraint, Text, JSON
 from .db import Base
 
 
+class User(Base):
+    """A real Cortex account (see app/auth.py) -- username + bcrypt password
+    hash, a coarse role, and the bits needed to run an admin-invites-users
+    flow instead of open self-signup:
+
+    - `is_active`: soft-disable switch. Admins flip this off instead of
+      deleting the row, so a deactivated user's audit trail/ownership of
+      past data doesn't disappear, and re-enabling doesn't need a new id.
+    - `must_change_password`: set whenever an admin sets/resets someone's
+      password (including the bootstrap admin account, see main.py's
+      startup seeding) so a shared/temporary password can't silently
+      become a long-lived credential -- the frontend forces a password
+      change before letting that session do anything else.
+
+    role is a plain string CHECK rather than a permissions table -- Cortex
+    only needs two tiers right now (operators who can act on the platform,
+    and admins who can additionally manage nodes/knowledge-base ingestion
+    and other accounts). If that grows past "admin can do everything viewer
+    can, plus X", revisit with real per-permission rows instead of adding
+    more roles here.
+    """
+    __tablename__ = "users"
+
+    __table_args__ = (
+        CheckConstraint("role IN ('admin','viewer')", name="ck_users_role_allowed"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="viewer")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Node(Base):
     __tablename__ = "nodes"
 

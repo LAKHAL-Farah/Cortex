@@ -5,12 +5,15 @@ from sqlalchemy.orm import Session
 
 from .. import crud, schemas
 from ..db import get_db
-from ..security import get_client_id, require_api_key
+from ..security import get_client_id
 
+# No router-level auth dependency here -- every router in main.py already
+# gets Depends(get_current_user) applied at app.include_router() time, so
+# any route defined below already requires a logged-in account without
+# needing to say so again.
 router = APIRouter(
     prefix="/api/v1/conversations",
     tags=["conversations"],
-    dependencies=[Depends(require_api_key)],
 )
 
 

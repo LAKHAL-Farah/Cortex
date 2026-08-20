@@ -3,19 +3,13 @@ import { authHeaders } from "@/lib/serverAuth";
 
 const API_URL = process.env.CORTEX_API_URL!;
 
-export async function GET() {
-  const res = await fetch(`${API_URL}/api/v1/nodes`, {
-    cache: "no-store",
-    headers: await authHeaders(),
-  });
-  const data = await res.json();
-  return NextResponse.json(data, { status: res.status });
-}
+type Context = { params: Promise<{ id: string }> };
 
-export async function POST(req: Request) {
+export async function PATCH(req: Request, { params }: Context) {
+  const { id } = await params;
   const body = await req.json();
-  const res = await fetch(`${API_URL}/api/v1/nodes`, {
-    method: "POST",
+  const res = await fetch(`${API_URL}/api/v1/auth/users/${id}`, {
+    method: "PATCH",
     headers: await authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });

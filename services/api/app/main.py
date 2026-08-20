@@ -17,6 +17,9 @@ from .routers import topology
 from .routers import knowledge
 from .routers import conversations
 from .routers import quotas
+from .routers import auth as auth_router
+from .auth import get_current_user, hash_password
+from . import models
 from .services.anomaly_detector import detect_anomalies
 from .services.quota_budget_monitor import check_quota_and_budget
 from .services.baseline_builder import compute_baselines
@@ -189,6 +192,35 @@ async def _run_periodic_recorded(fn, interval_seconds: float, name: str, sync_ty
             db.close()
         await asyncio.sleep(interval_seconds)
 
+def _seed_bootstrap_admin(db) -> None:
+    """Creates the first admin account if the `users` table is empty --
+    otherwise there's a chicken-and-egg problem where you need an admin
+    account to create the first admin account. Username/password come from
+    CORTEX_ADMIN_USERNAME/CORTEX_ADMIN_PASSWORD (defaulting to admin/admin
+    for local/dev use, see infra/.env.example); must_change_password is
+    always forced True so that default can't silently stick around.
+
+    No-ops the moment any user exists, including after the bootstrap admin's
+    password has been changed -- this only ever fires once per fresh DB.
+    """
+    if crud.count_users(db) > 0:
+        return
+    username = os.environ.get("CORTEX_ADMIN_USERNAME", "admin")
+    password = os.environ.get("CORTEX_ADMIN_PASSWORD", "admin")
+    crud.create_user(
+        db,
+        username=username,
+        password_hash=hash_password(password),
+        role="admin",
+        must_change_password=True,
+    )
+    logger.warning(
+        "Cortex had no accounts -- created bootstrap admin user '%s'. "
+        "Log in and change the password immediately (you'll be forced to).",
+        username,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # If the DB is empty (fresh deploy, or infra that was provisioned by
@@ -200,6 +232,14 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(seed_nodes_from_file_sd, db)
     except Exception:
         logger.exception("startup node seeding failed")
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        await asyncio.to_thread(_seed_bootstrap_admin, db)
+    except Exception:
+        logger.exception("bootstrap admin seeding failed")
     finally:
         db.close()
 
@@ -259,26 +299,35 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Cortex API", version="0.1.0", lifespan=lifespan)
-app.include_router(nodes.router)
-app.include_router(metrics.router)
-app.include_router(dashboard.router) 
-app.include_router(logs.router)
-app.include_router(anomalies.router)
-app.include_router(baselines.router)
-app.include_router(forecast.router)
-app.include_router(topology.router)
-app.include_router(quotas.router)
+
+# Login is the one endpoint that must be reachable without already being
+# logged in -- everything else below gets Depends(get_current_user) applied
+# at include_router time, so no individual route has to remember to guard
+# itself. (Admin-only endpoints, e.g. POST /auth/users or node/knowledge
+# mutations, layer require_admin on top of that -- see auth.py.)
+app.include_router(auth_router.router)
+
+_auth_required = [Depends(get_current_user)]
+app.include_router(nodes.router, dependencies=_auth_required)
+app.include_router(metrics.router, dependencies=_auth_required)
+app.include_router(dashboard.router, dependencies=_auth_required)
+app.include_router(logs.router, dependencies=_auth_required)
+app.include_router(anomalies.router, dependencies=_auth_required)
+app.include_router(baselines.router, dependencies=_auth_required)
+app.include_router(forecast.router, dependencies=_auth_required)
+app.include_router(topology.router, dependencies=_auth_required)
+app.include_router(quotas.router, dependencies=_auth_required)
 # Not added to the periodic lifespan tasks above on purpose -- unlike anomaly
 # detection/baselines/forecasting/topology sync, the knowledge base doesn't
 # drift on a schedule (see adr-0004), so ingestion is triggered on demand via
 # POST /api/v1/knowledge/ingest (or the ingest_knowledge CLI script) instead
 # of a background timer.
-app.include_router(knowledge.router)
+app.include_router(knowledge.router, dependencies=_auth_required)
 # Server-side persistence for Copilot chat threads (see routers/conversations.py's
 # module docstring) -- like knowledge.router, not added to the periodic
 # lifespan tasks above since it's plain request/response CRUD, nothing to
 # poll on a schedule.
-app.include_router(conversations.router)
+app.include_router(conversations.router, dependencies=_auth_required)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 

@@ -3,16 +3,13 @@ import { authHeaders } from "@/lib/serverAuth";
 
 const API_URL = process.env.CORTEX_API_URL!;
 
-type Context = {
-  params: Promise<{ id: string }>;
-};
-
-export async function GET(_req: Request, { params }: Context) {
-  const { id } = await params;
-
-  const res = await fetch(`${API_URL}/api/v1/topology/nodes/${encodeURIComponent(id)}`, {
+export async function POST(req: Request) {
+  const body = await req.json();
+  const res = await fetch(`${API_URL}/api/v1/auth/change-password`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
     cache: "no-store",
-    headers: await authHeaders(),
   });
   const data = await res.json().catch(() => ({}));
   return NextResponse.json(data, { status: res.status });

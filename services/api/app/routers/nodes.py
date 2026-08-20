@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from fastapi import BackgroundTasks
 from .. import crud, schemas
 from ..db import get_db
-from ..security import require_api_key
+from ..auth import require_admin
 from ..services.prometheus_sd import regenerate_file_sd
 from ..services.inventory_manager import add_host_to_inventory, remove_host_from_inventory
 from ..services.ansible_runner import install_node_exporter
@@ -28,7 +28,7 @@ def get_node(node_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=schemas.NodeOut, status_code=status.HTTP_201_CREATED,
-             dependencies=[Depends(require_api_key)])
+             dependencies=[Depends(require_admin)])
 def create_node(payload: schemas.NodeCreate, background_tasks: BackgroundTasks,
                 db: Session = Depends(get_db)):
     try:
@@ -57,7 +57,7 @@ def create_node(payload: schemas.NodeCreate, background_tasks: BackgroundTasks,
 
 
 @router.post("/{node_id}/exporter-check", response_model=schemas.NodeOut,
-             dependencies=[Depends(require_api_key)])
+             dependencies=[Depends(require_admin)])
 def recheck_node_exporter(node_id: uuid.UUID, db: Session = Depends(get_db)):
     """Re-run the node_exporter install/check for an existing node and persist
     the result. Exists for nodes created before node_exporter_installed was
@@ -77,7 +77,7 @@ def recheck_node_exporter(node_id: uuid.UUID, db: Session = Depends(get_db)):
     return node
 
 
-@router.put("/{node_id}", response_model=schemas.NodeOut, dependencies=[Depends(require_api_key)])
+@router.put("/{node_id}", response_model=schemas.NodeOut, dependencies=[Depends(require_admin)])
 def update_node(node_id: uuid.UUID, payload: schemas.NodeUpdate, db: Session = Depends(get_db)):
     node = crud.get_node(db, node_id)
     if node is None:
@@ -91,7 +91,7 @@ def update_node(node_id: uuid.UUID, payload: schemas.NodeUpdate, db: Session = D
 
 
 @router.delete("/{node_id}", status_code=status.HTTP_204_NO_CONTENT,
-               dependencies=[Depends(require_api_key)])
+               dependencies=[Depends(require_admin)])
 def delete_node(node_id: uuid.UUID, db: Session = Depends(get_db)):
     node = crud.get_node(db, node_id)
     if node is None:
