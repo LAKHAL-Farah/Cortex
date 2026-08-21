@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
+import { authHeaders } from "@/lib/serverAuth";
 
 const API_URL = process.env.CORTEX_API_URL!;
-const API_KEY = process.env.CORTEX_API_KEY!;
 
 type Context = {
   params: Promise<{ id: string }>;
@@ -15,9 +15,7 @@ export async function DELETE(
 
   const res = await fetch(`${API_URL}/api/v1/nodes/${id}`, {
     method: "DELETE",
-    headers: {
-      "X-API-Key": API_KEY,
-    },
+    headers: await authHeaders(),
   });
 
   return new NextResponse(null, {
@@ -36,10 +34,7 @@ export async function PUT(
 
   const res = await fetch(`${API_URL}/api/v1/nodes/${id}`, {
     method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-Key": API_KEY,
-    },
+    headers: await authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
 

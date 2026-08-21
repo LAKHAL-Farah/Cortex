@@ -52,6 +52,10 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
       CORTEX_API_KEY: ${CORTEX_API_KEY}
+      CORTEX_JWT_SECRET: ${CORTEX_JWT_SECRET}
+      CORTEX_JWT_TTL_MINUTES: ${CORTEX_JWT_TTL_MINUTES:-480}
+      CORTEX_ADMIN_USERNAME: ${CORTEX_ADMIN_USERNAME:-admin}
+      CORTEX_ADMIN_PASSWORD: ${CORTEX_ADMIN_PASSWORD:-admin}
       OS_CLIENT_CONFIG_FILE: /etc/openstack/clouds.yaml
       OS_CLOUD: ${OS_CLOUD:-cortex-reader}
       NEO4J_URI: bolt://neo4j:7687
@@ -70,6 +74,7 @@ services:
       ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
       PROMETHEUS_URL: ${PROMETHEUS_URL}
       PROMETHEUS_RANGE_URL: ${PROMETHEUS_RANGE_URL}
+      PROMETHEUS_BASE_URL: ${PROMETHEUS_BASE_URL}
       LOKI_URL: ${LOKI_URL}
       FORECAST_DATASET_REFRESH_INTERVAL_SECONDS: ${FORECAST_DATASET_REFRESH_INTERVAL_SECONDS:-86400}
       # RAG knowledge base (adr-0004) -- docs/knowledge/ is mounted read-only

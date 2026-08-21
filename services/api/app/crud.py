@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from . import models, schemas
@@ -181,3 +181,44 @@ def list_conversation_messages(db: Session, conversation_id: uuid.UUID) -> list[
         .where(models.ConversationMessage.conversation_id == conversation_id)
         .order_by(models.ConversationMessage.position.asc())
     ).all()
+
+
+# --------------------------------------------------------------------------
+# Users (app/auth.py, routers/auth.py)
+
+class DuplicateUserError(Exception):
+    pass
+
+
+def get_user(db: Session, user_id) -> models.User | None:
+    return db.get(models.User, user_id)
+
+
+def get_user_by_username(db: Session, username: str) -> models.User | None:
+    return db.scalar(select(models.User).where(models.User.username == username))
+
+
+def list_users(db: Session) -> list[models.User]:
+    return db.scalars(select(models.User).order_by(models.User.username)).all()
+
+
+def count_users(db: Session) -> int:
+    return db.scalar(select(func.count()).select_from(models.User)) or 0
+
+
+def create_user(db: Session, *, username: str, password_hash: str, role: str,
+                 must_change_password: bool = False) -> models.User:
+    user = models.User(
+        username=username,
+        password_hash=password_hash,
+        role=role,
+        must_change_password=must_change_password,
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise DuplicateUserError(f"username '{username}' already taken") from exc
+    db.refresh(user)
+    return user

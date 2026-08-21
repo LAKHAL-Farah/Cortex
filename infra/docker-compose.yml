@@ -52,6 +52,10 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
       CORTEX_API_KEY: ${CORTEX_API_KEY}
+      CORTEX_JWT_SECRET: ${CORTEX_JWT_SECRET}
+      CORTEX_JWT_TTL_MINUTES: ${CORTEX_JWT_TTL_MINUTES:-480}
+      CORTEX_ADMIN_USERNAME: ${CORTEX_ADMIN_USERNAME:-admin}
+      CORTEX_ADMIN_PASSWORD: ${CORTEX_ADMIN_PASSWORD:-admin}
       PROMETHEUS_FILE_SD_PATH: /file_sd/nodes.json
       CORTEX_ANSIBLE_DIR: ${CORTEX_ANSIBLE_DIR:-/infra/ansible}
       ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
