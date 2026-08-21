@@ -2,6 +2,9 @@
 
 import React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { Lock, AlertCircle } from "lucide-react";
+import { AuthShell } from "@/components/auth/AuthShell";
+import { AuthField } from "@/components/auth/AuthField";
 
 function ChangePasswordForm() {
   const router = useRouter();
@@ -46,63 +49,46 @@ function ChangePasswordForm() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-canvas">
-      <form
-        onSubmit={submit}
-        className="w-full max-w-sm rounded-[var(--radius-control)] p-6"
-        style={{ border: "1px solid var(--border)", background: "var(--surface)" }}
-      >
-        <div className="eyebrow">Cortex</div>
-        <h1 className="font-display mt-1 text-xl font-semibold text-color-text">
-          {forced ? "Set a new password" : "Change password"}
-        </h1>
-        {forced && (
-          <p className="mt-1 text-sm text-text-dim">
-            You&rsquo;re using a temporary password. Choose a new one to continue.
-          </p>
-        )}
-
-        <div className="mt-5 flex flex-col gap-3">
-          <label className="flex flex-col gap-1 text-sm text-text-dim">
-            Current password
-            <input
-              type="password"
-              autoFocus
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              className="rounded-[var(--radius-control)] px-3 py-2 text-color-text"
-              style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
-              required
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-sm text-text-dim">
-            New password
-            <input
-              type="password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              className="rounded-[var(--radius-control)] px-3 py-2 text-color-text"
-              style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
-              minLength={8}
-              required
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-sm text-text-dim">
-            Confirm new password
-            <input
-              type="password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              className="rounded-[var(--radius-control)] px-3 py-2 text-color-text"
-              style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
-              minLength={8}
-              required
-            />
-          </label>
-        </div>
+    <AuthShell
+      eyebrow="Cortex"
+      title={forced ? "Set a new password" : "Change password"}
+      subtitle={forced ? "You're using a temporary password. Choose a new one to continue." : undefined}
+    >
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <AuthField
+          id="current-password"
+          label="Current password"
+          icon={Lock}
+          showToggle
+          value={currentPassword}
+          onChange={setCurrentPassword}
+          autoFocus
+          required
+        />
+        <AuthField
+          id="new-password"
+          label="New password"
+          icon={Lock}
+          showToggle
+          value={newPassword}
+          onChange={setNewPassword}
+          minLength={8}
+          required
+        />
+        <AuthField
+          id="confirm-password"
+          label="Confirm new password"
+          icon={Lock}
+          showToggle
+          value={confirm}
+          onChange={setConfirm}
+          minLength={8}
+          required
+        />
 
         {error && (
-          <p className="mt-3 text-sm" style={{ color: "var(--crit)" }}>
+          <p className="flex items-center gap-1.5 text-sm" style={{ color: "var(--crit)" }}>
+            <AlertCircle className="h-4 w-4 shrink-0" strokeWidth={1.75} />
             {error}
           </p>
         )}
@@ -110,13 +96,13 @@ function ChangePasswordForm() {
         <button
           type="submit"
           disabled={loading}
-          className="mt-5 w-full rounded-[var(--radius-control)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
-          style={{ background: "var(--accent, #4f46e5)" }}
+          className="mt-1 inline-flex h-10 items-center justify-center rounded-[var(--radius-control)] text-sm font-semibold text-white transition-opacity disabled:opacity-60"
+          style={{ background: "var(--accent)" }}
         >
-          {loading ? "Saving..." : "Save new password"}
+          {loading ? "Saving…" : "Save new password"}
         </button>
       </form>
-    </div>
+    </AuthShell>
   );
 }
 

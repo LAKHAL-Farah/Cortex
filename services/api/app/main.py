@@ -3,7 +3,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from sqlalchemy import text
 from .db import engine, SessionLocal
 from fastapi.staticfiles import StaticFiles

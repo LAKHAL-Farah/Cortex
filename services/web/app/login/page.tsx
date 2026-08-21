@@ -2,6 +2,9 @@
 
 import React from "react";
 import { useRouter } from "next/navigation";
+import { User, Lock, AlertCircle } from "lucide-react";
+import { AuthShell } from "@/components/auth/AuthShell";
+import { AuthField } from "@/components/auth/AuthField";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -39,42 +42,19 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-canvas">
-      <form
-        onSubmit={submit}
-        className="w-full max-w-sm rounded-[var(--radius-control)] p-6"
-        style={{ border: "1px solid var(--border)", background: "var(--surface)" }}
-      >
-        <div className="eyebrow">Cortex</div>
-        <h1 className="font-display mt-1 text-xl font-semibold text-color-text">Sign in</h1>
-
-        <div className="mt-5 flex flex-col gap-3">
-          <label className="flex flex-col gap-1 text-sm text-text-dim">
-            Username
-            <input
-              autoFocus
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="rounded-[var(--radius-control)] px-3 py-2 text-color-text"
-              style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
-              required
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-sm text-text-dim">
-            Password
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="rounded-[var(--radius-control)] px-3 py-2 text-color-text"
-              style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
-              required
-            />
-          </label>
-        </div>
+    <AuthShell
+      eyebrow="Welcome back"
+      title="Sign in"
+      subtitle="Use your workspace credentials to access the cockpit."
+      footer={<span>Need access? Ask your workspace admin to invite you.</span>}
+    >
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <AuthField id="username" label="Username" icon={User} value={username} onChange={setUsername} autoFocus required />
+        <AuthField id="password" label="Password" icon={Lock} showToggle value={password} onChange={setPassword} required />
 
         {error && (
-          <p className="mt-3 text-sm" style={{ color: "var(--crit)" }}>
+          <p className="flex items-center gap-1.5 text-sm" style={{ color: "var(--crit)" }}>
+            <AlertCircle className="h-4 w-4 shrink-0" strokeWidth={1.75} />
             {error}
           </p>
         )}
@@ -82,12 +62,12 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={loading}
-          className="mt-5 w-full rounded-[var(--radius-control)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
-          style={{ background: "var(--accent, #4f46e5)" }}
+          className="mt-1 inline-flex h-10 items-center justify-center rounded-[var(--radius-control)] text-sm font-semibold text-white transition-opacity disabled:opacity-60"
+          style={{ background: "var(--accent)" }}
         >
-          {loading ? "Signing in..." : "Sign in"}
+          {loading ? "Signing in…" : "Sign in"}
         </button>
       </form>
-    </div>
+    </AuthShell>
   );
 }
