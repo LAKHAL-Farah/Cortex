@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 from ipaddress import ip_address, ip_network
+from typing import TypedDict
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from ipaddress import ip_address, ip_network
 
@@ -269,6 +270,30 @@ class ConversationSummaryOut(BaseModel):
 
 class ConversationOut(ConversationSummaryOut):
     messages: list[ConversationMessageOut]
+
+
+# --------------------------------------------------------------------------
+# Agent orchestrator (v0.1 "prove the loop") -- POST /api/v1/agents/orchestrate
+# runs the LangGraph router->monitoring->compose graph (see app/agents/) and
+# returns a single JSON answer. Unlike knowledge.chat's ChatQuery/ChatSource
+# above, this is intentionally not streaming yet: v0.1 is proving the graph
+# mechanism runs end to end, not the UX around it.
+# --------------------------------------------------------------------------
+
+class AgentOrchestrateQuery(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+
+
+class AgentKnownNode(TypedDict):
+    hostname: str
+    role: str
+    instance: str
+
+
+class AgentOrchestrateResponse(BaseModel):
+    answer: str
+    agent_used: str
+    raw_data: dict | None = None
 
 
 

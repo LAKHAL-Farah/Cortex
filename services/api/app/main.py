@@ -17,6 +17,7 @@ from .routers import topology
 from .routers import knowledge
 from .routers import conversations
 from .routers import quotas
+from .routers import agents
 from .services.anomaly_detector import detect_anomalies
 from .services.quota_budget_monitor import check_quota_and_budget
 from .services.baseline_builder import compute_baselines
@@ -279,6 +280,10 @@ app.include_router(knowledge.router)
 # lifespan tasks above since it's plain request/response CRUD, nothing to
 # poll on a schedule.
 app.include_router(conversations.router)
+# LangGraph agent orchestrator (router -> monitoring -> compose, see
+# app/agents/). Same reasoning as knowledge.router/conversations.router
+# above: plain request/response, nothing to poll on a schedule.
+app.include_router(agents.router)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 

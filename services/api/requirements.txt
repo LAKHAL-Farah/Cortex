@@ -23,3 +23,7 @@ sentence-transformers==3.3.1
 # ChatNVIDIA calls the hosted NVIDIA NIM endpoint, no model weights baked
 # into the image (unlike the embedding model).
 langchain-nvidia-ai-endpoints==1.4.3
+# Agent orchestrator graph (router -> monitoring -> compose, see app/agents/).
+# Pulls a compatible langchain-core transitively (already constrained to
+# <2.0.0,>=1.4.7 by langchain-nvidia-ai-endpoints above).
+langgraph==1.2.11
