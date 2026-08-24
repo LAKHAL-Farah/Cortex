@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatSource } from "@/lib/types";
+import type { AgentName, AgentRawData, ChatMessage, ChatSource } from "@/lib/types";
 
 // -- Copilot conversation history -------------------------------------------
 //
@@ -14,6 +14,12 @@ import type { ChatMessage, ChatSource } from "@/lib/types";
 export interface StoredMessage extends ChatMessage {
   sources?: ChatSource[];
   errored?: boolean;
+  // Which specialist agent produced this turn and what it returned (see
+  // lib/types.ts). Undefined for user turns and for anything answered
+  // before the agent orchestrator existed -- CopilotAgentPanels falls back
+  // to plain markdown in that case.
+  agent_used?: AgentName | string;
+  raw_data?: AgentRawData | null;
 }
 
 export interface ConversationSummary {

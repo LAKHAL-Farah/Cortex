@@ -234,6 +234,12 @@ class ConversationMessageIn(BaseModel):
     content: str = Field(min_length=1)
     sources: list[ChatSource] | None = None
     errored: bool = False
+    # See models.ConversationMessage.agent_used/raw_data -- which agent
+    # (monitoring/prediction/rag) produced this turn and its raw payload,
+    # so a reloaded conversation can re-render the same agent-specific
+    # panel instead of falling back to plain markdown.
+    agent_used: str | None = None
+    raw_data: dict | None = None
 
 
 class ConversationMessageOut(ConversationMessageIn):

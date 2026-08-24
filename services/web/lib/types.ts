@@ -337,3 +337,61 @@ export interface ChatSource {
   score: number;
 }
 
+// -- Agent orchestrator (POST /api/v1/agents/orchestrate) ------------------
+//
+// The router picks exactly one specialist per question (see services/api/
+// app/agents/intent_router.py) and its raw_data shape depends on which one
+// answered -- these three interfaces mirror what routers/agents.py's three
+// agent nodes actually return, used by components/CopilotAgentPanels.tsx
+// to pick a renderer.
+
+export type AgentName = "monitoring" | "prediction" | "rag";
+
+// Same live-status shape as LiveMetrics above, just named for clarity at
+// the copilot call site.
+export type AgentMonitoringData = LiveMetrics;
+
+export interface ForecastPoint {
+  horizon_hours: number;
+  timestamp: string;
+  predicted: number;
+  lower: number;
+  upper: number;
+  extrapolated: boolean;
+}
+
+export interface ActualPoint {
+  timestamp: string;
+  value: number;
+}
+
+export interface AgentPredictionData {
+  hostname: string;
+  metric: string;
+  model_type: string;
+  generated_at: string;
+  n_points_used: number;
+  horizon_days: number;
+  max_horizon_hours: number;
+  forecast: ForecastPoint[];
+  actual: ActualPoint[];
+}
+
+export interface AgentRagSource {
+  source_path: string;
+  doc_title: string;
+  score: number;
+}
+
+export interface AgentRagData {
+  sources: AgentRagSource[];
+}
+
+export type AgentRawData = AgentMonitoringData | AgentPredictionData | AgentRagData | Record<string, unknown>;
+
+export interface AgentOrchestrateResponse {
+  answer: string;
+  agent_used: AgentName | string;
+  raw_data: AgentRawData | null;
+}
+

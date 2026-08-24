@@ -329,6 +329,17 @@ class ConversationMessage(Base):
     # SSE stream's `sources` event already carries. Null for user turns.
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
     errored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Which specialist agent produced this turn (monitoring/prediction/rag,
+    # see app/agents/) and the raw payload it returned (LiveMetrics, a
+    # forecast series, or RAG sources -- see AgentOrchestrateResponse). Both
+    # null for user turns and for any assistant turn that predates the
+    # agent orchestrator UI. The frontend uses agent_used to pick which
+    # panel to render a saved turn with on reload (components/
+    # CopilotAgentPanels.tsx), so this is persisted alongside content
+    # instead of being re-derived, which the orchestrator has no way to do
+    # after the fact.
+    agent_used: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    raw_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

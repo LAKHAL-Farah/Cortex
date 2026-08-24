@@ -161,6 +161,8 @@ def replace_conversation(
                 content=message.content,
                 sources=[s.model_dump() for s in message.sources] if message.sources else None,
                 errored=message.errored,
+                agent_used=message.agent_used,
+                raw_data=message.raw_data,
                 position=position,
             )
         )

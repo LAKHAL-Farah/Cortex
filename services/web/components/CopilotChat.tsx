@@ -2,13 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   ArrowUp,
   Check,
   Copy,
-  FileText,
   Link2,
   MessageSquarePlus,
   MessagesSquare,
@@ -16,7 +13,8 @@ import {
   Trash2,
   TriangleAlert,
 } from "lucide-react";
-import type { ChatSource } from "@/lib/types";
+import type { AgentOrchestrateResponse } from "@/lib/types";
+import { AgentAnswerPanel, agentMeta, ReasoningTrace } from "@/components/CopilotAgentPanels";
 import {
   type Conversation,
   type ConversationSummary,
@@ -32,86 +30,19 @@ import {
 } from "@/lib/copilotHistory";
 
 interface DisplayMessage extends StoredMessage {
-  pending?: boolean; // true while tokens are still streaming in
+  pending?: boolean; // true while the orchestrator call is in flight
+  startedAt?: number; // client-side only, used to time the reasoning trace
+  elapsedMs?: number; // client-side only, shown once the trace collapses
 }
 
+// One example per specialist agent (see services/api/app/agents/) so first-
+// time visitors see all three in action instead of only ever hitting rag.
 const SUGGESTIONS = [
-  "How is Cinder storage backed?",
-  "What runs on the controller node?",
-  "Walk me through the network topology.",
-  "What's the admin runbook for a failed compute node?",
+  "What is CPU usage on compute-02?",
+  "Will compute-02 run out of disk space this week?",
+  "How do we fix a stuck Ceph OSD?",
+  "Show me the CPU trend for compute-02 over the next 7 days.",
 ];
-
-const CATEGORY_OPTIONS: { label: string; value: string | null }[] = [
-  { label: "All docs", value: null },
-  { label: "Service details", value: "service-detail" },
-];
-
-const CITE_SCHEME = "cite:";
-
-// Rewrites the model's inline citation tags ("[nova.md]") into real markdown
-// links ("[nova.md](cite:nova.md)") before handing the string to
-// react-markdown, so citations render as chips (via the `a` override below)
-// without needing a bespoke parser alongside a full markdown renderer.
-function withCiteLinks(text: string) {
-  return text.replace(/\[([a-zA-Z0-9_.\-/]+\.md)\]/g, `[$1](${CITE_SCHEME}$1)`);
-}
-
-function CiteChip({ file }: { file: string }) {
-  return (
-    <span
-      className="mx-0.5 inline-flex items-center gap-1 rounded-[4px] px-1.5 py-[1px] align-middle text-[11px] font-medium no-underline"
-      style={{ background: "var(--accent-soft)", color: "var(--accent)" }}
-    >
-      <FileText className="h-[10px] w-[10px]" strokeWidth={2} />
-      {file}
-    </span>
-  );
-}
-
-function Markdown({ text }: { text: string }) {
-  return (
-    <div className="md-content">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          a({ href, children }) {
-            if (href?.startsWith(CITE_SCHEME)) {
-              return <CiteChip file={href.slice(CITE_SCHEME.length)} />;
-            }
-            return (
-              <a href={href} target="_blank" rel="noreferrer">
-                {children}
-              </a>
-            );
-          },
-        }}
-      >
-        {withCiteLinks(text)}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-function SourceChips({ sources }: { sources: ChatSource[] }) {
-  if (sources.length === 0) return null;
-  return (
-    <div className="mt-2.5 flex flex-wrap gap-1.5">
-      {sources.map((s, i) => (
-        <div
-          key={`${s.source_path}-${i}`}
-          title={s.heading ?? s.doc_title}
-          className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] px-2 py-1 text-[11px]"
-          style={{ border: "1px solid var(--border-soft)", background: "var(--canvas)", color: "var(--text-faint)" }}
-        >
-          <FileText className="h-[11px] w-[11px]" strokeWidth={1.75} style={{ color: "var(--text-muted)" }} />
-          <span className="font-medium text-color-text">{s.doc_title}</span>
-          {s.heading && <span className="text-text-muted">· {s.heading}</span>}
-        </div>
-      ))}
-    </div>
-  );
-}
 
 function TypingDots() {
   return (
@@ -360,7 +291,7 @@ export default function CopilotChat() {
   }
 
   async function persist(id: string, nextMessages: DisplayMessage[]) {
-    const clean: StoredMessage[] = nextMessages.map(({ pending, ...m }) => m);
+    const clean: StoredMessage[] = nextMessages.map(({ pending, startedAt, elapsedMs, ...m }) => m);
     const firstUser = clean.find((m) => m.role === "user")?.content;
     const existingTitle = conversations.find((c) => c.id === id)?.title;
     const title = existingTitle && existingTitle !== "New conversation" ? existingTitle : titleFromMessage(firstUser ?? "New conversation");
@@ -433,64 +364,37 @@ export default function CopilotChat() {
       }
     }
 
-    const history = messages.filter((m) => !m.pending && !m.errored).map(({ role, content }) => ({ role, content }));
     const userMessage: DisplayMessage = { role: "user", content: text };
-    const assistantMessage: DisplayMessage = { role: "assistant", content: "", sources: [], pending: true };
+    const assistantMessage: DisplayMessage = { role: "assistant", content: "", pending: true, startedAt: Date.now() };
     const withUser = [...messages, userMessage, assistantMessage];
     setMessages(withUser);
     setInput("");
     setBusy(true);
 
     try {
-      const res = await fetch("/api/knowledge/chat", {
+      const res = await fetch("/api/agents/orchestrate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, history, category }),
+        body: JSON.stringify({ query: text }),
       });
 
-      if (!res.ok || !res.body) {
-        const data = await res.json().catch(() => ({}));
+      const data: AgentOrchestrateResponse & { detail?: string } = await res.json().catch(() => ({}));
+      if (!res.ok) {
         throw new Error(data.detail || `Request failed (${res.status})`);
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let latest = withUser;
+      const elapsedMs = Date.now() - (assistantMessage.startedAt ?? Date.now());
+      const next = updateLast(withUser, (m) => ({
+        ...m,
+        content: data.answer ?? "",
+        agent_used: data.agent_used,
+        raw_data: data.raw_data ?? null,
+        elapsedMs,
+        pending: false,
+      }));
+      setMessages(next);
 
-      const apply = (fn: (m: DisplayMessage) => DisplayMessage) => {
-        latest = updateLast(latest, fn);
-        setMessages(latest);
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const events = buffer.split("\n\n");
-        buffer = events.pop() ?? "";
-
-        for (const raw of events) {
-          const eventLine = raw.split("\n").find((l) => l.startsWith("event: "));
-          const dataLine = raw.split("\n").find((l) => l.startsWith("data: "));
-          if (!eventLine || !dataLine) continue;
-          const eventName = eventLine.slice("event: ".length).trim();
-          const data = JSON.parse(dataLine.slice("data: ".length));
-
-          if (eventName === "sources") {
-            apply((m) => ({ ...m, sources: data.sources }));
-          } else if (eventName === "token") {
-            apply((m) => ({ ...m, content: m.content + data.text }));
-          } else if (eventName === "error") {
-            apply((m) => ({ ...m, content: data.message, errored: true, pending: false }));
-          } else if (eventName === "done") {
-            apply((m) => ({ ...m, pending: false }));
-          }
-        }
-      }
-
-      if (conversationId) await persist(conversationId, latest);
+      if (conversationId) await persist(conversationId, next);
     } catch (err) {
       const next = updateLast(withUser, (m) => ({
         ...m,
@@ -548,25 +452,26 @@ export default function CopilotChat() {
             </div>
             <div>
               <div className="font-display text-[14px] font-semibold text-color-text">Cortex Copilot</div>
-              <div className="text-[12px] text-text-faint">Answers are grounded in docs/knowledge/ and cite their source</div>
+              <div className="text-[12px] text-text-faint">Routes each question to a specialist agent, live</div>
             </div>
           </div>
 
-          <div className="flex items-center gap-1 rounded-[var(--radius-control)] p-0.5" style={{ background: "var(--canvas)" }}>
-            {CATEGORY_OPTIONS.map((opt) => (
-              <button
-                key={opt.label}
-                onClick={() => setCategory(opt.value)}
-                className="rounded-[5px] px-2.5 py-1 text-[12px] font-medium transition-colors"
-                style={{
-                  background: category === opt.value ? "var(--surface)" : "transparent",
-                  color: category === opt.value ? "var(--text)" : "var(--text-faint)",
-                  boxShadow: category === opt.value ? "var(--shadow)" : "none",
-                }}
-              >
-                {opt.label}
-              </button>
-            ))}
+          <div className="flex items-center gap-1.5">
+            {(["monitoring", "prediction", "rag"] as const).map((name) => {
+              const meta = agentMeta(name);
+              const Icon = meta.icon;
+              return (
+                <div
+                  key={name}
+                  title={meta.short}
+                  className="hidden items-center gap-1.5 rounded-[var(--radius-control)] px-2 py-1 text-[11px] font-medium sm:flex"
+                  style={{ background: meta.soft, color: meta.color }}
+                >
+                  <Icon className="h-3 w-3" strokeWidth={2} />
+                  {meta.label.replace(" agent", "")}
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -623,27 +528,32 @@ export default function CopilotChat() {
                     >
                       <div
                         className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full"
-                        style={{ background: m.errored ? "var(--crit-soft)" : "var(--accent-soft)" }}
+                        style={{
+                          background: m.errored ? "var(--crit-soft)" : agentMeta(m.agent_used).soft,
+                        }}
                       >
                         {m.errored ? (
                           <TriangleAlert className="h-3 w-3" style={{ color: "var(--crit)" }} strokeWidth={2} />
                         ) : (
-                          <Sparkles className="h-3 w-3" style={{ color: "var(--accent)" }} strokeWidth={1.75} />
+                          (() => {
+                            const Icon = agentMeta(m.agent_used).icon;
+                            return <Icon className="h-3 w-3" style={{ color: agentMeta(m.agent_used).color }} strokeWidth={1.75} />;
+                          })()
                         )}
                       </div>
                       <div className="min-w-0 flex-1">
+                        <ReasoningTrace active={!!m.pending} agentUsed={m.agent_used} elapsedMs={m.elapsedMs} />
                         {m.content ? (
                           m.errored ? (
                             <div className="text-[13.5px] leading-relaxed" style={{ color: "var(--crit)" }}>
                               {m.content}
                             </div>
                           ) : (
-                            <Markdown text={m.content} />
+                            <AgentAnswerPanel agentUsed={m.agent_used} rawData={m.raw_data} answer={m.content} />
                           )
-                        ) : (
+                        ) : m.pending ? (
                           <TypingDots />
-                        )}
-                        {!m.errored && m.sources && <SourceChips sources={m.sources} />}
+                        ) : null}
                       </div>
                     </motion.div>
                   )

@@ -427,3 +427,101 @@ select {
   border-top: 1px solid var(--border-soft);
   margin: 0.9em 0;
 }
+
+/* -- Copilot agent panels (components/CopilotAgentPanels.tsx) ------------ */
+
+.reasoning-trace {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  margin-bottom: 0.4em;
+  font-size: 12px;
+  color: var(--text-faint);
+  min-height: 1.2em;
+}
+.reasoning-trace--done { color: var(--text-faint); }
+
+.agent-panel {
+  margin-top: 0.75em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65em;
+  padding: 0.85em 0.95em;
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+.agent-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+}
+
+.agent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  padding: 0.15em 0.55em;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.agent-stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+  padding: 0.5em 0.6em;
+  border-radius: var(--radius-control);
+  background: var(--canvas);
+  border: 1px solid var(--border-soft);
+}
+.agent-stat-tile__head {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.agent-stat-tile__bar {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+.agent-stat-tile__bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.agent-mini-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5em 0.9em;
+}
+.agent-mini-stat__label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+.agent-mini-stat__value {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-forecast-headline {
+  display: flex;
+  align-items: center;
+  gap: 0.9em;
+}
+.agent-forecast-headline__value {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
