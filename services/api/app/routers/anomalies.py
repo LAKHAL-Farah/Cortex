@@ -1,10 +1,10 @@
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
 from sqlalchemy.orm import Session
-from .. import models
+from .. import models, schemas
 from ..db import get_db
 from ..services import alert_correlation, rca_suggester
 
@@ -45,7 +45,10 @@ def _iso_utc(dt) -> str | None:
 @router.get("")
 def list_anomalies(db: Session = Depends(get_db)):
     """Retourne toutes les anomalies actives (severity != normal)."""
-    rows = db.query(models.AnomalyFlag).filter(models.AnomalyFlag.severity != "normal").all()
+    rows = db.query(models.AnomalyFlag).filter(
+        models.AnomalyFlag.severity != "normal",
+        models.AnomalyFlag.manually_resolved_at.is_(None),
+    ).all()
     return [
         {
             "hostname": r.hostname,
@@ -55,6 +58,7 @@ def list_anomalies(db: Session = Depends(get_db)):
             "severity": r.severity,
             "method": r.method,
             "baseline_n": r.baseline_n,
+            "details": r.details,
             "detected_at": _iso_utc(r.detected_at),
         }
         for r in rows
@@ -83,9 +87,12 @@ def list_anomaly_history(hostname: str | None = None, limit: int = 200, db: Sess
             "severity": r.severity,
             "method": r.method,
             "baseline_n": r.baseline_n,
+            "details": r.details,
             "started_at": _iso_utc(r.started_at),
             "resolved_at": _iso_utc(r.resolved_at),
             "is_active": r.resolved_at is None,
+            "resolution_type": r.resolution_type,
+            "resolution_note": r.resolution_note,
         }
         for r in rows
     ]
@@ -137,9 +144,57 @@ def list_rca_suggestions(db: Session = Depends(get_db)):
         raise _graph_unavailable(exc) from exc
 
 
+@router.post("/{hostname}/{metric_name}/resolve")
+def resolve_anomaly_manually(
+    hostname: str,
+    metric_name: str,
+    payload: schemas.ManualAlertResolution,
+    db: Session = Depends(get_db),
+):
+    """Close an alert from the operator workflow and retain their note."""
+    flag = db.query(models.AnomalyFlag).filter_by(hostname=hostname, metric_name=metric_name).first()
+    if flag is None or flag.severity == "normal" or flag.manually_resolved_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "active alert not found")
+
+    now = datetime.utcnow()
+    note = payload.note.strip()
+    if not note:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "resolution note must not be blank")
+    flag.manually_resolved_at = now
+    flag.resolution_note = note
+    event = db.query(models.AnomalyEvent).filter_by(
+        hostname=hostname, metric_name=metric_name, resolved_at=None
+    ).first()
+    if event is not None:
+        event.resolved_at = now
+        event.resolution_type = "manual"
+        event.resolution_note = note
+    else:
+        # Defensive support for alerts created before event history existed.
+        db.add(models.AnomalyEvent(
+            hostname=flag.hostname,
+            metric_name=flag.metric_name,
+            current_value=flag.current_value,
+            z_score=flag.z_score,
+            severity=flag.severity,
+            method=flag.method,
+            baseline_n=flag.baseline_n,
+            details=flag.details,
+            started_at=flag.detected_at,
+            resolved_at=now,
+            resolution_type="manual",
+            resolution_note=note,
+        ))
+    db.commit()
+    return {"hostname": hostname, "metric_name": metric_name, "resolved_at": _iso_utc(now), "resolution_type": "manual", "resolution_note": note}
+
+
 @router.get("/{hostname}")
 def get_anomaly(hostname: str, db: Session = Depends(get_db)):
-    rows = db.query(models.AnomalyFlag).filter_by(hostname=hostname).all()
+    rows = db.query(models.AnomalyFlag).filter(
+        models.AnomalyFlag.hostname == hostname,
+        models.AnomalyFlag.manually_resolved_at.is_(None),
+    ).all()
     return [
         {
             "metric_name": r.metric_name,
@@ -148,6 +203,7 @@ def get_anomaly(hostname: str, db: Session = Depends(get_db)):
             "severity": r.severity,
             "method": r.method,
             "baseline_n": r.baseline_n,
+            "details": r.details,
             "detected_at": _iso_utc(r.detected_at),
         }
         for r in rows

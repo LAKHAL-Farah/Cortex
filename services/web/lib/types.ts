@@ -53,6 +53,17 @@ export interface LogEntry {
 export type AnomalySeverity = "medium" | "high" | "critical";
 export type AnomalyMethod = "robust_zscore" | "ewma_fallback";
 
+// Story 3.4: extra per-metric context that doesn't fit current_value/
+// z_score alone -- currently only populated for the SSH auth metrics
+// (source_ips behind a failed/successful-login count; triggered_by set
+// to "absolute_threshold" when a fixed floor, not the statistical model,
+// is what raised the severity -- see anomaly_detector.py's
+// SSH_FAILED_ABSOLUTE_THRESHOLDS). null for cpu_usage/ram_usage/etc.
+export interface AnomalyDetails {
+  source_ips?: string[];
+  triggered_by?: string;
+}
+
 export interface AnomalyFlag {
   hostname: string;
   metric_name: string; // e.g. "cpu_usage" | "ram_usage"
@@ -61,6 +72,7 @@ export interface AnomalyFlag {
   severity: AnomalySeverity;
   method: AnomalyMethod;
   baseline_n: number | null; // sample count backing the baseline (null when EWMA fallback)
+  details: AnomalyDetails | null;
   detected_at: string; // ISO 8601
 }
 
@@ -103,6 +115,8 @@ export interface AnomalyEvent {
   started_at: string; // ISO 8601
   resolved_at: string | null; // ISO 8601, null while still active
   is_active: boolean;
+  resolution_type: "automatic" | "manual" | null;
+  resolution_note: string | null;
 }
 
 // --- Alert correlation (Phase 6 -- see routers/anomalies.py's /incidents,

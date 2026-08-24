@@ -84,7 +84,14 @@ class AnomalyFlag(Base):
     severity = Column(String, nullable=False)  # "medium" | "high" | "critical" | "normal"
     method = Column(String, nullable=False, default="robust_zscore")  # "robust_zscore" | "ewma_fallback"
     baseline_n = Column(Integer, nullable=True)  # sample count backing the baseline used (None if EWMA fallback)
+    # Story 3.4: extra per-metric context that doesn't fit a single number --
+    # currently only populated for ssh_failed_logins_5min/ssh_successful_logins_5min
+    # ({"source_ips": [...]}), left null for cpu_usage/ram_usage/etc.
+    details = Column(JSON, nullable=True)
     detected_at = Column(DateTime, default=datetime.utcnow)
+    # Suppresses a still-anomalous signal after an operator resolves it.
+    manually_resolved_at = Column(DateTime, nullable=True)
+    resolution_note = Column(Text, nullable=True)
  
     __table_args__ = (
         UniqueConstraint("hostname", "metric_name", name="uq_anomaly_slot"),
@@ -115,8 +122,12 @@ class AnomalyEvent(Base):
     severity = Column(String, nullable=False)
     method = Column(String, nullable=False, default="robust_zscore")
     baseline_n = Column(Integer, nullable=True)
+    # Same as AnomalyFlag.details -- see its comment.
+    details = Column(JSON, nullable=True)
     started_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)  # NULL while still active
+    resolution_type = Column(String, nullable=True)  # "automatic" | "manual"
+    resolution_note = Column(Text, nullable=True)
 
 
 class EwmaState(Base):

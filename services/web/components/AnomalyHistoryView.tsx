@@ -33,6 +33,7 @@ import {
   SEVERITY_THRESHOLDS,
   METHOD_LABEL,
   formatDetectedAt,
+  formatMetricValue,
   formatDuration,
   formatRelative,
   formatZScore,
@@ -96,6 +97,19 @@ function StatusBadge({ isActive }: { isActive: boolean }) {
       {isActive ? <span className="status-dot" style={{ background: "var(--crit)" }} /> : <CheckCircle2 className="h-3 w-3" strokeWidth={2} />}
       {isActive ? "Still active" : "Resolved"}
     </span>
+  );
+}
+
+function ResolutionDetails({ e }: { e: AnomalyEvent }) {
+  if (e.resolution_type !== "manual" || !e.resolution_note) return null;
+  return (
+    <div className="panel p-4" style={{ borderColor: "var(--ok)" }}>
+      <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--ok)" }}>
+        <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2} />
+        Manually resolved
+      </div>
+      <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-color-text">{e.resolution_note}</p>
+    </div>
   );
 }
 
@@ -223,7 +237,7 @@ function buildEventInsight(e: AnomalyEvent): string {
   if (e.method === "ewma_fallback") {
     const direction = e.z_score >= 0 ? "above" : "below";
 
-    return `${metric} on ${e.hostname} reached ${e.current_value.toFixed(1)}% on ${startedAt}, ${magnitude}σ ${direction} its recent expected level. There was not enough historical data for this weekday and hour, so a short-term EWMA estimate was used. ${status}`;
+    return `${metric} on ${e.hostname} reached ${formatMetricValue(e.metric_name, e.current_value)} on ${startedAt}, ${magnitude}σ ${direction} its recent expected level. There was not enough historical data for this weekday and hour, so a short-term EWMA estimate was used. ${status}`;
   }
 
   const direction =
@@ -231,7 +245,7 @@ function buildEventInsight(e: AnomalyEvent): string {
       ? "well above the normal level expected at this time"
       : "well below the normal level expected at this time";
 
-  return `${metric} on ${e.hostname} reached ${e.current_value.toFixed(1)}% on ${startedAt}, ${direction}. It was ${magnitude}σ from the contextual baseline, based on ${e.baseline_n ?? "—"} historical samples for the same weekday and hour. ${status}`;
+  return `${metric} on ${e.hostname} reached ${formatMetricValue(e.metric_name, e.current_value)} on ${startedAt}, ${direction}. It was ${magnitude}σ from the contextual baseline, based on ${e.baseline_n ?? "—"} historical samples for the same weekday and hour. ${status}`;
 }
 
 function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
@@ -323,7 +337,7 @@ function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
             <>
               <div className="panel p-4">
                 <div className="eyebrow">Peak value</div>
-                <div className="stat-figure mt-1 text-2xl text-color-text">{e.current_value.toFixed(1)}%</div>
+                <div className="stat-figure mt-1 text-2xl text-color-text">{formatMetricValue(e.metric_name, e.current_value)}</div>
                 <div className="mt-3">
                   <ProgressBar value={e.current_value} color={SEVERITY_COLOR[e.severity]} />
                 </div>
@@ -358,6 +372,7 @@ function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
               </div>
             ))}
           </div>
+          <ResolutionDetails e={e} />
         </div>
 
         <div className="flex items-center gap-2 border-t p-4" style={{ borderColor: "var(--border-soft)" }}>
