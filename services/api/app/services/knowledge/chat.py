@@ -15,18 +15,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
+from ..llm_client import LLMConfigError, get_chat_model
 from .embeddings import EmbeddingError, embed_query
 from .qdrant_store import search as qdrant_search
 
 logger = logging.getLogger(__name__)
-
-NVIDIA_NIM_MODEL = os.environ.get("NVIDIA_NIM_MODEL", "nvidia/nemotron-3-super-120b-a12b")
-# ChatNVIDIA defaults to NVIDIA's hosted NIM endpoint (integrate.api.nvidia.com)
-# when base_url is omitted -- only set NVIDIA_NIM_BASE_URL if pointing at a
-# self-hosted NIM container instead (see adr-0005).
-NVIDIA_NIM_BASE_URL = os.environ.get("NVIDIA_NIM_BASE_URL") or None
 
 # Cosine-similarity floor (qdrant_store.search's collection is COSINE
 # distance) below which a retrieved chunk is considered irrelevant rather
@@ -76,8 +70,11 @@ Excerpts:
 
 
 
-class ChatConfigError(RuntimeError):
-    """Raised when NVIDIA_API_KEY (or another required config value) is missing."""
+class ChatConfigError(LLMConfigError):
+    """Raised when NVIDIA_API_KEY (or another required config value) is missing.
+    Subclasses the shared LLMConfigError (services/llm_client.py) so this
+    stays catchable both as the specific ChatConfigError callers here have
+    always expected, and generically alongside every other LLM call site."""
 
 
 @dataclass
@@ -141,26 +138,52 @@ def require_configured() -> None:
     actually needed, i.e. retrieve() returned chunks) so a missing key comes
     back as a normal HTTP error instead of a mid-stream failure after the
     200 and headers are already on the wire."""
-    if not os.environ.get("NVIDIA_API_KEY"):
-        raise ChatConfigError(
-            "NVIDIA_API_KEY is not set -- required to call the NVIDIA NIM chat endpoint"
-        )
+    try:
+        from ..llm_client import require_configured as _require_llm_configured
+
+        _require_llm_configured()
+    except LLMConfigError as exc:
+        raise ChatConfigError(str(exc)) from exc
 
 
-def _client() -> ChatNVIDIA:
-    require_configured()
-    kwargs = {
-        "model": NVIDIA_NIM_MODEL,
-        "api_key": os.environ["NVIDIA_API_KEY"],
-        "temperature": 0.2,
-        # The system prompt now asks for headed, multi-section, elaborated
-        # answers (not one-liners) -- give that enough room to finish a
-        # section instead of getting cut off mid-heading on a long answer.
-        "max_tokens": 1536,
-    }
-    if NVIDIA_NIM_BASE_URL:
-        kwargs["base_url"] = NVIDIA_NIM_BASE_URL
-    return ChatNVIDIA(**kwargs)
+def _client():
+    # The system prompt now asks for headed, multi-section, elaborated
+    # answers (not one-liners) -- give that enough room to finish a
+    # section instead of getting cut off mid-heading on a long answer.
+    try:
+        return get_chat_model(temperature=0.2, max_tokens=1536)
+    except LLMConfigError as exc:
+        raise ChatConfigError(str(exc)) from exc
+
+
+def answer_sync(
+    message: str,
+    history=(),
+    top_k: int = 5,
+    category: str | None = None,
+) -> tuple[str, list[RetrievedChunk]]:
+    """Non-streaming counterpart to retrieve()+stream_answer(), for callers
+    that want one complete answer back instead of an SSE token stream --
+    specifically the agentic RAG node (app/agents/nodes/rag.py), which
+    promotes this exact retrieval+generation logic into the LangGraph
+    orchestrator rather than reimplementing it. Same grounding rules, same
+    system prompt, same LLM client as POST /api/v1/knowledge/chat."""
+    chunks = retrieve(message, top_k=top_k, category=category)
+    if not chunks:
+        return _NO_CONTEXT_ANSWER, chunks
+
+    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(context=_build_context_block(chunks))
+    messages = [SystemMessage(content=system_prompt), *_to_langchain_history(history), HumanMessage(content=message)]
+
+    llm = _client()
+    try:
+        response = llm.invoke(messages)
+    except Exception as exc:
+        logger.exception("NVIDIA NIM chat generation failed")
+        raise ChatConfigError(f"chat generation failed: {exc}") from exc
+
+    text = (response.content or "").strip()
+    return text or _NO_CONTEXT_ANSWER, chunks
 
 
 def stream_answer(

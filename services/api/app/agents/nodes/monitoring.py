@@ -1,61 +1,75 @@
-"""The one agent in v0.1. Wraps the existing Prometheus collector
-(app/services/metrics_collector.py) -- no LLM involved in the data fetch,
-just plain PromQL + arithmetic that's already battle-tested by
-GET /api/v1/dashboard. The only new logic here is resolving which node the
-question is actually about.
+"""Monitoring agent -- current/live status questions. Metrics still come
+straight from Prometheus (app/services/metrics_collector.py, no LLM
+involved in the data fetch, same as v0.1): that data is authoritative and
+an LLM has no business inventing or rounding it.
+
+What the LLM *is* used for, added in v0.2:
+- Resolving which node the question is about (via node_resolver.py), so a
+  partial or misspelled hostname still lands on the right node instead of
+  only matching an exact/verbatim mention.
+- Turning the raw numbers into a natural-language answer, instead of one
+  hand-written f-string that reads identically for every question. If the
+  LLM isn't configured or the call fails, this falls back to that same
+  f-string -- a missing API key degrades the answer's phrasing, never its
+  correctness (the numbers themselves never come from the LLM).
 """
 import logging
-import re
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from ...services.llm_client import LLMConfigError, get_chat_model
 from ...services.metrics_collector import collect_metrics
-from ..state import CortexState, KnownNode
+from ..node_resolver import resolve_node
+from ..state import CortexState
 
 logger = logging.getLogger(__name__)
 
-_HOSTNAME_TOKEN = re.compile(r"[a-z0-9][a-z0-9-]*")
+_SYSTEM_PROMPT = """You are Cortex's monitoring assistant. Answer the user's question about a \
+node's current status using ONLY the metrics given below -- never invent or adjust a number. \
+Keep it to 1-3 sentences, direct and conversational, and call out anything that looks \
+concerning (status not "up", health not "healthy", or any metric above ~90%)."""
 
 
-def _resolve_node(query: str, known_nodes: list[KnownNode]) -> KnownNode | None:
-    """Matches a hostname mentioned in the query against the real node
-    inventory (not a regex-only guess) so "cpu on compute 02" and
-    "compute-02 cpu" both resolve the same way. Returns None -- rather than
-    guessing -- when zero or more than one node matches, since a wrong
-    node's metrics are worse than admitting we're not sure which one was
-    meant.
-    """
-    tokens = set(_HOSTNAME_TOKEN.findall(query))
-    # Normalize "compute 02" -> "compute-02" so a space where the hostname
-    # has a hyphen still matches.
-    normalized_query = "-".join(t for t in re.split(r"\s+", query.strip()) if t)
+def _fallback_summary(node, metrics) -> str:
+    return (
+        f"{node['hostname']} ({node['role']}) is currently at "
+        f"{metrics['cpu_percent']}% CPU, {metrics['memory_percent']}% RAM, "
+        f"{metrics['disk_percent']}% disk -- status: {metrics['status']} "
+        f"({metrics['health']})."
+    )
 
-    matches = [
-        node
-        for node in known_nodes
-        if node["hostname"] in tokens
-        or node["hostname"].replace("-", "") in normalized_query.replace("-", "")
-        or node["hostname"] in query
-    ]
-    # de-dupe while preserving order (a node could satisfy more than one
-    # condition above)
-    seen = set()
-    unique_matches = []
-    for node in matches:
-        if node["hostname"] not in seen:
-            seen.add(node["hostname"])
-            unique_matches.append(node)
 
-    if len(unique_matches) == 1:
-        return unique_matches[0]
-    if len(unique_matches) == 0 and len(known_nodes) == 1:
-        # Only one node registered at all -- no ambiguity possible even
-        # though the query didn't name it explicitly.
-        return known_nodes[0]
-    return None
+def _narrate(query: str, node, metrics) -> str:
+    try:
+        llm = get_chat_model(temperature=0.2)
+        response = llm.invoke(
+            [
+                SystemMessage(content=_SYSTEM_PROMPT),
+                HumanMessage(
+                    content=(
+                        f"Question: {query}\n\n"
+                        f"Node: {node['hostname']} (role: {node['role']})\n"
+                        f"CPU: {metrics['cpu_percent']}%\n"
+                        f"Memory: {metrics['memory_percent']}%\n"
+                        f"Disk: {metrics['disk_percent']}%\n"
+                        f"Status: {metrics['status']}\n"
+                        f"Health: {metrics['health']}"
+                    )
+                ),
+            ]
+        )
+        text = (response.content or "").strip()
+        return text or _fallback_summary(node, metrics)
+    except LLMConfigError:
+        return _fallback_summary(node, metrics)
+    except Exception:
+        logger.exception("monitoring_agent: LLM narration failed, using fallback summary")
+        return _fallback_summary(node, metrics)
 
 
 def monitoring_agent(state: CortexState) -> CortexState:
     known_nodes = state["known_nodes"]
-    node = _resolve_node(state["user_query"], known_nodes)
+    node = resolve_node(state["user_query"], known_nodes)
 
     if node is None:
         available = ", ".join(n["hostname"] for n in known_nodes) or "no nodes registered"
@@ -82,16 +96,11 @@ def monitoring_agent(state: CortexState) -> CortexState:
         state["agent_result"] = None
         return state
 
-    summary = (
-        f"{node['hostname']} ({node['role']}) is currently at "
-        f"{metrics['cpu_percent']}% CPU, {metrics['memory_percent']}% RAM, "
-        f"{metrics['disk_percent']}% disk -- status: {metrics['status']} "
-        f"({metrics['health']})."
-    )
+    summary = _narrate(state["user_query"], node, metrics)
 
     state["agent_result"] = {
         "summary": summary,
-        "confidence": 1.0,  # direct Prometheus pull, no inference involved
+        "confidence": 1.0,  # direct Prometheus pull, no inference involved in the numbers
         "raw_data": metrics,
     }
     state["error"] = None

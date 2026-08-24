@@ -5,14 +5,12 @@ from sqlalchemy.orm import Session
 
 from .. import crud, schemas
 from ..db import get_db
-from ..security import require_api_key
 from ..agents.graph import app_graph
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/api/v1/agents",
     tags=["agents"],
-    dependencies=[Depends(require_api_key)],
 )
 
 
