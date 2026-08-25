@@ -37,8 +37,10 @@ def orchestrate(payload: schemas.AgentOrchestrateQuery, db: Session = Depends(ge
         }
     )
 
+    agent_result = result.get("agent_result") or {}
     return schemas.AgentOrchestrateResponse(
         answer=result["final_answer"],
         agent_used=result["target_agent"],
-        raw_data=(result.get("agent_result") or {}).get("raw_data"),
+        raw_data=agent_result.get("raw_data"),
+        confidence=agent_result.get("confidence"),
     )

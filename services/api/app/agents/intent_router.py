@@ -1,13 +1,13 @@
 """Classifies a question's intent and picks the target agent to handle it.
 
 v0.1 used a hardcoded keyword table (fine with exactly one agent to route
-to). Now that there are three (monitoring / prediction / rag), routing is a
-real classification problem -- "how do we fix X" and "will X run out of
-disk" don't share vocabulary with a fixed keyword list you'd have to keep
-extending by hand. This is an LLM call via LangChain's structured output
-instead: the model reads the question and picks exactly one of the three
-agent names, constrained to that enum so it can't return anything the graph
-doesn't know how to route.
+to). Now that there are four (monitoring / prediction / rag / anomaly),
+routing is a real classification problem -- "how do we fix X" and "will X
+run out of disk" don't share vocabulary with a fixed keyword list you'd
+have to keep extending by hand. This is an LLM call via LangChain's
+structured output instead: the model reads the question and picks exactly
+one of the agent names, constrained to that enum so it can't return
+anything the graph doesn't know how to route.
 
 Falls back to DEFAULT_AGENT only if the LLM isn't configured or the call
 itself fails -- a missing NVIDIA_API_KEY should degrade routing quality,
@@ -23,10 +23,10 @@ from .state import CortexState
 
 logger = logging.getLogger(__name__)
 
-AgentName = Literal["monitoring", "prediction", "rag"]
+AgentName = Literal["monitoring", "prediction", "rag", "anomaly"]
 
-# Safest, cheapest default: a direct status pull, no forecast math or
-# knowledge-base retrieval involved.
+# Safest, cheapest default: a direct status pull, no forecast math,
+# knowledge-base retrieval, or multi-source investigation involved.
 DEFAULT_AGENT: AgentName = "monitoring"
 
 _SYSTEM_PROMPT = """You route a user's infrastructure question to exactly one specialist agent:
@@ -36,6 +36,10 @@ _SYSTEM_PROMPT = """You route a user's infrastructure question to exactly one sp
 the next week", "when will Y hit 90%".
 - rag: how-to / troubleshooting / explanatory questions -- "how do we fix X", "why does Y \
 happen", "what's the procedure for Z", anything about docs, runbooks, or how a system works.
+- anomaly: something is wrong / investigate an incident -- "something's wrong with compute-01", \
+"why is X acting up", "investigate this alert", "is X having an issue" -- questions that need \
+correlating metric and log evidence to figure out what's actually happening, as opposed to a \
+plain current-value read (that's monitoring).
 
 Pick the single best match. If genuinely ambiguous, default to monitoring."""
 

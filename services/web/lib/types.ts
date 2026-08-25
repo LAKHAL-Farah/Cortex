@@ -341,11 +341,11 @@ export interface ChatSource {
 //
 // The router picks exactly one specialist per question (see services/api/
 // app/agents/intent_router.py) and its raw_data shape depends on which one
-// answered -- these three interfaces mirror what routers/agents.py's three
-// agent nodes actually return, used by components/CopilotAgentPanels.tsx
-// to pick a renderer.
+// answered -- these interfaces mirror what routers/agents.py's agent nodes
+// actually return, used by components/CopilotAgentPanels.tsx to pick a
+// renderer.
 
-export type AgentName = "monitoring" | "prediction" | "rag";
+export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly";
 
 // Same live-status shape as LiveMetrics above, just named for clarity at
 // the copilot call site.
@@ -387,11 +387,72 @@ export interface AgentRagData {
   sources: AgentRagSource[];
 }
 
-export type AgentRawData = AgentMonitoringData | AgentPredictionData | AgentRagData | Record<string, unknown>;
+// Anomaly agent (v0.4, services/api/app/agents/nodes/anomaly.py) -- mirrors
+// its two sub-orchestration steps exactly, so the panel can render each
+// piece of evidence separately before showing the merged narrative's
+// confidence. `data` on the metric signal is one of two shapes depending on
+// which tier supplied it (`source`), see anomaly.py's _check_metrics.
+export interface AgentAnomalyFlagSignal {
+  source: "anomaly_flags";
+  metric_name: string;
+  current_value: number;
+  z_score: number;
+  severity: AnomalySeverity;
+  method: AnomalyMethod;
+  detected_at: string | null;
+  other_flagged_metrics: string[];
+}
+
+export interface AgentAnomalyLiveSignal {
+  source: "live_metrics";
+  cpu_percent: number;
+  memory_percent: number;
+  disk_percent: number;
+  status: string;
+  health: string;
+}
+
+export interface AgentAnomalyMetricSignal {
+  has_signal: boolean;
+  detail: string;
+  data: AgentAnomalyFlagSignal | AgentAnomalyLiveSignal | null;
+}
+
+export interface AgentAnomalyLogEntry {
+  ts: number; // unix ms
+  line: string;
+  service: string | null;
+}
+
+export interface AgentAnomalyLogSignal {
+  has_signal: boolean;
+  detail: string;
+  entries: AgentAnomalyLogEntry[];
+}
+
+export interface AgentAnomalyData {
+  hostname: string;
+  role: string;
+  metric_signal: AgentAnomalyMetricSignal;
+  log_signal: AgentAnomalyLogSignal;
+  // Heuristic root-cause hypothesis derived from the two signals above
+  // (services/api/app/agents/nodes/anomaly.py::_hypothesize_cause) --
+  // always a hedged guess, never a confirmed diagnosis. Null when nothing
+  // matched.
+  likely_cause: string | null;
+}
+
+export type AgentRawData =
+  | AgentMonitoringData
+  | AgentPredictionData
+  | AgentRagData
+  | AgentAnomalyData
+  | Record<string, unknown>;
 
 export interface AgentOrchestrateResponse {
   answer: string;
   agent_used: AgentName | string;
   raw_data: AgentRawData | null;
+  confidence: number | null;
 }
 

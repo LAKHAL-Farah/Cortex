@@ -300,6 +300,11 @@ class AgentOrchestrateResponse(BaseModel):
     answer: str
     agent_used: str
     raw_data: dict | None = None
+    # Every agent already sets AgentResult.confidence (see agents/state.py) --
+    # this was computed and then silently dropped until the anomaly agent's
+    # merged-evidence score (nodes/anomaly.py) made "nothing surfaces this"
+    # worth fixing for every agent, not just that one.
+    confidence: float | None = None
 
 
 

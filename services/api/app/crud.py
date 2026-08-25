@@ -24,6 +24,22 @@ def get_node_by_ip(db: Session, ip_address: str) -> models.Node | None:
 def get_node_by_hostname(db: Session, hostname: str) -> models.Node | None:
     return db.scalar(select(models.Node).where(models.Node.hostname == hostname))
 
+
+def list_open_anomaly_flags(db: Session, hostname: str) -> list[models.AnomalyFlag]:
+    """Currently-open (non-"normal") AnomalyFlag rows for one host.
+
+    Used by the anomaly agent's metric-check sub-step (app/agents/nodes/
+    anomaly.py) to read the same already-scored signal GET /api/v1/anomalies
+    surfaces, instead of re-deriving a z-score from scratch inside the
+    graph node.
+    """
+    return (
+        db.query(models.AnomalyFlag)
+        .filter(models.AnomalyFlag.hostname == hostname, models.AnomalyFlag.severity != "normal")
+        .all()
+    )
+
+
 def create_node(db: Session, payload: schemas.NodeCreate) -> models.Node:
     node = models.Node(**payload.model_dump())
     db.add(node)

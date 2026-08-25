@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import Link from "next/link";
 import {
   Activity,
   AlertTriangle,
@@ -11,12 +12,16 @@ import {
   CheckCircle2,
   Clock,
   Cpu,
+  ExternalLink,
   FileText,
   Gauge,
   HardDrive,
+  Lightbulb,
   Loader2,
   MemoryStick,
   Minus,
+  ScrollText,
+  ShieldAlert,
   Sparkles,
   TrendingDown,
   TrendingUp,
@@ -34,6 +39,7 @@ import {
   YAxis,
 } from "recharts";
 import type {
+  AgentAnomalyData,
   AgentMonitoringData,
   AgentName,
   AgentPredictionData,
@@ -41,6 +47,8 @@ import type {
   AgentRawData,
   ForecastPoint,
 } from "@/lib/types";
+import { formatRelativeTime } from "@/lib/logs";
+import { metricLabel, SEVERITY_COLOR, SEVERITY_LABEL, SEVERITY_SOFT } from "@/lib/anomalies";
 
 // ---------------------------------------------------------------------------
 // Agent identity -- one accent color + icon per specialist (see services/api
@@ -73,6 +81,13 @@ export const AGENT_META: Record<
     icon: BookOpen,
     color: "var(--chart-2)",
     soft: "rgba(59,126,196,0.12)",
+  },
+  anomaly: {
+    label: "Anomaly agent",
+    short: "Incident investigation",
+    icon: ShieldAlert,
+    color: "var(--crit)",
+    soft: "var(--crit-soft)",
   },
 };
 
@@ -511,6 +526,183 @@ function RagPanel({ data }: { data: AgentRagData }) {
 }
 
 // ---------------------------------------------------------------------------
+// Anomaly panel -- the two sub-orchestration signals (metric-check +
+// log-check, see services/api/app/agents/nodes/anomaly.py) rendered as two
+// evidence cards, plus the merged confidence score. Unlike the other three
+// panels this one shows its work: the narrative in the answer text already
+// says what was found, this panel is where you can see *why* -- the actual
+// flag/reading and the actual log line(s) it was corroborated against.
+// ---------------------------------------------------------------------------
+
+function confidenceTone(confidence: number) {
+  if (confidence >= 0.85) return { color: "var(--crit)", soft: "var(--crit-soft)", label: "High confidence" };
+  if (confidence >= 0.5) return { color: "var(--warn)", soft: "var(--warn-soft)", label: "Possible incident" };
+  return { color: "var(--ok)", soft: "var(--ok-soft)", label: "Low confidence" };
+}
+
+function AnomalyMetricCard({ signal }: { signal: AgentAnomalyData["metric_signal"] }) {
+  const data = signal.data;
+
+  if (!signal.has_signal || !data) {
+    return (
+      <div className="agent-anomaly-subcard">
+        <div className="agent-anomaly-subcard__head" style={{ color: "var(--ok)" }}>
+          <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2} />
+          Metric check
+        </div>
+        <p className="text-[12px] leading-relaxed text-text-muted">{signal.detail}</p>
+      </div>
+    );
+  }
+
+  if (data.source === "anomaly_flags") {
+    return (
+      <div className="agent-anomaly-subcard">
+        <div className="agent-anomaly-subcard__head">
+          <Gauge className="h-3.5 w-3.5" style={{ color: "var(--text-muted)" }} strokeWidth={1.9} />
+          Metric check
+          <span
+            className="agent-pill ml-auto"
+            style={{ color: SEVERITY_COLOR[data.severity], background: SEVERITY_SOFT[data.severity] }}
+          >
+            {SEVERITY_LABEL[data.severity]}
+          </span>
+        </div>
+        <div className="agent-mini-stat-grid">
+          <MiniStat label="Metric" value={metricLabel(data.metric_name)} />
+          <MiniStat label="Current value" value={data.current_value.toFixed(1)} />
+          <MiniStat label="Z-score" value={`${data.z_score.toFixed(1)}σ`} />
+          <MiniStat
+            label="Detected"
+            value={data.detected_at ? formatRelativeTime(new Date(data.detected_at).getTime()) : "—"}
+          />
+        </div>
+        {data.other_flagged_metrics.length > 0 && (
+          <p className="text-[11px] text-text-faint">
+            Also flagged: {data.other_flagged_metrics.map(metricLabel).join(", ")}
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  // Live-threshold fallback tier -- reuse the same StatBar tiles the
+  // monitoring panel uses, since it's the same live reading.
+  return (
+    <div className="agent-anomaly-subcard">
+      <div className="agent-anomaly-subcard__head">
+        <Gauge className="h-3.5 w-3.5" style={{ color: "var(--text-muted)" }} strokeWidth={1.9} />
+        Metric check
+        <span
+          className="agent-pill ml-auto"
+          style={{
+            color: data.health === "healthy" ? "var(--ok)" : "var(--warn)",
+            background: data.health === "healthy" ? "var(--ok-soft)" : "var(--warn-soft)",
+          }}
+        >
+          live reading
+        </span>
+      </div>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <StatBar label="CPU" value={data.cpu_percent} icon={Cpu} />
+        <StatBar label="Memory" value={data.memory_percent} icon={MemoryStick} />
+        <StatBar label="Disk" value={data.disk_percent} icon={HardDrive} />
+      </div>
+      <p className="text-[11px] text-text-faint">Not yet scored by the anomaly detector -- a live threshold read.</p>
+    </div>
+  );
+}
+
+function AnomalyLogCard({ signal, hostname }: { signal: AgentAnomalyData["log_signal"]; hostname: string }) {
+  return (
+    <div className="agent-anomaly-subcard">
+      <div className="agent-anomaly-subcard__head">
+        <ScrollText className="h-3.5 w-3.5" style={{ color: "var(--text-muted)" }} strokeWidth={1.9} />
+        Correlated logs
+        {signal.has_signal && (
+          <span className="agent-pill" style={{ color: "var(--crit)", background: "var(--crit-soft)" }}>
+            {signal.entries.length} found
+          </span>
+        )}
+        <Link
+          href={`/logs?host=${encodeURIComponent(hostname)}&minutes=60`}
+          className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium no-underline transition-colors hover:text-color-text"
+          style={{ color: "var(--accent)" }}
+        >
+          Check all logs
+          <ExternalLink className="h-3 w-3" strokeWidth={2} />
+        </Link>
+      </div>
+
+      {signal.has_signal ? (
+        <div>
+          {signal.entries.map((entry, i) => (
+            <div key={`${entry.ts}-${i}`} className="agent-anomaly-log-row">
+              <Clock className="mt-[2px] h-3 w-3 shrink-0" style={{ color: "var(--text-faint)" }} strokeWidth={1.75} />
+              <span className="shrink-0 whitespace-nowrap text-text-faint">{formatRelativeTime(entry.ts)}</span>
+              {entry.service && (
+                <span
+                  className="shrink-0 rounded px-1 py-[1px] text-[10.5px] font-medium"
+                  style={{ background: "var(--border-soft)", color: "var(--text-muted)" }}
+                >
+                  {entry.service}
+                </span>
+              )}
+              <span className="agent-anomaly-log-row__line" title={entry.line}>
+                {entry.line}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-[12px] leading-relaxed text-text-muted">{signal.detail}</p>
+      )}
+    </div>
+  );
+}
+
+function AnomalyPanel({ data, confidence }: { data: AgentAnomalyData; confidence?: number | null }) {
+  const tone = confidenceTone(confidence ?? 0);
+
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--crit) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <ShieldAlert className="h-3.5 w-3.5" style={{ color: "var(--crit)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">{data.hostname}</span>
+          <span className="text-[11px] text-text-muted">{data.role}</span>
+        </div>
+        {typeof confidence === "number" && (
+          <span className="agent-pill" style={{ color: tone.color, background: tone.soft }}>
+            {tone.label} · {Math.round(confidence * 100)}%
+          </span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <AnomalyMetricCard signal={data.metric_signal} />
+        <AnomalyLogCard signal={data.log_signal} hostname={data.hostname} />
+      </div>
+
+      {data.likely_cause && (
+        <div
+          className="flex items-start gap-2 rounded-[var(--radius-control)] px-2.5 py-2 text-[12px] leading-relaxed"
+          style={{ background: "var(--warn-soft)", color: "var(--text-dim)" }}
+        >
+          <Lightbulb className="mt-[1px] h-3.5 w-3.5 shrink-0" style={{ color: "var(--warn)" }} strokeWidth={2} />
+          <span>
+            <span className="font-semibold" style={{ color: "var(--warn)" }}>
+              Possible cause (unconfirmed):
+            </span>{" "}
+            {data.likely_cause}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Word-by-word reveal + matching skeleton -- the orchestrator answers in one
 // shot (routers/agents.py has no token stream yet), so this fakes the feel
 // of one client-side: the markdown answer types in word by word, and the
@@ -616,6 +808,28 @@ function AgentPanelSkeleton({ agentUsed }: { agentUsed?: string }) {
       </div>
     );
   }
+  if (agentUsed === "anomaly") {
+    return (
+      <div
+        className="agent-panel"
+        style={{ borderColor: "color-mix(in srgb, var(--crit) 16%, var(--border))" }}
+      >
+        <div className="flex items-center justify-between">
+          <SkeletonBar width="30%" />
+          <SkeletonBar width="22%" />
+        </div>
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          {[0, 1].map((i) => (
+            <div
+              key={i}
+              className="h-[110px] animate-pulse rounded-[var(--radius-control)]"
+              style={{ background: "var(--canvas)", border: "1px solid var(--border-soft)" }}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="reasoning-trace">
       <Loader2 className="h-3 w-3 animate-spin" style={{ color: meta.color }} strokeWidth={2} />
@@ -633,10 +847,12 @@ export function AgentAnswerPanel({
   agentUsed,
   rawData,
   answer,
+  confidence,
 }: {
   agentUsed?: string;
   rawData?: AgentRawData | null;
   answer: string;
+  confidence?: number | null;
 }) {
   return (
     <div className="min-w-0">
@@ -644,6 +860,9 @@ export function AgentAnswerPanel({
       {agentUsed === "monitoring" && rawData && <MonitoringPanel data={rawData as AgentMonitoringData} />}
       {agentUsed === "prediction" && rawData && <PredictionPanel data={rawData as AgentPredictionData} />}
       {agentUsed === "rag" && rawData && <RagPanel data={rawData as AgentRagData} />}
+      {agentUsed === "anomaly" && rawData && (
+        <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />
+      )}
     </div>
   );
 }
@@ -659,17 +878,19 @@ export function AnimatedAgentAnswer({
   answer,
   animate,
   onSettled,
+  confidence,
 }: {
   agentUsed?: string;
   rawData?: AgentRawData | null;
   answer: string;
   animate: boolean;
   onSettled?: () => void;
+  confidence?: number | null;
 }) {
   const { visible, finished } = useTypewriter(answer, animate, onSettled);
 
   if (!animate) {
-    return <AgentAnswerPanel agentUsed={agentUsed} rawData={rawData} answer={answer} />;
+    return <AgentAnswerPanel agentUsed={agentUsed} rawData={rawData} answer={answer} confidence={confidence} />;
   }
 
   const showPanel = finished && !!rawData;
@@ -682,6 +903,7 @@ export function AnimatedAgentAnswer({
           {agentUsed === "monitoring" && <MonitoringPanel data={rawData as AgentMonitoringData} />}
           {agentUsed === "prediction" && <PredictionPanel data={rawData as AgentPredictionData} />}
           {agentUsed === "rag" && <RagPanel data={rawData as AgentRagData} />}
+          {agentUsed === "anomaly" && <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />}
         </motion.div>
       )}
     </div>

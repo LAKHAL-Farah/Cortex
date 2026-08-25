@@ -17,6 +17,10 @@ export interface StoredMessage extends ChatMessage {
   // to plain markdown in that case.
   agent_used?: AgentName | string;
   raw_data?: AgentRawData | null;
+  // Merged-evidence score every agent sets (AgentResult.confidence, see
+  // services/api/app/agents/state.py) and the orchestrate endpoint now
+  // forwards -- most visibly used by the anomaly agent's panel.
+  confidence?: number | null;
 }
 
 export interface ConversationSummary {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import useSWR from "swr";
 import {
   Search,
@@ -120,10 +121,18 @@ function LogRow({ entry, query, minutes }: { entry: LogEntry; query: string; min
 }
 
 export default function LogViewer() {
-  const [host, setHost] = useState("all");
+  // Deep-link support: the anomaly agent's "Check all logs" button (see
+  // components/CopilotAgentPanels.tsx) links here with ?host=&minutes= so
+  // the viewer opens already scoped to the node/window it was investigating,
+  // instead of the investigator having to re-select the same host by hand.
+  const searchParams = useSearchParams();
+  const initialHost = searchParams.get("host") || "all";
+  const initialMinutes = Number(searchParams.get("minutes")) || 15;
+
+  const [host, setHost] = useState(initialHost);
   const [source, setSource] = useState("all");
   const [level, setLevel] = useState("all");
-  const [minutes, setMinutes] = useState(15);
+  const [minutes, setMinutes] = useState(initialMinutes);
   const [live, setLive] = useState(true);
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");

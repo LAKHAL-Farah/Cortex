@@ -301,6 +301,7 @@ export default function CopilotChat() {
         content: data.answer ?? "",
         agent_used: data.agent_used,
         raw_data: data.raw_data ?? null,
+        confidence: data.confidence ?? null,
         elapsedMs,
         pending: false,
       }));
@@ -480,6 +481,7 @@ export default function CopilotChat() {
                               answer={m.content}
                               animate={!m.animated}
                               onSettled={() => markAnimated(i)}
+                              confidence={m.confidence}
                             />
                           )
                         ) : m.pending ? (

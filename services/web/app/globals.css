@@ -525,3 +525,44 @@ select {
   font-weight: 600;
   color: var(--text);
 }
+
+/* Anomaly panel -- one card per sub-orchestration step (metric-check,
+   log-check), see components/CopilotAgentPanels.tsx's AnomalyPanel. */
+.agent-anomaly-subcard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55em;
+  padding: 0.65em 0.75em;
+  border-radius: var(--radius-control);
+  background: var(--canvas);
+  border: 1px solid var(--border-soft);
+}
+.agent-anomaly-subcard__head {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.agent-anomaly-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55em;
+  padding: 0.3em 0;
+  border-top: 1px solid var(--border-soft);
+  font-size: 11.5px;
+}
+.agent-anomaly-log-row:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.agent-anomaly-log-row__line {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text-dim);
+}
