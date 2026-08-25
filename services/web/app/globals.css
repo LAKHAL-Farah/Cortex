@@ -427,3 +427,62 @@ select {
   border-top: 1px solid var(--border-soft);
   margin: 0.9em 0;
 }
+
+/* ---- Public landing page (app/page.tsx + components/landing/*) ----
+   Scoped to the marketing route only, not the app shell -- .panel (8px
+   radius, opaque surface) stays the language for the cockpit itself.
+   The landing page wants a more "product teaser" treatment: frosted glass,
+   extra-rounded corners, a cursor-tracked highlight. It still pulls every
+   color from the same tokens above (--surface/--border/--accent/--role-*)
+   so it reads as the same product, not a different microsite bolted on. */
+@layer components {
+  .landing-glass {
+    position: relative;
+    background: color-mix(in srgb, var(--surface) 72%, transparent);
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+    border-radius: 22px;
+    box-shadow: var(--shadow-hover);
+    overflow: hidden;
+  }
+  /* cursor-tracked radial highlight, position set inline via --mx/--my */
+  .landing-glass::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(
+      260px circle at var(--mx, 50%) var(--my, 50%),
+      color-mix(in srgb, var(--accent) 12%, transparent),
+      transparent 70%
+    );
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    pointer-events: none;
+  }
+  .landing-glass:hover::before {
+    opacity: 1;
+  }
+}
+
+.landing-canvas {
+  background:
+    radial-gradient(ellipse 900px 560px at 12% -8%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 60%),
+    radial-gradient(ellipse 760px 620px at 92% 6%, color-mix(in srgb, var(--medium) 14%, transparent), transparent 55%),
+    radial-gradient(ellipse 900px 700px at 50% 105%, color-mix(in srgb, var(--role-storage) 8%, transparent), transparent 60%),
+    var(--canvas);
+}
+
+.landing-ticker-track {
+  animation: landing-scroll 34s linear infinite;
+}
+@keyframes landing-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-ticker-track {
+    animation: none;
+  }
+}
