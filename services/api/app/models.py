@@ -280,18 +280,20 @@ class QuotaAlert(Base):
 class Conversation(Base):
     """One Copilot chat thread (adr-0005's knowledge chat is stateless per
     request -- this is what turns that into something a user can leave and
-    come back to). Scoped by `client_id`, an anonymous per-browser UUID the
-    frontend generates and sends as X-Client-Id (see security.get_client_id)
-    rather than a real account -- there's no login system in Cortex yet, so
-    this is the same "shared secret" trust model the rest of the API already
-    uses for X-API-Key, just one level more granular. Copying that client_id
-    into another browser's storage is how a user "syncs" their history
-    across devices without Cortex needing real auth.
+    come back to). Scoped by `user_id`, the logged-in account (app/auth.py)
+    that started the thread -- history now follows the account rather than
+    a per-browser id, so it shows up the same way on any device that account
+    logs into. (This replaced an earlier client_id/X-Client-Id scheme from
+    before Cortex had real accounts; see migration b1c2d3e4f5a6's successor
+    for the cutover, which drops any conversations that predate it since an
+    anonymous browser id can't be attributed to a user after the fact.)
     """
     __tablename__ = "conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    client_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="New conversation")
     # Mirrors ChatQuery.category (adr-0005) -- which docs/knowledge/ slice
     # this thread's questions were scoped to, so resuming a conversation

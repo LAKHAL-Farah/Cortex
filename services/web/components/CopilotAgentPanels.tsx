@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -511,9 +511,124 @@ function RagPanel({ data }: { data: AgentRagData }) {
 }
 
 // ---------------------------------------------------------------------------
+// Word-by-word reveal + matching skeleton -- the orchestrator answers in one
+// shot (routers/agents.py has no token stream yet), so this fakes the feel
+// of one client-side: the markdown answer types in word by word, and the
+// agent-specific panel underneath sits in as a pulsing skeleton until the
+// text finishes, then fades into the real stat tiles / chart / sources.
+// ---------------------------------------------------------------------------
+
+/** Splits on whitespace while keeping the whitespace as its own token (via
+ * a capturing group), so `tokens.slice(0, n).join("")` reproduces the
+ * original spacing exactly -- no join-separator guessing needed. */
+function useTypewriter(text: string, active: boolean, onDone?: () => void) {
+  const tokens = useMemo(() => text.split(/(\s+)/), [text]);
+  const [count, setCount] = useState(active ? 0 : tokens.length);
+
+  useEffect(() => {
+    if (!active) return;
+    if (tokens.length === 0) {
+      onDone?.();
+      return;
+    }
+    // Aim for a consistent ~1.1s total regardless of answer length, clamped
+    // to a per-token pace that still reads as "typing" rather than a blur
+    // on very long answers or a crawl on very short ones.
+    const perToken = Math.min(28, Math.max(8, 1100 / tokens.length));
+    let i = 0;
+    const id = setInterval(() => {
+      i += 1;
+      setCount(i);
+      if (i >= tokens.length) {
+        clearInterval(id);
+        onDone?.();
+      }
+    }, perToken);
+    return () => clearInterval(id);
+    // Only re-run when the text identity or active flag actually changes --
+    // onDone is a fresh closure every render and isn't part of the timing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tokens, active]);
+
+  return { visible: tokens.slice(0, count).join(""), finished: count >= tokens.length };
+}
+
+function SkeletonBar({ width = "100%" }: { width?: string }) {
+  return (
+    <div
+      className="h-[10px] animate-pulse rounded-full"
+      style={{ width, background: "var(--border-soft)" }}
+    />
+  );
+}
+
+function AgentPanelSkeleton({ agentUsed }: { agentUsed?: string }) {
+  const meta = agentMeta(agentUsed);
+  if (agentUsed === "rag") {
+    return (
+      <div className="mt-2.5 flex flex-wrap gap-1.5">
+        {[110, 92, 68].map((w, i) => (
+          <div
+            key={i}
+            className="h-[26px] animate-pulse rounded-[var(--radius-control)]"
+            style={{ width: w, background: "var(--canvas)", border: "1px solid var(--border-soft)" }}
+          />
+        ))}
+      </div>
+    );
+  }
+  if (agentUsed === "prediction") {
+    return (
+      <div
+        className="agent-panel"
+        style={{ borderColor: "color-mix(in srgb, var(--medium) 16%, var(--border))" }}
+      >
+        <div className="flex items-center justify-between">
+          <SkeletonBar width="38%" />
+          <SkeletonBar width="20%" />
+        </div>
+        <div
+          className="h-[200px] animate-pulse rounded-[var(--radius-control)]"
+          style={{ background: "var(--canvas)" }}
+        />
+      </div>
+    );
+  }
+  if (agentUsed === "monitoring") {
+    return (
+      <div
+        className="agent-panel"
+        style={{ borderColor: "color-mix(in srgb, var(--ok) 16%, var(--border))" }}
+      >
+        <div className="flex items-center justify-between">
+          <SkeletonBar width="34%" />
+          <SkeletonBar width="16%" />
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {[0, 1, 2, 3].map((i) => (
+            <div
+              key={i}
+              className="h-[46px] animate-pulse rounded-[var(--radius-control)]"
+              style={{ background: "var(--canvas)", border: "1px solid var(--border-soft)" }}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="reasoning-trace">
+      <Loader2 className="h-3 w-3 animate-spin" style={{ color: meta.color }} strokeWidth={2} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Dispatcher -- answer text (always) plus whichever panel matches agent_used.
 // ---------------------------------------------------------------------------
 
+/** Static render -- full answer + panel, no animation. Used for messages
+ * loaded from history (they've already "arrived"). */
 export function AgentAnswerPanel({
   agentUsed,
   rawData,
@@ -529,6 +644,46 @@ export function AgentAnswerPanel({
       {agentUsed === "monitoring" && rawData && <MonitoringPanel data={rawData as AgentMonitoringData} />}
       {agentUsed === "prediction" && rawData && <PredictionPanel data={rawData as AgentPredictionData} />}
       {agentUsed === "rag" && rawData && <RagPanel data={rawData as AgentRagData} />}
+    </div>
+  );
+}
+
+/** Live render -- types the answer in word by word, holding a matching
+ * skeleton over the agent panel until the text finishes, then fades the
+ * real panel in. `animate` is false for anything not freshly arrived
+ * (history reloads, conversation switches), which skips straight to the
+ * static end state via AgentAnswerPanel instead. */
+export function AnimatedAgentAnswer({
+  agentUsed,
+  rawData,
+  answer,
+  animate,
+  onSettled,
+}: {
+  agentUsed?: string;
+  rawData?: AgentRawData | null;
+  answer: string;
+  animate: boolean;
+  onSettled?: () => void;
+}) {
+  const { visible, finished } = useTypewriter(answer, animate, onSettled);
+
+  if (!animate) {
+    return <AgentAnswerPanel agentUsed={agentUsed} rawData={rawData} answer={answer} />;
+  }
+
+  const showPanel = finished && !!rawData;
+  return (
+    <div className="min-w-0">
+      <Markdown text={visible} />
+      {!showPanel && rawData && <AgentPanelSkeleton agentUsed={agentUsed} />}
+      {showPanel && (
+        <motion.div initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
+          {agentUsed === "monitoring" && <MonitoringPanel data={rawData as AgentMonitoringData} />}
+          {agentUsed === "prediction" && <PredictionPanel data={rawData as AgentPredictionData} />}
+          {agentUsed === "rag" && <RagPanel data={rawData as AgentRagData} />}
+        </motion.div>
+      )}
     </div>
   );
 }

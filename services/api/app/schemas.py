@@ -223,10 +223,10 @@ class ChatSource(BaseModel):
 
 # --------------------------------------------------------------------------
 # Copilot conversation history -- server-side persistence of Copilot threads,
-# scoped by the anonymous X-Client-Id header (see app.security.get_client_id)
-# rather than a real account, since Cortex has no login system yet. Reuses
-# ChatRole/ChatSource above since a stored message is just a chat turn plus
-# the bookkeeping (errored, position) needed to replay a transcript.
+# scoped by the logged-in account (see routers/conversations.py, which reads
+# user_id off Depends(get_current_user)). Reuses ChatRole/ChatSource above
+# since a stored message is just a chat turn plus the bookkeeping (errored,
+# position) needed to replay a transcript.
 # --------------------------------------------------------------------------
 
 class ConversationMessageIn(BaseModel):

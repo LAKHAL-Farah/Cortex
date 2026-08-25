@@ -109,28 +109,31 @@ def list_recent_topology_sync_runs(db: Session, sync_type: str, limit: int = 5) 
 
 # --------------------------------------------------------------------------
 # Copilot conversation history -- server-side counterpart to
-# lib/copilotHistory.ts's localStorage store. Every function below is
-# scoped by client_id so one browser's history is never visible to another
-# (see app.security.get_client_id).
+# lib/copilotHistory.ts's fetch wrapper. Every function below is scoped by
+# user_id (the logged-in account, see app.auth.get_current_user) so one
+# account's history is never visible to another, and following the account
+# means it shows up the same way from any device that account logs into.
 # --------------------------------------------------------------------------
 
-def list_conversations(db: Session, client_id: str) -> list[models.Conversation]:
+def list_conversations(db: Session, user_id: uuid.UUID) -> list[models.Conversation]:
     return db.scalars(
         select(models.Conversation)
-        .where(models.Conversation.client_id == client_id)
+        .where(models.Conversation.user_id == user_id)
         .order_by(models.Conversation.updated_at.desc())
     ).all()
 
 
-def get_conversation(db: Session, client_id: str, conversation_id: uuid.UUID) -> models.Conversation | None:
+def get_conversation(db: Session, user_id: uuid.UUID, conversation_id: uuid.UUID) -> models.Conversation | None:
     return db.scalar(
         select(models.Conversation)
-        .where(models.Conversation.id == conversation_id, models.Conversation.client_id == client_id)
+        .where(models.Conversation.id == conversation_id, models.Conversation.user_id == user_id)
     )
 
 
-def create_conversation(db: Session, client_id: str, payload: schemas.ConversationCreate) -> models.Conversation:
-    conversation = models.Conversation(client_id=client_id, **payload.model_dump())
+def create_conversation(
+    db: Session, user_id: uuid.UUID, payload: schemas.ConversationCreate
+) -> models.Conversation:
+    conversation = models.Conversation(user_id=user_id, **payload.model_dump())
     db.add(conversation)
     db.commit()
     db.refresh(conversation)

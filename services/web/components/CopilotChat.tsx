@@ -4,9 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ArrowUp,
-  Check,
-  Copy,
-  Link2,
   MessageSquarePlus,
   MessagesSquare,
   Sparkles,
@@ -14,7 +11,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import type { AgentOrchestrateResponse } from "@/lib/types";
-import { AgentAnswerPanel, agentMeta, ReasoningTrace } from "@/components/CopilotAgentPanels";
+import { AnimatedAgentAnswer, agentMeta, ReasoningTrace } from "@/components/CopilotAgentPanels";
 import {
   type Conversation,
   type ConversationSummary,
@@ -22,10 +19,8 @@ import {
   createConversation as createRemoteConversation,
   deleteConversation as deleteRemoteConversation,
   fetchConversation,
-  getClientId,
   listConversations,
   replaceConversation,
-  setClientId,
   titleFromMessage,
 } from "@/lib/copilotHistory";
 
@@ -33,6 +28,9 @@ interface DisplayMessage extends StoredMessage {
   pending?: boolean; // true while the orchestrator call is in flight
   startedAt?: number; // client-side only, used to time the reasoning trace
   elapsedMs?: number; // client-side only, shown once the trace collapses
+  animated?: boolean; // client-side only -- true once this turn has already
+  // played its typewriter/skeleton reveal, so switching conversations and
+  // back doesn't replay it. History loaded from the server starts true.
 }
 
 // One example per specialist agent (see services/api/app/agents/) so first-
@@ -70,82 +68,6 @@ function relativeTime(iso: string) {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function SyncCodePanel({ onClose }: { onClose: () => void }) {
-  const [code, setCode] = useState(() => getClientId());
-  const [pasted, setPasted] = useState("");
-  const [copied, setCopied] = useState(false);
-
-  async function copyCode() {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // clipboard permissions denied -- the code is still selectable text
-    }
-  }
-
-  function adoptPasted() {
-    if (!pasted.trim()) return;
-    setClientId(pasted);
-    window.location.reload();
-  }
-
-  return (
-    <div
-      className="absolute inset-x-2 bottom-[52px] z-10 rounded-[var(--radius-panel)] p-3 text-[12px]"
-      style={{ border: "1px solid var(--border)", background: "var(--surface)", boxShadow: "var(--shadow-hover)" }}
-    >
-      <div className="mb-1.5 flex items-center justify-between">
-        <span className="font-medium text-color-text">Sync across devices</span>
-        <button onClick={onClose} className="text-text-muted hover:text-text-dim">
-          ✕
-        </button>
-      </div>
-      <p className="mb-2 text-[11.5px] leading-relaxed text-text-faint">
-        This code identifies your history. Copy it into Copilot on another device to see the same conversations there.
-      </p>
-      <div className="mb-2 flex items-center gap-1.5">
-        <code
-          className="flex-1 truncate rounded-[var(--radius-control)] px-2 py-1 font-mono text-[11px]"
-          style={{ background: "var(--canvas)", border: "1px solid var(--border-soft)", color: "var(--text-dim)" }}
-        >
-          {code}
-        </code>
-        <button
-          onClick={copyCode}
-          aria-label="Copy sync code"
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px]"
-          style={{ background: "var(--canvas)" }}
-        >
-          {copied ? (
-            <Check className="h-3 w-3" style={{ color: "var(--ok)" }} strokeWidth={2} />
-          ) : (
-            <Copy className="h-3 w-3 text-text-muted" strokeWidth={1.75} />
-          )}
-        </button>
-      </div>
-      <div className="flex items-center gap-1.5">
-        <input
-          value={pasted}
-          onChange={(e) => setPasted(e.target.value)}
-          placeholder="Paste a code from another device…"
-          className="flex-1 rounded-[var(--radius-control)] px-2 py-1 text-[11px] outline-none"
-          style={{ background: "var(--canvas)", border: "1px solid var(--border-soft)", color: "var(--text)" }}
-        />
-        <button
-          onClick={adoptPasted}
-          disabled={!pasted.trim()}
-          className="shrink-0 rounded-[var(--radius-control)] px-2 py-1 text-[11px] font-medium text-white disabled:opacity-40"
-          style={{ background: "var(--accent)" }}
-        >
-          Use
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function HistoryRail({
   conversations,
   activeId,
@@ -161,8 +83,6 @@ function HistoryRail({
   onNew: () => void;
   onDelete: (id: string) => void;
 }) {
-  const [syncOpen, setSyncOpen] = useState(false);
-
   return (
     <div
       className="relative hidden w-[196px] shrink-0 flex-col border-r sm:flex"
@@ -231,17 +151,6 @@ function HistoryRail({
           </>
         )}
       </div>
-
-      <div className="border-t p-2" style={{ borderColor: "var(--border-soft)" }}>
-        <button
-          onClick={() => setSyncOpen((v) => !v)}
-          className="flex w-full items-center gap-2 rounded-[var(--radius-control)] px-2 py-1.5 text-[11.5px] text-text-faint hover:text-text-dim"
-        >
-          <Link2 className="h-[12px] w-[12px]" strokeWidth={1.75} />
-          Sync across devices
-        </button>
-      </div>
-      {syncOpen && <SyncCodePanel onClose={() => setSyncOpen(false)} />}
     </div>
   );
 }
@@ -291,7 +200,7 @@ export default function CopilotChat() {
   }
 
   async function persist(id: string, nextMessages: DisplayMessage[]) {
-    const clean: StoredMessage[] = nextMessages.map(({ pending, startedAt, elapsedMs, ...m }) => m);
+    const clean: StoredMessage[] = nextMessages.map(({ pending, startedAt, elapsedMs, animated, ...m }) => m);
     const firstUser = clean.find((m) => m.role === "user")?.content;
     const existingTitle = conversations.find((c) => c.id === id)?.title;
     const title = existingTitle && existingTitle !== "New conversation" ? existingTitle : titleFromMessage(firstUser ?? "New conversation");
@@ -322,7 +231,10 @@ export default function CopilotChat() {
     try {
       const full = await fetchConversation(id);
       setActiveId(full.id);
-      setMessages(full.messages);
+      // Already-arrived turns from history shouldn't replay the typewriter
+      // reveal -- only a freshly-sent message (created in send() below,
+      // without this flag) should animate.
+      setMessages(full.messages.map((m) => ({ ...m, animated: true })));
       setCategory(full.category);
     } catch {
       // leave the current view as-is if the fetch fails
@@ -415,6 +327,19 @@ export default function CopilotChat() {
     const next = [...list];
     next[next.length - 1] = fn(next[next.length - 1]);
     return next;
+  }
+
+  /** Flags one message as having already played its typewriter/skeleton
+   * reveal (see AnimatedAgentAnswer), so a later re-render of the same
+   * transcript (e.g. React re-rendering this list for an unrelated state
+   * change) doesn't replay it from scratch. */
+  function markAnimated(index: number) {
+    setMessages((prev) => {
+      if (!prev[index] || prev[index].animated) return prev;
+      const next = [...prev];
+      next[index] = { ...next[index], animated: true };
+      return next;
+    });
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -549,7 +474,13 @@ export default function CopilotChat() {
                               {m.content}
                             </div>
                           ) : (
-                            <AgentAnswerPanel agentUsed={m.agent_used} rawData={m.raw_data} answer={m.content} />
+                            <AnimatedAgentAnswer
+                              agentUsed={m.agent_used}
+                              rawData={m.raw_data}
+                              answer={m.content}
+                              animate={!m.animated}
+                              onSettled={() => markAnimated(i)}
+                            />
                           )
                         ) : m.pending ? (
                           <TypingDots />

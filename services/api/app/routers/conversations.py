@@ -3,14 +3,17 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from .. import crud, schemas
+from .. import crud, models, schemas
+from ..auth import get_current_user
 from ..db import get_db
-from ..security import get_client_id
 
 # No router-level auth dependency here -- every router in main.py already
 # gets Depends(get_current_user) applied at app.include_router() time, so
 # any route defined below already requires a logged-in account without
-# needing to say so again.
+# needing to say so again. Routes still take Depends(get_current_user)
+# directly (instead of just relying on that router-level guard) because
+# they need the actual User object -- specifically user.id, to scope
+# conversations to the account rather than just gate access to the route.
 router = APIRouter(
     prefix="/api/v1/conversations",
     tags=["conversations"],
@@ -29,20 +32,22 @@ def _to_out(conversation, messages) -> schemas.ConversationOut:
 
 
 @router.get("", response_model=list[schemas.ConversationSummaryOut])
-def list_conversations(client_id: str = Depends(get_client_id), db: Session = Depends(get_db)):
+def list_conversations(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Summaries only (no messages) -- this backs the history rail, which
     only ever shows title + last-updated per thread. Fetching full
     transcripts for every conversation just to render a sidebar would scale
-    badly once a client_id has more than a handful of threads.
+    badly once an account has more than a handful of threads.
     """
-    return crud.list_conversations(db, client_id)
+    return crud.list_conversations(db, current_user.id)
 
 
 @router.get("/{conversation_id}", response_model=schemas.ConversationOut)
 def get_conversation(
-    conversation_id: uuid.UUID, client_id: str = Depends(get_client_id), db: Session = Depends(get_db)
+    conversation_id: uuid.UUID,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    conversation = crud.get_conversation(db, client_id, conversation_id)
+    conversation = crud.get_conversation(db, current_user.id, conversation_id)
     if conversation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
     messages = crud.list_conversation_messages(db, conversation.id)
@@ -51,9 +56,11 @@ def get_conversation(
 
 @router.post("", response_model=schemas.ConversationOut, status_code=status.HTTP_201_CREATED)
 def create_conversation(
-    payload: schemas.ConversationCreate, client_id: str = Depends(get_client_id), db: Session = Depends(get_db)
+    payload: schemas.ConversationCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    conversation = crud.create_conversation(db, client_id, payload)
+    conversation = crud.create_conversation(db, current_user.id, payload)
     return _to_out(conversation, [])
 
 
@@ -61,14 +68,14 @@ def create_conversation(
 def replace_conversation(
     conversation_id: uuid.UUID,
     payload: schemas.ConversationUpdate,
-    client_id: str = Depends(get_client_id),
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Full-replace, matching how the client already treats a conversation
     as one blob (see schemas.ConversationUpdate) -- every turn re-sends the
     complete title/category/messages, not just a delta.
     """
-    conversation = crud.get_conversation(db, client_id, conversation_id)
+    conversation = crud.get_conversation(db, current_user.id, conversation_id)
     if conversation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
     conversation = crud.replace_conversation(db, conversation, payload)
@@ -78,9 +85,11 @@ def replace_conversation(
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_conversation(
-    conversation_id: uuid.UUID, client_id: str = Depends(get_client_id), db: Session = Depends(get_db)
+    conversation_id: uuid.UUID,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    conversation = crud.get_conversation(db, client_id, conversation_id)
+    conversation = crud.get_conversation(db, current_user.id, conversation_id)
     if conversation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
     crud.delete_conversation(db, conversation)
