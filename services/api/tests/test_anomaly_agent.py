@@ -197,7 +197,36 @@ def test_log_check_degrades_gracefully_when_loki_unreachable(monkeypatch):
     signal = anomaly._check_logs(NODE, {"has_signal": False, "detail": "", "data": None})
 
     assert signal["has_signal"] is False
-    assert "Couldn't reach the log store" in signal["detail"]
+    # v0.5: a failed check is tagged distinctly from "checked, found nothing"
+    # (has_signal False either way, but degraded/failure only set here) --
+    # see resilience.py / adr-0007.
+    assert signal["degraded"] is True
+    assert signal["failure"]["source"] == "anomaly.loki"
+    assert signal["failure"]["error_type"] == "Exception"
+    assert "couldn't complete" in signal["detail"].lower()
+
+
+def test_anomaly_agent_pushes_loki_failure_into_state_failures_and_caps_confidence(monkeypatch):
+    # A confidently-flagged critical metric signal would normally push
+    # confidence to 0.95 -- degraded log evidence should cap it well below
+    # that, not push it even higher the way real corroboration would.
+    monkeypatch.setattr(anomaly.crud, "list_open_anomaly_flags", lambda db, hostname: [_flag(severity="critical")])
+
+    def boom(*a, **k):
+        raise Exception("connection refused")
+
+    monkeypatch.setattr(loki_client, "query_range", boom)
+
+    state = {"user_query": "something's wrong with compute-02", "known_nodes": KNOWN_NODES}
+    result = anomaly.anomaly_agent(state)
+
+    agent_result = result["agent_result"]
+    assert agent_result["raw_data"]["log_signal"]["degraded"] is True
+    assert agent_result["confidence"] <= anomaly._DEGRADED_LOG_CONFIDENCE_CAP
+    assert "reduced confidence" in agent_result["summary"].lower() or "couldn't complete" in agent_result["summary"].lower()
+
+    assert len(result["failures"]) == 1
+    assert result["failures"][0]["source"] == "anomaly.loki"
 
 
 def test_log_check_sorts_entries_newest_first(monkeypatch):

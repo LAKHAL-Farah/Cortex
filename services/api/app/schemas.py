@@ -305,6 +305,11 @@ class AgentOrchestrateResponse(BaseModel):
     # merged-evidence score (nodes/anomaly.py) made "nothing surfaces this"
     # worth fixing for every agent, not just that one.
     confidence: float | None = None
+    # v0.5 (adr-0007): true when `answer` already carries a resilience.py
+    # degraded-answer note because some sub-call failed post-retry (see
+    # agents/compose.py) -- lets the frontend style/flag a degraded answer
+    # without re-parsing the note text out of `answer` itself.
+    degraded: bool = False
 
 
 

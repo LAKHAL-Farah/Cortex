@@ -34,6 +34,7 @@ def orchestrate(payload: schemas.AgentOrchestrateQuery, db: Session = Depends(ge
         {
             "user_query": payload.query,
             "known_nodes": known_nodes,
+            "failures": [],
         }
     )
 
@@ -43,4 +44,5 @@ def orchestrate(payload: schemas.AgentOrchestrateQuery, db: Session = Depends(ge
         agent_used=result["target_agent"],
         raw_data=agent_result.get("raw_data"),
         confidence=agent_result.get("confidence"),
+        degraded=bool(result.get("failures")),
     )

@@ -23,6 +23,21 @@ graph ever sees them:
    detected_at when there is one, so "correlated" means something
    temporally, not just "any recent error on that host".
 
+v0.5 (adr-0007) changes how `_check_logs` fails: it already caught a
+Loki error and degraded to "no signal" rather than crashing, but that made
+"Loki is down" and "Loki answered and there were no correlated lines"
+produce an identical `has_signal: False` -- compose.py, the confidence
+score, and the narrative all had no way to tell "we don't know" from "we
+checked, and it's clean". The query now goes through
+`resilience.get_breaker("anomaly.loki")` (hard timeout + one retry +
+circuit-opens-after-repeated-failures, see resilience.py) and, on failure,
+the log signal is tagged `degraded: True` with its `FailureRecord`
+attached -- `_confidence` caps rather than penalizes a degraded signal
+(we're missing information, not confirming an absence), the narrative says
+plainly that the log-check couldn't complete, and `anomaly_agent` pushes
+the FailureRecord into `state["failures"]` so compose.py's aggregation
+step labels the whole answer as degraded too.
+
 A third step, `_hypothesize_cause`, doesn't gather new evidence -- it
 pattern-matches the *content* of what the first two steps already found
 (specific log keywords like "OOM"/"no space left"/"lost connection to
@@ -51,6 +66,7 @@ from ...services import loki_client
 from ...services.llm_client import LLMConfigError, get_chat_model
 from ...services.metrics_collector import collect_metrics
 from ..node_resolver import resolve_node
+from ..resilience import get_breaker
 from ..state import CortexState
 
 logger = logging.getLogger(__name__)
@@ -66,6 +82,13 @@ _SEVERITY_RANK = {"normal": 0, "medium": 1, "high": 2, "critical": 3}
 _SEVERITY_CONFIDENCE = {"critical": 0.95, "high": 0.85, "medium": 0.7}
 _LIVE_THRESHOLD_CONFIDENCE = 0.55
 _NO_METRIC_SIGNAL_CONFIDENCE = 0.2
+
+# A degraded log-check (Loki unreachable, see _check_logs) means "we don't
+# know" -- worth less than a confirmed corroboration but not worth the same
+# penalty as "we checked and found nothing", since the latter is itself
+# evidence and the former isn't. Applied as a cap, not an offset, so it
+# never accidentally raises a low metric-only confidence.
+_DEGRADED_LOG_CONFIDENCE_CAP = 0.6
 
 # How far around the metric signal's detection time (or "now", if there is
 # no timestamped signal to anchor on) the log-check sub-step looks for
@@ -202,16 +225,24 @@ def _check_logs(node, metric_signal: dict) -> dict:
     start, end = _log_window(metric_signal)
     logql = f'{{host="{_escape_logql(node["hostname"])}"}} |~ "{_LOG_SIGNAL_PATTERN}"'
 
-    try:
-        streams = loki_client.query_range(logql, start, end, limit=50)
-    except Exception:
-        logger.exception("anomaly_agent: log-check sub-step failed to query Loki")
+    breaker = get_breaker("anomaly.loki", timeout_seconds=8.0, max_retries=1, failure_threshold=2)
+    call_result = breaker.call(loki_client.query_range, logql, start, end, limit=50)
+
+    if not call_result.ok:
+        logger.warning("anomaly_agent: log-check sub-step failed to query Loki: %s", call_result.failure)
         return {
             "has_signal": False,
-            "detail": "Couldn't reach the log store to check for correlated log entries.",
+            "degraded": True,
+            "failure": call_result.failure,
+            "detail": (
+                "The log-check couldn't complete (the log store didn't respond in time), so "
+                "this finding is metric-only with reduced confidence -- log correlation "
+                "wasn't ruled in or out."
+            ),
             "entries": [],
         }
 
+    streams = call_result.value
     entries = []
     for stream in streams:
         labels = stream.get("stream", {})
@@ -226,6 +257,7 @@ def _check_logs(node, metric_signal: dict) -> dict:
     if not entries:
         return {
             "has_signal": False,
+            "degraded": False,
             "detail": (
                 f"No correlated error/warning log entries found for {node['hostname']} "
                 "in the surrounding window."
@@ -239,7 +271,7 @@ def _check_logs(node, metric_signal: dict) -> dict:
         f"{len(entries)} correlated log entr{plural} found for {node['hostname']}, most "
         f"recent: \"{top[0]['line'][:160]}\"."
     )
-    return {"has_signal": True, "detail": detail, "entries": top}
+    return {"has_signal": True, "degraded": False, "detail": detail, "entries": top}
 
 
 # --------------------------------------------------------------------
@@ -319,7 +351,12 @@ def _confidence(metric_signal: dict, log_signal: dict) -> float:
         else:
             base = _LIVE_THRESHOLD_CONFIDENCE
 
-    if log_signal["has_signal"]:
+    if log_signal.get("degraded"):
+        # We don't know whether logs would have corroborated this or not --
+        # cap rather than penalize, since "the check failed" isn't evidence
+        # of absence the way "the check ran clean" is.
+        base = min(base, _DEGRADED_LOG_CONFIDENCE_CAP)
+    elif log_signal["has_signal"]:
         # Corroborating evidence from an independent source -- raise
         # confidence, capped just under certain (nothing here is 100%
         # verified root cause, just two aligned signals).
@@ -354,13 +391,22 @@ or a next step that isn't warranted."""
 
 def _fallback_summary(node, metric_signal: dict, log_signal: dict, likely_cause: str | None) -> str:
     hostname = node["hostname"]
+    degraded = log_signal.get("degraded", False)
 
-    if not metric_signal["has_signal"] and not log_signal["has_signal"]:
+    if not metric_signal["has_signal"] and not log_signal["has_signal"] and not degraded:
         return (
             f"No current metric or log evidence of an incident on {hostname}. The anomaly detector "
             f"isn't flagging anything, a live Prometheus read looks normal, and a scan of recent "
             f"error/warning logs for {hostname} came back clean. Nothing here points to an active "
             "problem right now -- worth re-checking if symptoms are still being reported elsewhere."
+        )
+
+    if not metric_signal["has_signal"] and degraded:
+        return (
+            f"No metric anomaly currently flagged or reading abnormal for {hostname}, and the "
+            "log-check couldn't complete (the log store didn't respond in time) -- so this isn't "
+            "a clean bill of health, it's an incomplete one. Worth re-running once the log store "
+            "is reachable again, or checking it directly in the meantime."
         )
 
     sentences = [metric_signal["detail"], log_signal["detail"]]
@@ -388,6 +434,12 @@ def _fallback_summary(node, metric_signal: dict, log_signal: dict, likely_cause:
             f"Recommended next step: pull the full log stream around this window for {hostname} "
             "(the correlated lines above are a sample, not the complete picture) and check what "
             "process or service is driving the metric signal on the host itself."
+        )
+    elif degraded:
+        sentences.append(
+            f"Recommended next step: check {hostname} directly and retry the log-check once the "
+            "log store is reachable again -- the metric signal alone is worth investigating, but "
+            "log correlation genuinely hasn't been ruled in or out here."
         )
     elif metric_signal["has_signal"]:
         sentences.append(
@@ -460,4 +512,10 @@ def anomaly_agent(state: CortexState) -> CortexState:
         },
     }
     state["error"] = None
+    if log_signal.get("degraded") and log_signal.get("failure"):
+        # A degraded sub-step doesn't stop this agent from producing a
+        # usable result (that's the point), but compose.py still needs to
+        # know evidence-gathering partially failed so it can label the
+        # answer honestly -- see compose.py's module docstring.
+        state.setdefault("failures", []).append(log_signal["failure"])
     return state
