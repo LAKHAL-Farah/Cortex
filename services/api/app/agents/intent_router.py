@@ -42,7 +42,7 @@ from .state import CortexState
 
 logger = logging.getLogger(__name__)
 
-AgentName = Literal["monitoring", "prediction", "rag", "anomaly"]
+AgentName = Literal["monitoring", "prediction", "rag", "anomaly", "openstack_expert"]
 
 # Safest, cheapest default: a direct status pull, no forecast math,
 # knowledge-base retrieval, or multi-source investigation involved.
@@ -58,7 +58,9 @@ _CLARIFYING_QUESTION = (
     "I'm not confident which of these you're asking about -- could you clarify? "
     "I can check current live status (CPU/RAM/disk/uptime/health), forecast a future trend "
     "(e.g. \"will X run out of disk\"), look up how-to/troubleshooting guidance from the "
-    "knowledge base, or investigate a suspected incident by correlating metrics and logs."
+    "knowledge base, investigate a suspected incident by correlating metrics and logs, or walk "
+    "through a specific known symptom (a service down, a resource pressure) with commands to "
+    "check and fix it."
 )
 
 _SYSTEM_PROMPT = """You route a user's infrastructure question to exactly one specialist agent:
@@ -72,6 +74,16 @@ happen", "what's the procedure for Z", anything about docs, runbooks, or how a s
 "why is X acting up", "investigate this alert", "is X having an issue" -- questions that need \
 correlating metric and log evidence to figure out what's actually happening, as opposed to a \
 plain current-value read (that's monitoring).
+- openstack_expert: you already have a specific, named technical symptom in mind -- a resource \
+metric, or a specific OpenStack service like nova-compute/nova-scheduler/cinder-volume/ \
+neutron-l3-agent/neutron-dhcp-agent/neutron-openvswitch-agent, or a hypervisor/libvirt/RabbitMQ/ \
+MariaDB/Keystone/Glance problem -- and want to know exactly how to check/confirm it and what's \
+usually done about it, with actual runnable commands. E.g. "how do I check if nova-compute is \
+running", "what commands show disk usage on a compute node", "how do I confirm neutron-dhcp-agent \
+is up", "what causes an instance to get stuck in BUILD". Different from rag: rag is for broader \
+conceptual/procedural documentation questions about how THIS cloud is set up or how to do \
+something end-to-end (e.g. "how do I create a new project", "what's our network topology"), not a \
+specific technical symptom with a command-level answer.
 
 Pick the single best match, and honestly report your confidence in that pick from 0.0 (a pure \
 guess -- the question could just as easily fit a different agent) to 1.0 (unambiguous). Do not \
