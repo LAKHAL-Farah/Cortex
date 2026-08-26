@@ -2,18 +2,39 @@ import uuid
 
 from fastapi.testclient import TestClient
 
+from app.auth import create_access_token, hash_password
+from app.db import SessionLocal
 from app.main import app
+from app import crud
 
 client = TestClient(app)
-API_HEADERS = {"X-API-Key": "test-key"}
 
 
-def _headers(client_id: str | None = None) -> dict:
-    return {**API_HEADERS, "X-Client-Id": client_id or f"test-client-{uuid.uuid4().hex[:8]}"}
+def _make_user_headers() -> dict:
+    """Creates a real account directly against the DB (there's no
+    self-service signup endpoint -- accounts are always admin-created, see
+    routers/auth.py's module docstring) and returns Authorization headers
+    for it, exactly the shape every real request carries (see
+    services/web/lib/serverAuth.ts): a bearer JWT, not the old
+    X-API-Key/X-Client-Id pair conversations used before real accounts
+    existed (see models.Conversation's docstring for that migration).
+    """
+    db = SessionLocal()
+    try:
+        user = crud.create_user(
+            db,
+            username=f"test-user-{uuid.uuid4().hex[:8]}",
+            password_hash=hash_password("irrelevant-for-this-test"),
+            role="viewer",
+        )
+        token = create_access_token(user)
+    finally:
+        db.close()
+    return {"Authorization": f"Bearer {token}"}
 
 
 def test_create_get_conversation():
-    headers = _headers()
+    headers = _make_user_headers()
     res = client.post("/api/v1/conversations", json={"title": "Cinder storage", "category": None}, headers=headers)
     assert res.status_code == 201
     conv_id = res.json()["id"]
@@ -24,8 +45,8 @@ def test_create_get_conversation():
     assert res.json()["title"] == "Cinder storage"
 
 
-def test_list_conversations_scoped_by_client_id():
-    a, b = _headers(), _headers()
+def test_list_conversations_scoped_by_account():
+    a, b = _make_user_headers(), _make_user_headers()
     client.post("/api/v1/conversations", json={"title": "Thread A"}, headers=a)
     client.post("/api/v1/conversations", json={"title": "Thread B"}, headers=b)
 
@@ -37,7 +58,7 @@ def test_list_conversations_scoped_by_client_id():
 
 
 def test_replace_conversation_messages():
-    headers = _headers()
+    headers = _make_user_headers()
     conv_id = client.post("/api/v1/conversations", json={"title": "New conversation"}, headers=headers).json()["id"]
 
     payload = {
@@ -69,26 +90,21 @@ def test_replace_conversation_messages():
 
 
 def test_delete_conversation():
-    headers = _headers()
+    headers = _make_user_headers()
     conv_id = client.post("/api/v1/conversations", json={"title": "Temp"}, headers=headers).json()["id"]
     assert client.delete(f"/api/v1/conversations/{conv_id}", headers=headers).status_code == 204
     assert client.get(f"/api/v1/conversations/{conv_id}", headers=headers).status_code == 404
 
 
-def test_cannot_access_another_clients_conversation():
-    owner, other = _headers(), _headers()
+def test_cannot_access_another_accounts_conversation():
+    owner, other = _make_user_headers(), _make_user_headers()
     conv_id = client.post("/api/v1/conversations", json={"title": "Private"}, headers=owner).json()["id"]
     assert client.get(f"/api/v1/conversations/{conv_id}", headers=other).status_code == 404
     assert client.delete(f"/api/v1/conversations/{conv_id}", headers=other).status_code == 404
 
 
-def test_requires_api_key_and_client_id():
-    # No X-API-Key header at all -> FastAPI's own 422 (missing required
-    # header), same convention as test_nodes.py's test_write_endpoints_require_api_key.
-    # A *wrong* key is what actually reaches require_api_key's 401.
-    assert client.get("/api/v1/conversations", headers={"X-Client-Id": "abcdefgh"}).status_code in (401, 422)
-    assert (
-        client.get("/api/v1/conversations", headers={**API_HEADERS, "X-API-Key": "wrong-key"}).status_code == 401
-    )
-    # X-API-Key present but no X-Client-Id -> 422 (missing required header)
-    assert client.get("/api/v1/conversations", headers=API_HEADERS).status_code == 422
+def test_requires_authentication():
+    # No Authorization header at all -> get_current_user's own 401.
+    assert client.get("/api/v1/conversations").status_code == 401
+    # Malformed/garbage bearer token -> also 401, not a 500.
+    assert client.get("/api/v1/conversations", headers={"Authorization": "Bearer not-a-real-token"}).status_code == 401

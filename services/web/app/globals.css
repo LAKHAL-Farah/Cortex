@@ -397,14 +397,16 @@ select {
   border-radius: var(--radius-control);
   border: 1px solid var(--border-soft);
   background: var(--canvas);
-  overflow-x: auto;
 }
 .md-content pre code {
+  display: block;
   background: none;
   border: none;
   padding: 0;
   font-size: 0.82em;
   line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .md-content table {
   width: 100%;
@@ -556,6 +558,61 @@ select {
 .agent-anomaly-log-row:first-of-type {
   border-top: none;
   padding-top: 0;
+}
+
+/* OpenStack Expert panel -- one row per command (confirm/remediate), see
+   components/CopilotAgentPanels.tsx's CommandRow. */
+.agent-command-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+}
+.agent-command-row__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6em;
+}
+.agent-command-row__desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.agent-command-row__code {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5em;
+  padding: 0.5em 0.6em;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+.agent-command-row__code code {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.agent-command-row__copy {
+  display: flex;
+  height: 24px;
+  width: 24px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  border-radius: 6px;
+  color: var(--text-faint);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.agent-command-row__copy:hover {
+  background: var(--border-soft);
+  color: var(--text);
 }
 .agent-anomaly-log-row__line {
   min-width: 0;

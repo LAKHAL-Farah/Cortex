@@ -243,12 +243,24 @@ def _fill_hostname(command: str, hostname: str | None) -> str:
 
 
 def _render_command_list(commands: list[dict], hostname: str | None) -> str:
-    lines = []
-    for i, cmd in enumerate(commands, start=1):
+    """Renders each command as its own bullet, with the description as the
+    bullet's lead-in and the command itself in a fenced ```bash block --
+    the fence is what actually gets the client's markdown renderer to draw
+    a proper copyable code block instead of one long inline-code line, and
+    the (read-only)/(state-changing) label stays plain text (not inside
+    the fence) so it's still readable as a UI-parseable tag rather than
+    part of the shell command."""
+    blocks = []
+    for cmd in commands:
         label = "read-only" if cmd["read_only"] else "state-changing"
         command_text = _fill_hostname(cmd["command"], hostname)
-        lines.append(f"{i}. `{command_text}` -- ({label}) {cmd['description']}")
-    return "\n".join(lines)
+        blocks.append(
+            f"- **{cmd['description']}** _({label})_\n"
+            f"  ```bash\n"
+            f"  {command_text}\n"
+            f"  ```"
+        )
+    return "\n".join(blocks)
 
 
 def _render_answer(entry: SymptomEntry, evidence_line: str, hostname: str | None) -> str:
@@ -257,18 +269,24 @@ def _render_answer(entry: SymptomEntry, evidence_line: str, hostname: str | None
     remediate_block = _render_command_list(entry["remediation_commands"], hostname)
 
     return (
-        f"**What's happening:** {what_happening}\n\n"
-        f"**How to confirm it yourself:**\n{confirm_block}\n\n"
-        f"**What's usually done about it:**\n{remediate_block}\n\n"
-        f"Deeper reference: {entry['doc_ref']}"
+        f"### {entry['title']}\n\n"
+        f"#### What's happening\n{what_happening}\n\n"
+        f"#### How to confirm it yourself\n{confirm_block}\n\n"
+        f"#### What's usually done about it\n{remediate_block}\n\n"
+        f"---\n"
+        f"**Deeper reference:** {entry['doc_ref']}"
     )
 
 
 def _no_match_standalone_answer(query: str) -> str:
     return (
-        "I don't have a specific runbook entry that matches that yet -- the OpenStack Expert "
-        "catalog covers host resource pressure, the core Nova/Cinder/Neutron service agents, "
-        "libvirt/hypervisor issues, RabbitMQ/MariaDB/Keystone problems, and Glance image issues. "
+        "I don't have a specific runbook entry that matches that yet. The OpenStack Expert "
+        "catalog currently covers:\n\n"
+        "- Host resource pressure (CPU / RAM / disk)\n"
+        "- The core Nova, Cinder, and Neutron service agents\n"
+        "- libvirt / hypervisor issues\n"
+        "- RabbitMQ, MariaDB, and Keystone problems\n"
+        "- Glance image issues\n\n"
         "Try naming the specific symptom or service (e.g. \"nova-compute\", \"neutron-l3-agent\", "
         "\"disk full\"), or ask it as a general documentation question and I'll search the "
         "knowledge base instead."

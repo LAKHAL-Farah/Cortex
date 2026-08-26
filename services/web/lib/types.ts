@@ -345,7 +345,7 @@ export interface ChatSource {
 // actually return, used by components/CopilotAgentPanels.tsx to pick a
 // renderer.
 
-export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly";
+export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly" | "openstack_expert";
 
 // Same live-status shape as LiveMetrics above, just named for clarity at
 // the copilot call site.
@@ -442,11 +442,49 @@ export interface AgentAnomalyData {
   likely_cause: string | null;
 }
 
+// OpenStack Expert agent (v0.6, services/api/app/agents/nodes/
+// openstack_expert.py) -- mirrors _build_result's raw_data shape exactly, so
+// the panel can render each command with its own read-only/state-changing
+// label and copy button instead of relying on the markdown answer alone.
+// `matched_symptom_id` is null on the graceful "nothing in the catalog
+// matched" fallback (see _run_standalone) -- that case renders no panel.
+export interface AgentExpertCommand {
+  command: string;
+  description: string;
+  read_only: boolean;
+}
+
+export type AgentExpertCategory =
+  | "compute"
+  | "storage"
+  | "network"
+  | "identity"
+  | "image"
+  | "message-bus"
+  | "database"
+  | "hypervisor"
+  | "host";
+
+export interface AgentExpertData {
+  matched_symptom_id: string | null;
+  matched_symptom_title?: string;
+  category?: AgentExpertCategory;
+  confirm_commands?: AgentExpertCommand[];
+  remediation_commands?: AgentExpertCommand[];
+  doc_ref?: string;
+  // Present only in chained mode (see openstack_expert.py::_run_chained) --
+  // which upstream agent's finding this walkthrough is explaining, and that
+  // agent's own original summary, kept rather than discarded.
+  diagnosed_by?: "anomaly" | "monitoring" | null;
+  upstream_summary?: string;
+}
+
 export type AgentRawData =
   | AgentMonitoringData
   | AgentPredictionData
   | AgentRagData
   | AgentAnomalyData
+  | AgentExpertData
   | Record<string, unknown>;
 
 export interface AgentOrchestrateResponse {

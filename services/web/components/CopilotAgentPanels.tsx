@@ -9,8 +9,10 @@ import {
   Activity,
   AlertTriangle,
   BookOpen,
+  Check,
   CheckCircle2,
   Clock,
+  Copy,
   Cpu,
   ExternalLink,
   FileText,
@@ -22,9 +24,12 @@ import {
   Minus,
   ScrollText,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
+  Terminal,
   TrendingDown,
   TrendingUp,
+  Wrench,
   XCircle,
 } from "lucide-react";
 import {
@@ -40,6 +45,8 @@ import {
 } from "recharts";
 import type {
   AgentAnomalyData,
+  AgentExpertCommand,
+  AgentExpertData,
   AgentMonitoringData,
   AgentName,
   AgentPredictionData,
@@ -88,6 +95,13 @@ export const AGENT_META: Record<
     icon: ShieldAlert,
     color: "var(--crit)",
     soft: "var(--crit-soft)",
+  },
+  openstack_expert: {
+    label: "OpenStack Expert agent",
+    short: "Runbook & commands",
+    icon: Wrench,
+    color: "var(--accent)",
+    soft: "var(--accent-soft)",
   },
 };
 
@@ -526,6 +540,132 @@ function RagPanel({ data }: { data: AgentRagData }) {
 }
 
 // ---------------------------------------------------------------------------
+// OpenStack Expert panel -- one fixed-shape card per matched symptom
+// (services/api/app/agents/nodes/openstack_expert.py's SymptomEntry): a
+// title + category pill, then two command sections (confirm / remediate).
+// Every command gets its own row with a copy button -- an operational
+// command is something people actually copy out of the chat and run, not
+// just read, so it doesn't stay folded into the prose the way the rest of
+// the answer does. Renders nothing when matched_symptom_id is null (the
+// graceful "nothing in the catalog matched" fallback, see _run_standalone).
+// ---------------------------------------------------------------------------
+
+const EXPERT_CATEGORY_LABEL: Record<string, string> = {
+  compute: "Compute",
+  storage: "Storage",
+  network: "Network",
+  identity: "Identity",
+  image: "Image",
+  "message-bus": "Message bus",
+  database: "Database",
+  hypervisor: "Hypervisor",
+  host: "Host",
+};
+
+function CommandRow({ cmd }: { cmd: AgentExpertCommand }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(cmd.command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard API unavailable (e.g. insecure context) -- the command
+      // is still fully visible and selectable by hand, so fail silently.
+    }
+  }
+
+  return (
+    <div className="agent-command-row">
+      <div className="agent-command-row__head">
+        <p className="agent-command-row__desc">{cmd.description}</p>
+        <span
+          className="agent-pill shrink-0"
+          style={
+            cmd.read_only
+              ? { color: "var(--ok)", background: "var(--ok-soft)" }
+              : { color: "var(--warn)", background: "var(--warn-soft)" }
+          }
+        >
+          {cmd.read_only ? (
+            <ShieldCheck className="h-3 w-3" strokeWidth={2} />
+          ) : (
+            <AlertTriangle className="h-3 w-3" strokeWidth={2} />
+          )}
+          {cmd.read_only ? "read-only" : "state-changing"}
+        </span>
+      </div>
+      <div className="agent-command-row__code">
+        <code>{cmd.command}</code>
+        <button onClick={copy} className="agent-command-row__copy" aria-label="Copy command" title="Copy command">
+          {copied ? <Check className="h-3.5 w-3.5" style={{ color: "var(--ok)" }} /> : <Copy className="h-3.5 w-3.5" />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CommandSection({ title, commands }: { title: string; commands: AgentExpertCommand[] }) {
+  if (!commands.length) return null;
+  return (
+    <div className="agent-anomaly-subcard">
+      <div className="agent-anomaly-subcard__head">
+        <Terminal className="h-3.5 w-3.5" style={{ color: "var(--text-muted)" }} strokeWidth={1.9} />
+        {title}
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {commands.map((cmd, i) => (
+          <CommandRow key={`${cmd.command}-${i}`} cmd={cmd} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ExpertPanel({ data }: { data: AgentExpertData }) {
+  if (!data.matched_symptom_id) return null;
+
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--accent) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <Wrench className="h-3.5 w-3.5" style={{ color: "var(--accent)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">{data.matched_symptom_title}</span>
+        </div>
+        {data.category && (
+          <span className="agent-pill" style={{ color: "var(--accent)", background: "var(--accent-soft)" }}>
+            {EXPERT_CATEGORY_LABEL[data.category] ?? data.category}
+          </span>
+        )}
+      </div>
+
+      {data.diagnosed_by && (
+        <div
+          className="flex items-start gap-2 rounded-[var(--radius-control)] px-2.5 py-2 text-[12px] leading-relaxed"
+          style={{ background: "var(--canvas)", color: "var(--text-faint)" }}
+        >
+          <Lightbulb className="mt-[1px] h-3.5 w-3.5 shrink-0" style={{ color: "var(--text-muted)" }} strokeWidth={2} />
+          <span>Walking through this after the {data.diagnosed_by} agent&apos;s finding above.</span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <CommandSection title="Confirm it yourself" commands={data.confirm_commands ?? []} />
+        <CommandSection title="Usually done about it" commands={data.remediation_commands ?? []} />
+      </div>
+
+      {data.doc_ref && (
+        <div className="flex items-center gap-1.5 text-[11px] text-text-muted">
+          <FileText className="h-3 w-3" strokeWidth={1.75} />
+          {data.doc_ref}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Anomaly panel -- the two sub-orchestration signals (metric-check +
 // log-check, see services/api/app/agents/nodes/anomaly.py) rendered as two
 // evidence cards, plus the merged confidence score. Unlike the other three
@@ -830,6 +970,28 @@ function AgentPanelSkeleton({ agentUsed }: { agentUsed?: string }) {
       </div>
     );
   }
+  if (agentUsed === "openstack_expert") {
+    return (
+      <div
+        className="agent-panel"
+        style={{ borderColor: "color-mix(in srgb, var(--accent) 16%, var(--border))" }}
+      >
+        <div className="flex items-center justify-between">
+          <SkeletonBar width="42%" />
+          <SkeletonBar width="16%" />
+        </div>
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          {[0, 1].map((i) => (
+            <div
+              key={i}
+              className="h-[120px] animate-pulse rounded-[var(--radius-control)]"
+              style={{ background: "var(--canvas)", border: "1px solid var(--border-soft)" }}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="reasoning-trace">
       <Loader2 className="h-3 w-3 animate-spin" style={{ color: meta.color }} strokeWidth={2} />
@@ -863,6 +1025,7 @@ export function AgentAnswerPanel({
       {agentUsed === "anomaly" && rawData && (
         <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />
       )}
+      {agentUsed === "openstack_expert" && rawData && <ExpertPanel data={rawData as AgentExpertData} />}
     </div>
   );
 }
@@ -904,6 +1067,7 @@ export function AnimatedAgentAnswer({
           {agentUsed === "prediction" && <PredictionPanel data={rawData as AgentPredictionData} />}
           {agentUsed === "rag" && <RagPanel data={rawData as AgentRagData} />}
           {agentUsed === "anomaly" && <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />}
+          {agentUsed === "openstack_expert" && <ExpertPanel data={rawData as AgentExpertData} />}
         </motion.div>
       )}
     </div>

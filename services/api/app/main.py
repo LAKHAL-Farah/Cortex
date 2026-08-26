@@ -328,6 +328,7 @@ app.include_router(knowledge.router, dependencies=_auth_required)
 # module docstring) -- like knowledge.router, not added to the periodic
 # lifespan tasks above since it's plain request/response CRUD, nothing to
 # poll on a schedule.
+app.include_router(conversations.router, dependencies=_auth_required)
 app.include_router(agents.router, dependencies=_auth_required)
 
 @app.get("/health")

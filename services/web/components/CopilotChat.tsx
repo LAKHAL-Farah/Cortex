@@ -426,7 +426,7 @@ export default function CopilotChat() {
               </div>
             </div>
           ) : (
-            <div className="mx-auto flex max-w-[720px] flex-col gap-5">
+            <div className="mx-auto flex max-w-[900px] flex-col gap-5">
               <AnimatePresence initial={false}>
                 {messages.map((m, i) =>
                   m.role === "user" ? (
@@ -499,7 +499,7 @@ export default function CopilotChat() {
         {/* composer */}
         <div className="border-t p-3" style={{ borderColor: "var(--border-soft)" }}>
           <div
-            className="mx-auto flex max-w-[720px] items-end gap-2 rounded-[var(--radius-panel)] p-2"
+            className="mx-auto flex max-w-[900px] items-end gap-2 rounded-[var(--radius-panel)] p-2"
             style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
           >
             <textarea
