@@ -6,7 +6,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus:9090")
+PROMETHEUS_URL = os.getenv("PROMETHEUS_BASE_URL", "http://prometheus:9090")    
 LOOKBACK_DAYS = 14  # utilisé seulement pour le tout premier run (bootstrap)
 RETENTION_DAYS = 90  # combien de temps on garde dans le CSV avant purge
 
