@@ -55,12 +55,29 @@ openstack_expert, reachable two ways -- this is the first agent that
   same as every other node, so a hang or crash in the second agent
   degrades to the *first* agent's own diagnosis being shown (via the
   outer safety net's error path) rather than losing the turn entirely.
+
+v0.7 (adr-0009, observability & eval) inserts one new convergence point,
+"critic", between *every* branch above and "compose" -- every path that
+used to go straight to compose now goes to critic first (which always
+continues on to compose; it never dead-ends or loops). This is deliberate:
+the critic's evidence-grounding check (nodes/critic.py) needs to run
+exactly once per turn, after whichever agent(s) actually produced the
+final agent_result, regardless of which of the (by now six) branches got
+there or whether a chain happened -- putting it anywhere else would mean
+duplicating the same conditional-edge logic openstack_expert's chaining
+already has. "router" itself and "critic"/"compose" are wrapped in
+trace.traced rather than resilience.guarded_node: they're simple,
+synchronous, and (unlike an agent node) don't call a slow/unreliable
+external dependency on their own account, so there's no timeout/degrade
+case worth the guarded_node machinery -- they just need a trace event
+recorded, which trace.traced does directly.
 """
 from langgraph.graph import END, StateGraph
 
 from .compose import compose_answer
 from .intent_router import route
 from .nodes.anomaly import anomaly_agent
+from .nodes.critic import critic_check
 from .nodes.monitoring import monitoring_agent
 from .nodes.openstack_expert import (
     openstack_expert_agent,
@@ -71,11 +88,12 @@ from .nodes.prediction import prediction_agent
 from .nodes.rag import rag_agent
 from .resilience import guarded_node
 from .state import CortexState
+from .trace import traced
 
 
 def build_graph():
     graph = StateGraph(CortexState)
-    graph.add_node("router", route)
+    graph.add_node("router", traced("router")(route))
     graph.add_node("monitoring", guarded_node("monitoring", timeout_seconds=15.0)(monitoring_agent))
     graph.add_node("prediction", guarded_node("prediction", timeout_seconds=15.0)(prediction_agent))
     graph.add_node("rag", guarded_node("rag", timeout_seconds=25.0)(rag_agent))
@@ -84,7 +102,8 @@ def build_graph():
         "openstack_expert",
         guarded_node("openstack_expert", timeout_seconds=20.0)(openstack_expert_agent),
     )
-    graph.add_node("compose", compose_answer)
+    graph.add_node("critic", traced("critic")(critic_check))
+    graph.add_node("compose", traced("compose")(compose_answer))
 
     graph.set_entry_point("router")
     graph.add_conditional_edges(
@@ -97,24 +116,26 @@ def build_graph():
             "anomaly": "anomaly",
             "openstack_expert": "openstack_expert",
             # No node to run -- the router already wrote the clarifying
-            # question into state["error"]; go straight to the same
-            # convergence point every other branch uses.
-            "clarify": "compose",
+            # question into state["error"]; go straight through critic
+            # (which no-ops on an error turn, see nodes/critic.py) to the
+            # same convergence point every other branch uses.
+            "clarify": "critic",
         },
     )
     graph.add_conditional_edges(
         "anomaly",
-        lambda state: "openstack_expert" if should_trigger_after_anomaly(state) else "compose",
-        {"openstack_expert": "openstack_expert", "compose": "compose"},
+        lambda state: "openstack_expert" if should_trigger_after_anomaly(state) else "critic",
+        {"openstack_expert": "openstack_expert", "critic": "critic"},
     )
     graph.add_conditional_edges(
         "monitoring",
-        lambda state: "openstack_expert" if should_trigger_after_monitoring(state) else "compose",
-        {"openstack_expert": "openstack_expert", "compose": "compose"},
+        lambda state: "openstack_expert" if should_trigger_after_monitoring(state) else "critic",
+        {"openstack_expert": "openstack_expert", "critic": "critic"},
     )
-    graph.add_edge("prediction", "compose")
-    graph.add_edge("rag", "compose")
-    graph.add_edge("openstack_expert", "compose")
+    graph.add_edge("prediction", "critic")
+    graph.add_edge("rag", "critic")
+    graph.add_edge("openstack_expert", "critic")
+    graph.add_edge("critic", "compose")
     graph.add_edge("compose", END)
 
     return graph.compile()

@@ -243,3 +243,91 @@ def create_user(db: Session, *, username: str, password_hash: str, role: str,
         raise DuplicateUserError(f"username '{username}' already taken") from exc
     db.refresh(user)
     return user
+
+
+# --------------------------------------------------------------------------
+# Agent orchestrator tracing (v0.7, adr-0009) -- one row per orchestrate
+# turn (models.AgentTrace), plus the rollups GET /api/v1/agents/stats needs.
+# --------------------------------------------------------------------------
+
+def create_agent_trace(
+    db: Session,
+    *,
+    trace_id: uuid.UUID,
+    user_query: str,
+    intent: str | None,
+    target_agent: str | None,
+    critic_verdict_status: str | None,
+    degraded: bool,
+    steps: list,
+    final_answer: str,
+    duration_ms: float,
+) -> models.AgentTrace:
+    trace = models.AgentTrace(
+        id=trace_id,
+        user_query=user_query,
+        intent=intent,
+        target_agent=target_agent,
+        critic_verdict_status=critic_verdict_status,
+        degraded=degraded,
+        steps=steps,
+        final_answer=final_answer,
+        duration_ms=duration_ms,
+    )
+    db.add(trace)
+    db.commit()
+    db.refresh(trace)
+    return trace
+
+
+def get_agent_trace(db: Session, trace_id: uuid.UUID) -> models.AgentTrace | None:
+    return db.get(models.AgentTrace, trace_id)
+
+
+def agent_trace_stats(db: Session, *, since: datetime) -> dict:
+    """The 6.3 "cost/latency dashboard" rollup: invocations, tier split
+    (target_agent), average latency, and failure/flag rates since a given
+    cutoff. Deliberately a handful of aggregate queries rather than
+    pulling every row back and reducing in Python -- this is meant to
+    answer "do we need dedicated infra for agent X" from a glance, not to
+    replace per-trace inspection (that's GET /agents/trace/{id}).
+    """
+    base = select(models.AgentTrace).where(models.AgentTrace.created_at >= since)
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+
+    by_agent_rows = db.execute(
+        select(
+            models.AgentTrace.target_agent,
+            func.count().label("count"),
+            func.avg(models.AgentTrace.duration_ms).label("avg_duration_ms"),
+        )
+        .where(models.AgentTrace.created_at >= since)
+        .group_by(models.AgentTrace.target_agent)
+    ).all()
+
+    degraded_count = db.scalar(
+        select(func.count()).where(
+            models.AgentTrace.created_at >= since, models.AgentTrace.degraded.is_(True)
+        )
+    ) or 0
+    flagged_count = db.scalar(
+        select(func.count()).where(
+            models.AgentTrace.created_at >= since,
+            models.AgentTrace.critic_verdict_status == "flagged",
+        )
+    ) or 0
+
+    return {
+        "since": since.isoformat(),
+        "total_invocations": total,
+        "by_agent": [
+            {
+                "target_agent": row.target_agent,
+                "count": row.count,
+                "avg_duration_ms": round(row.avg_duration_ms, 2) if row.avg_duration_ms is not None else None,
+            }
+            for row in by_agent_rows
+        ],
+        "degraded_rate": round(degraded_count / total, 4) if total else 0.0,
+        "critic_flagged_rate": round(flagged_count / total, 4) if total else 0.0,
+    }

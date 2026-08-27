@@ -38,6 +38,12 @@ Deliberately NOT a general resilience library: no bulkheads, no metrics
 export, no jittered backoff. Just enough that one flaky dependency
 degrades one finding instead of hanging or crashing the chat turn --
 which is the actual gap v0.4 shipped with.
+
+v0.7 (adr-0009) adds one more small job to `guarded_node`: since it
+already measures wall time and knows ok-vs-failed for every wrapped node,
+it also appends the resulting `trace.TraceEvent` to `state["trace_events"]`
+-- the one thing per-node tracing needs that only this wrapper already
+has both halves of (duration + outcome) without re-deriving them.
 """
 import functools
 import logging
@@ -48,6 +54,8 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Generic, Optional, TypedDict, TypeVar
+
+from .trace import record_step
 
 logger = logging.getLogger(__name__)
 
@@ -229,9 +237,13 @@ def guarded_node(name: str, timeout_seconds: float = 20.0):
     def decorator(node_fn):
         @functools.wraps(node_fn)
         def wrapped(state):
+            started = time.monotonic()
             result = breaker.call(node_fn, dict(state))
+            duration_ms = (time.monotonic() - started) * 1000
+
             if result.ok:
                 state.update(result.value)
+                record_step(state, name, "ok", duration_ms)
                 return state
 
             logger.warning("%s: node call failed, degrading this turn: %s", name, result.failure)
@@ -241,6 +253,7 @@ def guarded_node(name: str, timeout_seconds: float = 20.0):
                 f"The {name} agent didn't respond in time and had to be skipped "
                 f"({result.failure['error_type']}). Please try again in a moment."
             )
+            record_step(state, name, "error", duration_ms)
             return state
 
         return wrapped

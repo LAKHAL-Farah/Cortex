@@ -310,6 +310,44 @@ class AgentOrchestrateResponse(BaseModel):
     # agents/compose.py) -- lets the frontend style/flag a degraded answer
     # without re-parsing the note text out of `answer` itself.
     degraded: bool = False
+    # v0.7 (adr-0009): the id of the models.AgentTrace row this turn was
+    # persisted under -- GET /api/v1/agents/trace/{trace_id} turns "why
+    # did it say that" into a lookup instead of an investigation.
+    trace_id: str
+    # Present whenever an agent actually ran (absent for a clarify/error
+    # turn, same condition agent_result is None under) -- "flagged" means
+    # the critic node found at least one claim in `answer` it couldn't
+    # ground in the evidence gathered for it (see agents/nodes/critic.py).
+    critic_verdict: str | None = None
+
+
+class AgentTraceStep(BaseModel):
+    node: str
+    status: str
+    duration_ms: float
+    timestamp: str
+    detail: dict
+
+
+class AgentTraceResponse(BaseModel):
+    trace_id: str
+    user_query: str
+    intent: str | None
+    target_agent: str | None
+    critic_verdict_status: str | None
+    degraded: bool
+    steps: list[AgentTraceStep]
+    final_answer: str
+    duration_ms: float
+    created_at: str
+
+
+class AgentStatsResponse(BaseModel):
+    since: str
+    total_invocations: int
+    by_agent: list[dict]
+    degraded_rate: float
+    critic_flagged_rate: float
 
 
 

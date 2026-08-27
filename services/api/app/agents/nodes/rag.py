@@ -47,6 +47,12 @@ def rag_agent(state: CortexState) -> CortexState:
                     "source_path": c.source_path,
                     "doc_title": c.doc_title,
                     "score": c.score,
+                    # v0.7 (adr-0009): the critic node's evidence-grounding
+                    # check needs the actual retrieved text to compare the
+                    # generated summary against, not just where it came
+                    # from -- additive field, no existing consumer of
+                    # raw_data["sources"] needs to change.
+                    "text_snippet": c.text[:500],
                 }
                 for c in chunks
             ]

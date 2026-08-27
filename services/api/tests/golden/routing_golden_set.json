@@ -1,0 +1,50 @@
+{
+  "_comment": "v0.7 (adr-0009) routing golden set. Every entry's `source` says where it actually came from: 'test_suite' = a query string that literally appears in the v0.1-v0.6 test suite already exercising intent_router/graph/openstack_expert (i.e. a question someone actually typed while building/testing this system); 'router_prompt_example' = one of the worked examples already baked into intent_router.py's own _SYSTEM_PROMPT (adr-0007/adr-0008), which were themselves written from real routing confusions seen during that testing, paraphrased into a full question here; 'extrapolated' = a natural variation of the above, added only to round out coverage per agent, not a new invented category. Nothing here was invented from a blank page. `expected_target_agent` is what app.agents.intent_router.route() should set state['target_agent'] to -- 'clarify' is itself a valid, correct outcome (see intent_router.py's CLARIFY_THRESHOLD), not a failure to route.",
+  "questions": [
+    {"id": "r01", "query": "how is compute-02 doing", "expected_target_agent": "monitoring", "source": "test_suite"},
+    {"id": "r02", "query": "is compute-02 up right now", "expected_target_agent": "monitoring", "source": "extrapolated"},
+    {"id": "r03", "query": "what's the current CPU on storage-09", "expected_target_agent": "monitoring", "source": "extrapolated"},
+    {"id": "r04", "query": "how much disk is free on compute-02", "expected_target_agent": "monitoring", "source": "extrapolated"},
+    {"id": "r05", "query": "is nova-scheduler healthy right now", "expected_target_agent": "monitoring", "source": "extrapolated"},
+
+    {"id": "r06", "query": "will compute-02 run out of disk", "expected_target_agent": "prediction", "source": "router_prompt_example"},
+    {"id": "r07", "query": "what's the CPU trend for compute-02 over the next week", "expected_target_agent": "prediction", "source": "router_prompt_example"},
+    {"id": "r08", "query": "when will storage-09 hit 90% disk usage", "expected_target_agent": "prediction", "source": "router_prompt_example"},
+    {"id": "r09", "query": "will storage-09 run out of disk this month", "expected_target_agent": "prediction", "source": "extrapolated"},
+    {"id": "r10", "query": "is RAM usage on compute-02 going to keep climbing", "expected_target_agent": "prediction", "source": "extrapolated"},
+
+    {"id": "r11", "query": "how do we fix a stuck instance", "expected_target_agent": "rag", "source": "router_prompt_example"},
+    {"id": "r12", "query": "why does an instance sometimes get stuck in BUILD", "expected_target_agent": "rag", "source": "router_prompt_example"},
+    {"id": "r13", "query": "what's the procedure for restarting nova-compute", "expected_target_agent": "rag", "source": "router_prompt_example"},
+    {"id": "r14", "query": "how do I create a new project", "expected_target_agent": "rag", "source": "router_prompt_example"},
+    {"id": "r15", "query": "what's our network topology", "expected_target_agent": "rag", "source": "router_prompt_example"},
+    {"id": "r16", "query": "how does nova work", "expected_target_agent": "rag", "source": "test_suite"},
+    {"id": "r17", "query": "what does nova do", "expected_target_agent": "rag", "source": "test_suite"},
+    {"id": "r18", "query": "how is our network topology laid out", "expected_target_agent": "rag", "source": "extrapolated"},
+    {"id": "r19", "query": "what's the procedure to onboard a new compute node", "expected_target_agent": "rag", "source": "extrapolated"},
+
+    {"id": "r20", "query": "something's wrong with compute-02", "expected_target_agent": "anomaly", "source": "test_suite"},
+    {"id": "r21", "query": "why is compute-02 acting up", "expected_target_agent": "anomaly", "source": "router_prompt_example"},
+    {"id": "r22", "query": "investigate this alert on compute-01", "expected_target_agent": "anomaly", "source": "router_prompt_example"},
+    {"id": "r23", "query": "is compute-02 having an issue", "expected_target_agent": "anomaly", "source": "router_prompt_example"},
+    {"id": "r24", "query": "why is the disk full on compute-02", "expected_target_agent": "anomaly", "source": "test_suite"},
+    {"id": "r25", "query": "is something wrong?", "expected_target_agent": "anomaly", "source": "test_suite", "notes": "No hostname named -- router still classifies intent as anomaly; node resolution failing is a separate, later concern (see anomaly_agent's own error path)."},
+    {"id": "r26", "query": "compute-02 seems to be misbehaving, can you look into it", "expected_target_agent": "anomaly", "source": "extrapolated"},
+    {"id": "r27", "query": "investigate the alert on storage-09", "expected_target_agent": "anomaly", "source": "extrapolated"},
+
+    {"id": "r28", "query": "is nova-compute actually running?", "expected_target_agent": "openstack_expert", "source": "test_suite"},
+    {"id": "r29", "query": "how do I check if nova-compute is running", "expected_target_agent": "openstack_expert", "source": "test_suite"},
+    {"id": "r30", "query": "what commands show disk usage on a compute node", "expected_target_agent": "openstack_expert", "source": "router_prompt_example"},
+    {"id": "r31", "query": "how do I confirm neutron-dhcp-agent is up", "expected_target_agent": "openstack_expert", "source": "router_prompt_example"},
+    {"id": "r32", "query": "what causes an instance to get stuck in BUILD state", "expected_target_agent": "openstack_expert", "source": "router_prompt_example"},
+    {"id": "r33", "query": "what commands show if cinder-volume is running", "expected_target_agent": "openstack_expert", "source": "extrapolated"},
+    {"id": "r34", "query": "how do I confirm neutron-l3-agent is up", "expected_target_agent": "openstack_expert", "source": "extrapolated"},
+    {"id": "r35", "query": "what's usually done when libvirt is unresponsive", "expected_target_agent": "openstack_expert", "source": "extrapolated"},
+    {"id": "r36", "query": "how do I check RabbitMQ health on the controller", "expected_target_agent": "openstack_expert", "source": "extrapolated"},
+
+    {"id": "r37", "query": "what about that thing", "expected_target_agent": "clarify", "source": "test_suite", "notes": "Real test string for the low-confidence clarify path (test_intent_router.py) -- deliberately vague, no infra content to anchor a classification."},
+    {"id": "r38", "query": "what's the weather like", "expected_target_agent": "clarify", "source": "test_suite", "notes": "Off-topic (from test_match_symptoms_no_match_returns_empty) -- not an infra question at all; a well-calibrated classifier should report low confidence rather than force-fit one of the five agents."},
+    {"id": "r39", "query": "can you help me with something", "expected_target_agent": "clarify", "source": "extrapolated"},
+    {"id": "r40", "query": "what about the other one", "expected_target_agent": "clarify", "source": "extrapolated"}
+  ]
+}

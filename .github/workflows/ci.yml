@@ -48,3 +48,20 @@ jobs:
         run: |
           mkdir -p /tmp/prometheus_file_sd
           pytest -v
+
+      # v0.7 (adr-0009) DoD: "CI fails if a router prompt change drops
+      # routing accuracy below the golden-set baseline." `pytest -v` above
+      # already validates the golden set's own shape (test_routing_golden_
+      #_set_shape.py) and the fully-offline arbitration golden set
+      # (test_arbitration_golden_set.py) with no secret required -- this
+      # step is the one part of the eval harness that calls the real
+      # router LLM, so it only runs where NVIDIA_API_KEY is configured.
+      # Add that secret to this repo's Actions settings to turn this from
+      # "skips with a warning" into an actual gate; see
+      # scripts/eval_router_golden_set.py's module docstring for why a
+      # mocked classifier can't substitute for this.
+      - name: Routing golden-set eval (gates router prompt changes)
+        working-directory: services/api
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: python3 scripts/eval_router_golden_set.py

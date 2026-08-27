@@ -13,10 +13,28 @@ failed but the agent still produced a usable, honestly-degraded
 reads this list to attach a degraded-answer note, and any future agent can
 push into it via resilience.get_breaker(...).call(...) without compose.py
 needing to know anything agent-specific.
+
+v0.7 (adr-0009, observability & eval) adds three more fields, all written
+without any node needing to know about each other's:
+
+- `trace_id` / `trace_events`: see agents/trace.py's module docstring --
+  minted by routers/agents.py before the graph runs, appended to by every
+  node (trace.traced for router/critic/compose, resilience.guarded_node
+  for every wrapped agent), and persisted as one row once the graph
+  finishes. Still JSON-serializable, same constraint as everything else
+  here.
+- `critic_verdict`: written by the new critic node (nodes/critic.py),
+  which runs after every agent branch and before compose -- an
+  evidence-grounding check on `agent_result["summary"]`, not a new kind of
+  failure (an ungrounded claim isn't "this agent's evidence-gathering
+  failed", it's "this agent's own narration said something its evidence
+  doesn't support"), so it gets its own field rather than folding into
+  `failures`.
 """
 from typing import Optional, TypedDict
 
 from .resilience import FailureRecord
+from .trace import TraceEvent
 
 
 class KnownNode(TypedDict):
@@ -37,6 +55,17 @@ class AgentResult(TypedDict):
     raw_data: dict
 
 
+class CriticVerdict(TypedDict):
+    """See nodes/critic.py. `status` is "pass" (nothing flagged, including
+    the common case of "nothing checkable" -- e.g. a clarify turn with no
+    agent_result) or "flagged" (at least one claim in the summary wasn't
+    grounded in the evidence the agent actually gathered)."""
+
+    status: str  # "pass" | "flagged"
+    checked_sentences: int
+    flagged_claims: list[str]
+
+
 class CortexState(TypedDict):
     user_query: str
     known_nodes: list[KnownNode]
@@ -46,6 +75,10 @@ class CortexState(TypedDict):
 
     agent_result: Optional[AgentResult]
     final_answer: str
+
+    trace_id: str
+    trace_events: list[TraceEvent]
+    critic_verdict: Optional[CriticVerdict]
 
     # Set by monitoring_agent when it can't confidently resolve a node from
     # the query text (ambiguous, unknown hostname, or none mentioned at all),

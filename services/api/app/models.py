@@ -385,3 +385,43 @@ class TopologySyncRun(Base):
             name="ck_topology_sync_runs_status_allowed",
         ),
     )
+
+
+class AgentTrace(Base):
+    """One row per POST /api/v1/agents/orchestrate turn (v0.7, adr-0009).
+    `id` *is* the trace_id minted by routers/agents.py before the graph
+    runs (not a separately-generated primary key) -- that's what makes
+    GET /api/v1/agents/trace/{trace_id} a direct lookup by primary key
+    instead of a secondary index.
+
+    `steps` is the full ordered `trace.TraceEvent` list the graph
+    accumulated in `state["trace_events"]` (see agents/trace.py) --
+    router decision, which agent(s) ran, the critic's verdict, any
+    failures, all in the order they actually happened. This table is
+    intentionally the "lightweight custom trace store in Postgres" option
+    v0.7's brief calls out as an alternative to a vendor tracing product
+    (LangSmith): one append-only row per turn, no separate
+    spans/services schema, since a single-agent-per-turn graph doesn't yet
+    need one.
+
+    Append-only, like AnomalyEvent/TopologySyncRun -- a trace is a record
+    of what happened, never updated after the turn completes.
+    """
+
+    __tablename__ = "agent_traces"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_query: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_agent: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # "pass" | "flagged" | null (a hard-error/clarify turn the critic
+    # never actually graded) -- pulled out of critic_verdict into its own
+    # indexed column so "how often does the critic flag something" is a
+    # COUNT(*) ... WHERE, not a JSON-path query, for the 6.3 dashboard.
+    critic_verdict_status: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    steps: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    final_answer: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

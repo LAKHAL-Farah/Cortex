@@ -22,9 +22,28 @@ doesn't know or care which agent or breaker produced a FailureRecord, so
 every future agent gets this for free just by pushing failures into that
 list (via resilience.get_breaker(...).call(...)), the same way every
 future agent already gets "converges on compose before END" for free.
+
+v0.7 (adr-0009) adds a second, analogous honesty note: when the critic
+node (nodes/critic.py), which now always runs just before this one, flags
+at least one ungrounded claim, compose prepends a caution note the same
+way it prepends a degraded-evidence note, and caps the reported
+confidence -- a summary containing a claim its own evidence doesn't back
+up shouldn't ship at full confidence just because the gathering itself
+succeeded. This is deliberately a caveat, not a rewrite or a dropped
+answer: the critic's checks (numeric/lexical grounding) are heuristic
+enough that a false positive is possible, and telling the user "verify
+this" costs far less than silently discarding a mostly-correct finding
+over one flagged sentence would.
 """
 from .resilience import FailureRecord
 from .state import CortexState
+
+# A flagged critic verdict never raises confidence and always caps it
+# below "fully trust this" -- same spirit as resilience.py's
+# _DEGRADED_LOG_CONFIDENCE_CAP in nodes/anomaly.py, just for "the
+# narration said something the evidence doesn't" instead of "a sub-check
+# failed to run at all".
+_CRITIC_FLAGGED_CONFIDENCE_CAP = 0.4
 
 # breaker name -> short, human phrase for the degraded-answer note.
 # Falls back to a generic phrase built from the name for anything not
@@ -55,6 +74,15 @@ def _degraded_note(failures: list[FailureRecord]) -> str:
     )
 
 
+def _critic_note(flagged_claims: list[str]) -> str:
+    example = flagged_claims[0]
+    return (
+        "_Note: this answer contains at least one claim "
+        f'("{example}") that could not be verified against the evidence '
+        "gathered for it -- treat it with extra caution._"
+    )
+
+
 def compose_answer(state: CortexState) -> CortexState:
     if state.get("error"):
         state["final_answer"] = state["error"]
@@ -69,6 +97,11 @@ def compose_answer(state: CortexState) -> CortexState:
     failures = state.get("failures") or []
     if failures:
         answer = f"{_degraded_note(failures)}\n\n{answer}"
+
+    verdict = state.get("critic_verdict")
+    if verdict and verdict["status"] == "flagged":
+        answer = f"{_critic_note(verdict['flagged_claims'])}\n\n{answer}"
+        result["confidence"] = min(result.get("confidence", 1.0), _CRITIC_FLAGGED_CONFIDENCE_CAP)
 
     state["final_answer"] = answer
     return state
