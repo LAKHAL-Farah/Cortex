@@ -130,6 +130,16 @@ class AnomalyEvent(Base):
     resolution_note = Column(Text, nullable=True)
 
 
+class AlertEmailSettings(Base):
+    """Single deployment-wide recipient until user preferences exist."""
+    __tablename__ = "alert_email_settings"
+
+    id = Column(Integer, primary_key=True, default=1)
+    recipient_email = Column(String(320), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 class EwmaState(Base):
     """Persisted online mean/variance estimate, used as a fallback when a
     (weekday, hour) baseline slot doesn't exist yet or is too thin to trust

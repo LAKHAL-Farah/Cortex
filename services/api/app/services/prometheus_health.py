@@ -38,6 +38,7 @@ import logging
 from datetime import datetime
 
 from .. import graph_db, models
+from . import alert_email
 from .prometheus_client import query
 
 logger = logging.getLogger(__name__)
@@ -235,12 +236,14 @@ def _sync_service_state_anomalies(db, service_states: list[dict]) -> None:
         )
         if severity != "normal" and not was_manually_resolved:
             if open_event is None:
-                db.add(models.AnomalyEvent(
+                event = models.AnomalyEvent(
                     hostname=service_id, metric_name=SERVICE_STATE_METRIC_NAME,
                     current_value=1.0, z_score=0.0,
                     severity=severity, method=SERVICE_STATE_METHOD,
                     baseline_n=None, started_at=now,
-                ))
+                )
+                db.add(event)
+                alert_email.notify_new_anomaly(db, event)
             elif _SEVERITY_RANK[severity] >= _SEVERITY_RANK[open_event.severity]:
                 open_event.current_value = 1.0
                 open_event.z_score = 0.0

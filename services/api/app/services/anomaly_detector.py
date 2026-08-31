@@ -28,7 +28,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from .. import crud, models
-from . import prometheus_client, auth_log_metrics
+from . import prometheus_client, auth_log_metrics, alert_email
 
 logger = logging.getLogger(__name__)
 
@@ -340,12 +340,14 @@ def _score_and_record(
     )
     if severity != "normal" and not was_manually_resolved:
         if open_event is None:
-            db.add(models.AnomalyEvent(
+            event = models.AnomalyEvent(
                 hostname=hostname, metric_name=metric_name,
                 current_value=current_value, z_score=z_score,
                 severity=severity, method=method, baseline_n=baseline_n,
                 details=details, started_at=now,
-            ))
+            )
+            db.add(event)
+            alert_email.notify_new_anomaly(db, event)
         elif _SEVERITY_RANK[severity] >= _SEVERITY_RANK[open_event.severity]:
             # Record the peak reached during this episode, not just
             # whatever the last tick happened to be.

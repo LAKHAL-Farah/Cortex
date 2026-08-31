@@ -52,6 +52,13 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
       CORTEX_API_KEY: ${CORTEX_API_KEY}
+      ALERT_DEFAULT_RECIPIENT_EMAIL: ${ALERT_DEFAULT_RECIPIENT_EMAIL:-yosratig0@gmail.com}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
       PROMETHEUS_FILE_SD_PATH: /file_sd/nodes.json
       CORTEX_ANSIBLE_DIR: ${CORTEX_ANSIBLE_DIR:-/infra/ansible}
       ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
@@ -92,9 +99,10 @@ services:
     build: ../services/web
     environment:
       CORTEX_API_URL: http://api:8000
+      HOSTNAME: 0.0.0.0
       CORTEX_API_KEY: ${CORTEX_API_KEY}
     ports:
-      - "127.0.0.1:3000:3000"
+      - "3000:3000"
     depends_on:
       - api
     networks:

@@ -46,6 +46,19 @@ class ManualAlertResolution(BaseModel):
     note: str = Field(min_length=1, max_length=2000)
 
 
+class AlertEmailSettingsUpdate(BaseModel):
+    recipient_email: str = Field(min_length=3, max_length=320)
+    enabled: bool = True
+
+    @field_validator("recipient_email")
+    @classmethod
+    def email_must_look_valid(cls, value: str) -> str:
+        email = value.strip().lower()
+        if email.count("@") != 1 or email.startswith("@") or email.endswith("@"):
+            raise ValueError("recipient_email must be a valid email address")
+        return email
+
+
 
 
 
@@ -298,5 +311,4 @@ class ConversationSummaryOut(BaseModel):
 
 class ConversationOut(ConversationSummaryOut):
     messages: list[ConversationMessageOut]
-
 

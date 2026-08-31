@@ -17,8 +17,9 @@ from .routers import topology
 from .routers import network
 from .routers import knowledge
 from .routers import conversations
+from .routers import settings
 from .services.anomaly_detector import detect_anomalies
-from .services.baseline_builder import compute_baselines
+from .services.baseline_builder import compute_baselines, compute_ssh_baselines, compute_ssh_success_baselines
 from .services.node_seeder import seed_nodes_from_file_sd
 from .services.forecast_dataset_builder import build_dataset
 from .routers import forecast
@@ -210,6 +211,14 @@ async def lifespan(app: FastAPI):
             _run_periodic(compute_baselines, BASELINE_REFRESH_INTERVAL_SECONDS, "baseline refresh")
         ),
         asyncio.create_task(
+            _run_periodic(compute_ssh_baselines, BASELINE_REFRESH_INTERVAL_SECONDS, "ssh baseline refresh")
+        ),
+        asyncio.create_task(
+            _run_periodic(
+                compute_ssh_success_baselines, BASELINE_REFRESH_INTERVAL_SECONDS, "ssh success baseline refresh"
+            )
+        ),
+        asyncio.create_task(
             _run_periodic_no_db(build_dataset, FORECAST_DATASET_REFRESH_INTERVAL_SECONDS, "forecast dataset build")
         ),
         asyncio.create_task(
@@ -264,6 +273,7 @@ app.include_router(knowledge.router)
 # lifespan tasks above since it's plain request/response CRUD, nothing to
 # poll on a schedule.
 app.include_router(conversations.router)
+app.include_router(settings.router)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 
