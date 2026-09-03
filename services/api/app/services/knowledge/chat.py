@@ -150,8 +150,13 @@ def _client():
     # The system prompt now asks for headed, multi-section, elaborated
     # answers (not one-liners) -- give that enough room to finish a
     # section instead of getting cut off mid-heading on a long answer.
+    #
+    # v0.8: reasoning tier (services/llm_client.py) -- RAG generation is
+    # exactly the multi-source-synthesis case that tier is reserved for
+    # (retrieved chunks -> a grounded, cited answer), not a candidate for
+    # the fast tier the way a single-shot classification is.
     try:
-        return get_chat_model(temperature=0.2, max_tokens=1536)
+        return get_chat_model(temperature=0.2, max_tokens=1536, tier="reasoning")
     except LLMConfigError as exc:
         raise ChatConfigError(str(exc)) from exc
 

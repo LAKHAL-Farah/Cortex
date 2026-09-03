@@ -1,9 +1,10 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import select, func
+from sqlalchemy import case, select, func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from . import models, schemas
+from .services import llm_client
 
 
 class DuplicateNodeError(Exception):
@@ -38,6 +39,31 @@ def list_open_anomaly_flags(db: Session, hostname: str) -> list[models.AnomalyFl
         .filter(models.AnomalyFlag.hostname == hostname, models.AnomalyFlag.severity != "normal")
         .all()
     )
+
+
+def list_all_open_anomaly_flag_hostnames(db: Session) -> list[str]:
+    """Distinct hostnames with at least one currently-open AnomalyFlag,
+    worst-severity-first -- the "Living Model" scope for the anomaly
+    agent's v0.8 dynamic fan-out (agents/nodes/anomaly.py's
+    anomaly_dispatch): when a question doesn't name one specific node
+    ("is anything wrong right now"), this is what replaces a fixed/
+    hardcoded node list with whatever the topology is *actually* flagging
+    at the moment the question is asked.
+    """
+    severity_order = case(
+        (models.AnomalyFlag.severity == "critical", 0),
+        (models.AnomalyFlag.severity == "high", 1),
+        (models.AnomalyFlag.severity == "medium", 2),
+        else_=3,
+    )
+    rows = (
+        db.query(models.AnomalyFlag.hostname, func.min(severity_order).label("rank"))
+        .filter(models.AnomalyFlag.severity != "normal")
+        .group_by(models.AnomalyFlag.hostname)
+        .order_by(func.min(severity_order))
+        .all()
+    )
+    return [row.hostname for row in rows]
 
 
 def create_node(db: Session, payload: schemas.NodeCreate) -> models.Node:
@@ -144,6 +170,41 @@ def get_conversation(db: Session, user_id: uuid.UUID, conversation_id: uuid.UUID
         select(models.Conversation)
         .where(models.Conversation.id == conversation_id, models.Conversation.user_id == user_id)
     )
+
+
+def get_session_memory(db: Session, conversation_id: uuid.UUID) -> dict:
+    """v0.8: the compact `resolved_entities` record for one conversation
+    (see models.AgentSessionMemory), or `{}` for a conversation that
+    hasn't resolved anything yet -- routers/agents.py loads this before
+    invoking the graph and passes it in as CortexState's `session_memory`.
+    """
+    row = db.scalar(
+        select(models.AgentSessionMemory).where(models.AgentSessionMemory.conversation_id == conversation_id)
+    )
+    return row.resolved_entities if row else {}
+
+
+def upsert_session_memory(db: Session, conversation_id: uuid.UUID, resolved_entities: dict) -> None:
+    """Merges `resolved_entities` (this turn's `state["resolved_entities"]`,
+    e.g. {"last_node": ..., "last_agent": "monitoring"}) onto whatever this
+    conversation already had on record -- a shallow merge, not a replace,
+    so a turn that only resolved a node (e.g. rag_agent, which doesn't
+    touch node/metric memory at all) doesn't blow away an unrelated
+    last_metric a previous turn already set. An empty `resolved_entities`
+    (a turn that resolved nothing new -- a clarify turn, or an error) is a
+    no-op: nothing to merge, and nothing worth writing a row for.
+    """
+    if not resolved_entities:
+        return
+
+    row = db.scalar(
+        select(models.AgentSessionMemory).where(models.AgentSessionMemory.conversation_id == conversation_id)
+    )
+    if row is None:
+        db.add(models.AgentSessionMemory(conversation_id=conversation_id, resolved_entities=resolved_entities))
+    else:
+        row.resolved_entities = {**row.resolved_entities, **resolved_entities}
+    db.commit()
 
 
 def create_conversation(
@@ -291,6 +352,13 @@ def agent_trace_stats(db: Session, *, since: datetime) -> dict:
     pulling every row back and reducing in Python -- this is meant to
     answer "do we need dedicated infra for agent X" from a glance, not to
     replace per-trace inspection (that's GET /agents/trace/{id}).
+
+    v0.8 adds `model_tier` to each `by_agent` row and a top-level
+    `router_tier` -- both from services/llm_client.ROUTER_TIER/AGENT_TIERS
+    (a static per-call-site assignment, not derived from the trace data
+    itself), so this same dashboard answers "is the fast tier actually
+    carrying the high-volume nodes" alongside the existing latency
+    numbers, without needing to scan every trace's `steps` JSON for it.
     """
     base = select(models.AgentTrace).where(models.AgentTrace.created_at >= since)
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
@@ -320,11 +388,13 @@ def agent_trace_stats(db: Session, *, since: datetime) -> dict:
     return {
         "since": since.isoformat(),
         "total_invocations": total,
+        "router_tier": llm_client.ROUTER_TIER,
         "by_agent": [
             {
                 "target_agent": row.target_agent,
                 "count": row.count,
                 "avg_duration_ms": round(row.avg_duration_ms, 2) if row.avg_duration_ms is not None else None,
+                "model_tier": llm_client.AGENT_TIERS.get(row.target_agent, "unknown"),
             }
             for row in by_agent_rows
         ],

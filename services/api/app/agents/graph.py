@@ -71,12 +71,36 @@ synchronous, and (unlike an agent node) don't call a slow/unreliable
 external dependency on their own account, so there's no timeout/degrade
 case worth the guarded_node machinery -- they just need a trace event
 recorded, which trace.traced does directly.
+
+v0.8 (efficiency & scale prep) replaces the single "anomaly" node with
+three: "anomaly_dispatch" (resolves which node(s) this turn investigates,
+scoped by the Living Model rather than any fixed list -- see nodes/
+anomaly.py) fans out via a conditional edge that returns a list of
+`Send("anomaly_investigate", ...)`, one per node, instead of the usual
+single string target -- LangGraph runs however many of those land
+concurrently rather than this graph looping over them one at a time, so
+investigating several nodes doesn't cost several times the latency of
+investigating one. Every branch still converges through "anomaly_arbitrate"
+(which consumes the fan-out's `agent_results` and re-populates the same
+single `agent_result` shape everything downstream already expects) before
+rejoining should_trigger_after_anomaly / critic exactly as the old single
+"anomaly" node did -- from openstack_expert/critic/compose's point of
+view, nothing about the shape they consume changed, only how it got
+produced. The trace event for this whole fan-out is still recorded under
+the name "anomaly" (on anomaly_arbitrate, via the same guarded_node
+wrapper the old single node used) so existing trace/dashboard consumers
+that look for a step named "anomaly" keep working unchanged.
 """
 from langgraph.graph import END, StateGraph
+from langgraph.types import Send
 
 from .compose import compose_answer
 from .intent_router import route
-from .nodes.anomaly import anomaly_agent
+from .nodes.anomaly import (
+    anomaly_arbitrate,
+    anomaly_dispatch,
+    anomaly_investigate_one,
+)
 from .nodes.critic import critic_check
 from .nodes.monitoring import monitoring_agent
 from .nodes.openstack_expert import (
@@ -91,13 +115,29 @@ from .state import CortexState
 from .trace import traced
 
 
+def _fan_out_to_investigate(state: CortexState):
+    """Conditional edge off anomaly_dispatch: either the dispatch step
+    already gave up (no resolvable scope -- state["error"] is set, same
+    short-circuit "couldn't tell which node" always used), or it's time to
+    actually investigate -- one Send per node in state["incident_scope"],
+    run concurrently rather than looped."""
+    if state.get("error"):
+        return "critic"
+    return [
+        Send("anomaly_investigate", {"user_query": state["user_query"], "node": node})
+        for node in state["incident_scope"]
+    ]
+
+
 def build_graph():
     graph = StateGraph(CortexState)
     graph.add_node("router", traced("router")(route))
     graph.add_node("monitoring", guarded_node("monitoring", timeout_seconds=15.0)(monitoring_agent))
     graph.add_node("prediction", guarded_node("prediction", timeout_seconds=15.0)(prediction_agent))
     graph.add_node("rag", guarded_node("rag", timeout_seconds=25.0)(rag_agent))
-    graph.add_node("anomaly", guarded_node("anomaly", timeout_seconds=30.0)(anomaly_agent))
+    graph.add_node("anomaly_dispatch", guarded_node("anomaly_dispatch", timeout_seconds=8.0)(anomaly_dispatch))
+    graph.add_node("anomaly_investigate", anomaly_investigate_one)
+    graph.add_node("anomaly_arbitrate", guarded_node("anomaly", timeout_seconds=30.0)(anomaly_arbitrate))
     graph.add_node(
         "openstack_expert",
         guarded_node("openstack_expert", timeout_seconds=20.0)(openstack_expert_agent),
@@ -113,7 +153,7 @@ def build_graph():
             "monitoring": "monitoring",
             "prediction": "prediction",
             "rag": "rag",
-            "anomaly": "anomaly",
+            "anomaly": "anomaly_dispatch",
             "openstack_expert": "openstack_expert",
             # No node to run -- the router already wrote the clarifying
             # question into state["error"]; go straight through critic
@@ -122,8 +162,10 @@ def build_graph():
             "clarify": "critic",
         },
     )
+    graph.add_conditional_edges("anomaly_dispatch", _fan_out_to_investigate, {"critic": "critic"})
+    graph.add_edge("anomaly_investigate", "anomaly_arbitrate")
     graph.add_conditional_edges(
-        "anomaly",
+        "anomaly_arbitrate",
         lambda state: "openstack_expert" if should_trigger_after_anomaly(state) else "critic",
         {"openstack_expert": "openstack_expert", "critic": "critic"},
     )

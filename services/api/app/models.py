@@ -425,3 +425,46 @@ class AgentTrace(Base):
     duration_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class AgentSessionMemory(Base):
+    """v0.8 -- one compact "resolved entities" record per Copilot
+    conversation (agents/state.py's `session_memory`/`resolved_entities`;
+    see routers/agents.py). Deliberately one row per conversation, not one
+    row per turn: this is the alternative to re-sending (or re-reading)
+    the full raw conversation transcript into the router/agents on every
+    turn, so its shape is "the compact set of things a follow-up question
+    might need" (last resolved node, last metric, last agent) rather than
+    a growing history -- each turn overwrites this row with whatever it
+    resolved, it doesn't append to it.
+
+    `conversation_id` is unique (one memory record per conversation) and
+    a real FK into `conversations` -- if the conversation is deleted, its
+    session memory should go with it, same CASCADE as
+    `conversation_messages`. Nullable would let this track "an
+    orchestrate call with no conversation_id at all" (a direct/API caller
+    that never created a Conversation), but a session-less caller has no
+    conversation to persist memory *for* in the first place, so
+    routers/agents.py simply skips the load/persist step entirely rather
+    than writing rows with a null key here.
+    """
+
+    __tablename__ = "agent_session_memory"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    # {"last_node": {...KnownNode}, "last_metric": "cpu_percent",
+    # "last_agent": "monitoring"} -- see agents/state.py's module
+    # docstring for what each key means and who writes it.
+    resolved_entities: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

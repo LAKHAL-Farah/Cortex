@@ -12,6 +12,14 @@ What the LLM *is* used for, added in v0.2:
   LLM isn't configured or the call fails, this falls back to that same
   f-string -- a missing API key degrades the answer's phrasing, never its
   correctness (the numbers themselves never come from the LLM).
+
+v0.8: both calls above run on the fast tier (services/llm_client.py) --
+node resolution is a short classification and this narration is
+single-source ("here are 5 numbers, describe them"), neither needs the
+reasoning-tier model. Node resolution also gets `state["session_memory"]`
+as its last-resort fallback, and this node writes its own resolution back
+into `state["resolved_entities"]` so a follow-up question can reuse it
+(see node_resolver.py / agents/state.py).
 """
 import logging
 
@@ -41,7 +49,7 @@ def _fallback_summary(node, metrics) -> str:
 
 def _narrate(query: str, node, metrics) -> str:
     try:
-        llm = get_chat_model(temperature=0.2)
+        llm = get_chat_model(temperature=0.2, tier="fast")
         response = llm.invoke(
             [
                 SystemMessage(content=_SYSTEM_PROMPT),
@@ -69,7 +77,7 @@ def _narrate(query: str, node, metrics) -> str:
 
 def monitoring_agent(state: CortexState) -> CortexState:
     known_nodes = state["known_nodes"]
-    node = resolve_node(state["user_query"], known_nodes)
+    node = resolve_node(state["user_query"], known_nodes, session_memory=state.get("session_memory"))
 
     if node is None:
         available = ", ".join(n["hostname"] for n in known_nodes) or "no nodes registered"
@@ -104,4 +112,6 @@ def monitoring_agent(state: CortexState) -> CortexState:
         "raw_data": metrics,
     }
     state["error"] = None
+    state.setdefault("resolved_entities", {})["last_node"] = node
+    state["resolved_entities"]["last_agent"] = "monitoring"
     return state

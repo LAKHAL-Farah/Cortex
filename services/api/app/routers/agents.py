@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from .. import crud, schemas
+from .. import crud, models, schemas
+from ..auth import get_current_user
 from ..db import get_db
 from ..agents.graph import app_graph
 from ..agents.trace import new_trace_id
@@ -19,7 +20,11 @@ router = APIRouter(
 
 
 @router.post("/orchestrate", response_model=schemas.AgentOrchestrateResponse)
-def orchestrate(payload: schemas.AgentOrchestrateQuery, db: Session = Depends(get_db)):
+def orchestrate(
+    payload: schemas.AgentOrchestrateQuery,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Question in -> LangGraph (router -> ... -> critic -> compose) ->
     answer out. Mirrors GET /api/v1/dashboard's hostname->instance mapping
     (see dashboard.py) so the monitoring agent resolves a node the same
@@ -33,6 +38,18 @@ def orchestrate(payload: schemas.AgentOrchestrateQuery, db: Session = Depends(ge
     `known_nodes`. A trace is written even for a clarify/error turn --
     "the router asked a clarifying question" is exactly the kind of thing
     worth being able to look back at.
+
+    v0.8: same DB-session-stays-outside-the-graph rule applies to session
+    memory (agents/state.py's `session_memory`/`resolved_entities`) --
+    loaded here before the graph runs, merged back in here after. Scoped
+    by `payload.conversation_id` when the caller sends one (see
+    schemas.AgentOrchestrateQuery), and looked up via
+    crud.get_conversation (not a bare id lookup) so this can't read or
+    write another account's conversation's memory just because its id was
+    guessed/reused -- same ownership check GET /api/v1/conversations/{id}
+    already applies. No conversation_id at all -- a direct/API caller with
+    no conversation concept -- just runs stateless, exactly as every
+    orchestrate call did before this existed.
     """
     known_nodes: list[schemas.AgentKnownNode] = [
         {
@@ -43,6 +60,14 @@ def orchestrate(payload: schemas.AgentOrchestrateQuery, db: Session = Depends(ge
         for n in crud.list_nodes(db)
     ]
 
+    conversation = None
+    if payload.conversation_id is not None:
+        conversation = crud.get_conversation(db, current_user.id, payload.conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="No conversation found for that id.")
+
+    session_memory = crud.get_session_memory(db, conversation.id) if conversation else {}
+
     trace_id = new_trace_id()
     started = time.monotonic()
     result = app_graph.invoke(
@@ -52,9 +77,15 @@ def orchestrate(payload: schemas.AgentOrchestrateQuery, db: Session = Depends(ge
             "failures": [],
             "trace_id": trace_id,
             "trace_events": [],
+            "session_memory": session_memory,
+            "resolved_entities": {},
+            "agent_results": [],
         }
     )
     duration_ms = (time.monotonic() - started) * 1000
+
+    if conversation is not None:
+        crud.upsert_session_memory(db, conversation.id, result.get("resolved_entities") or {})
 
     agent_result = result.get("agent_result") or {}
     critic_verdict = result.get("critic_verdict")

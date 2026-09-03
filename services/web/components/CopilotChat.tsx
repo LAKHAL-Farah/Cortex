@@ -287,7 +287,12 @@ export default function CopilotChat() {
       const res = await fetch("/api/agents/orchestrate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: text }),
+        // v0.8: conversationId lets the backend load/persist this
+        // conversation's session memory (resolved node/metric/agent, see
+        // agents/state.py) across turns -- omitted (backend defaults to
+        // stateless) if conversation creation above failed and this turn
+        // is running in-memory-only.
+        body: JSON.stringify({ query: text, conversation_id: conversationId ?? undefined }),
       });
 
       const data: AgentOrchestrateResponse & { detail?: string } = await res.json().catch(() => ({}));

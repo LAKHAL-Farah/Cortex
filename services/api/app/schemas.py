@@ -288,6 +288,16 @@ class ConversationOut(ConversationSummaryOut):
 
 class AgentOrchestrateQuery(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
+    # v0.8: which Copilot conversation (see Conversation/conversations
+    # router) this turn belongs to, if any -- optional and purely additive,
+    # so a direct/API caller with no conversation concept at all keeps
+    # working exactly as before. When present, routers/agents.py loads
+    # that conversation's session memory (models.AgentSessionMemory)
+    # before running the graph and persists whatever this turn resolved
+    # back onto it afterward -- see agents/state.py's module docstring for
+    # why this is a compact resolved-entities record rather than replaying
+    # the conversation's full transcript into the router on every turn.
+    conversation_id: uuid.UUID | None = None
 
 
 class AgentKnownNode(TypedDict):
@@ -345,6 +355,12 @@ class AgentTraceResponse(BaseModel):
 class AgentStatsResponse(BaseModel):
     since: str
     total_invocations: int
+    # v0.8: which model tier the router itself runs on (see
+    # services/llm_client.py) -- each `by_agent` entry also carries its
+    # own `model_tier`, so together these answer "is the fast tier
+    # actually carrying the router plus the high-volume agents" straight
+    # from this dashboard.
+    router_tier: str
     by_agent: list[dict]
     degraded_rate: float
     critic_flagged_rate: float

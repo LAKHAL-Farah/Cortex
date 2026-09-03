@@ -52,6 +52,33 @@ trivial (docstring there) -- with exactly one investigating agent right
 now, "arbitration" *is* presenting this merged finding. The sub-
 orchestration pattern is built once, here, so the Security Agent (planned
 to reuse this exact shape) doesn't have to reinvent it.
+
+v0.8 (efficiency & scale prep) adds dynamic multi-node fan-out on top of
+the single-node investigation above, without changing that investigation
+itself: `_investigate` (the shared metric-check -> log-check ->
+hypothesize -> narrate -> confidence pipeline) is now a plain function
+reused by both paths --
+
+- `anomaly_agent` -- unchanged: resolves exactly one node and calls
+  `_investigate` directly. Still what's exercised when this module's
+  functions are called directly (see test_anomaly_agent.py).
+- `anomaly_dispatch` / `anomaly_investigate_one` / `anomaly_arbitrate` --
+  the graph-level path (see graph.py), used when a question doesn't name
+  one specific node at all (e.g. "is anything wrong right now"). Instead
+  of a fixed/hardcoded set of nodes to check, `anomaly_dispatch` scopes
+  the investigation to whichever nodes the *Living Model* -- the current
+  topology (`known_nodes`) intersected with whichever of them currently
+  have an open AnomalyFlag -- says are actually worth looking at, then
+  fans out via LangGraph's `Send` primitive: one `anomaly_investigate_one`
+  invocation per node, running concurrently rather than in a loop, so
+  investigating N nodes doesn't cost N times the latency of investigating
+  one. `anomaly_arbitrate` is where those N independent findings actually
+  get arbitrated -- ranked by confidence, with a reasoning-tier LLM call
+  synthesizing a cross-node incident narrative when there's more than one
+  (skipped, at zero added cost, for the common single-node case) -- this
+  is the "arbitration" this module's v0.4 docstring above deferred to the
+  day a second source of findings existed; a second *node*, not just a
+  second *agent*, turned out to be the first one to actually need it.
 """
 import logging
 import re
@@ -66,10 +93,26 @@ from ...services import loki_client
 from ...services.llm_client import LLMConfigError, get_chat_model
 from ...services.metrics_collector import collect_metrics
 from ..node_resolver import resolve_node
-from ..resilience import get_breaker
-from ..state import CortexState
+from ..resilience import get_breaker, guarded_send
+from ..state import AgentResult, CortexState, IncidentFinding, KnownNode
 
 logger = logging.getLogger(__name__)
+
+# v0.8 dynamic fan-out: a broad "is anything wrong" question (no specific
+# node named) scopes the investigation to nodes the Living Model currently
+# flags, rather than every known node -- catches the common phrasings
+# without trying to be an exhaustive intent classifier (that's the
+# router's job; this only fires once node resolution has already failed to
+# find one specific node in the question).
+_BROAD_INCIDENT_PATTERN = re.compile(
+    r"(?i)anything wrong|what'?s wrong|what is wrong|any(?:thing)? (?:down|broken|failing)|"
+    r"status of everything|across (?:the|all|our) (?:nodes|cluster|fleet)|"
+    r"everything (?:ok|okay|fine)|any (?:incidents?|issues?|alerts?)|current incidents?"
+)
+# Bounds how many nodes one turn will fan out to -- a real incident sweep
+# should surface the handful of nodes actually flagged, not silently
+# balloon fan-out cost/latency on a fleet with dozens of open flags.
+_MAX_INCIDENT_FANOUT = 5
 
 # How anomaly_detector.py ranks severity, duplicated here (rather than
 # imported) because that module's _SEVERITY_RANK is private -- this agent
@@ -454,7 +497,7 @@ def _fallback_summary(node, metric_signal: dict, log_signal: dict, likely_cause:
 def _narrate(query: str, node, metric_signal: dict, log_signal: dict, likely_cause: str | None) -> str:
     fallback = _fallback_summary(node, metric_signal, log_signal, likely_cause)
     try:
-        llm = get_chat_model(temperature=0.2)
+        llm = get_chat_model(temperature=0.2, tier="reasoning")
         cause_line = (
             f"Candidate cause hint (heuristic, not confirmed): {likely_cause}"
             if likely_cause
@@ -483,24 +526,26 @@ def _narrate(query: str, node, metric_signal: dict, log_signal: dict, likely_cau
         return fallback
 
 
-def anomaly_agent(state: CortexState) -> CortexState:
-    known_nodes = state["known_nodes"]
-    node = resolve_node(state["user_query"], known_nodes)
+# --------------------------------------------------------------------
+# Shared single-node pipeline (v0.8: factored out of anomaly_agent so the
+# dynamic fan-out path below can reuse it without duplicating the
+# metric-check -> log-check -> hypothesize -> narrate -> confidence chain)
+# --------------------------------------------------------------------
 
-    if node is None:
-        available = ", ".join(n["hostname"] for n in known_nodes) or "no nodes registered"
-        state["error"] = f"I couldn't tell which node you meant. Known nodes: {available}."
-        state["agent_result"] = None
-        return state
-
+def _investigate(query: str, node: KnownNode) -> tuple[AgentResult, list]:
+    """Runs the full single-node investigation pipeline and returns
+    (AgentResult, embedded_failures) without touching any graph state --
+    the one thing both anomaly_agent (single-node, direct call) and
+    anomaly_investigate_one (one Send branch of a multi-node fan-out) need,
+    kept in exactly one place so they can never drift apart."""
     metric_signal = _check_metrics(node)
     log_signal = _check_logs(node, metric_signal)
     likely_cause = _hypothesize_cause(metric_signal, log_signal)
 
-    summary = _narrate(state["user_query"], node, metric_signal, log_signal, likely_cause)
+    summary = _narrate(query, node, metric_signal, log_signal, likely_cause)
     confidence = _confidence(metric_signal, log_signal)
 
-    state["agent_result"] = {
+    agent_result: AgentResult = {
         "summary": summary,
         "confidence": confidence,
         "raw_data": {
@@ -511,11 +556,204 @@ def anomaly_agent(state: CortexState) -> CortexState:
             "likely_cause": likely_cause,
         },
     }
-    state["error"] = None
+
+    failures = []
     if log_signal.get("degraded") and log_signal.get("failure"):
+        failures.append(log_signal["failure"])
+    return agent_result, failures
+
+
+def anomaly_agent(state: CortexState) -> CortexState:
+    known_nodes = state["known_nodes"]
+    node = resolve_node(state["user_query"], known_nodes, session_memory=state.get("session_memory"))
+
+    if node is None:
+        available = ", ".join(n["hostname"] for n in known_nodes) or "no nodes registered"
+        state["error"] = f"I couldn't tell which node you meant. Known nodes: {available}."
+        state["agent_result"] = None
+        return state
+
+    agent_result, failures = _investigate(state["user_query"], node)
+
+    state["agent_result"] = agent_result
+    state["error"] = None
+    for failure in failures:
         # A degraded sub-step doesn't stop this agent from producing a
         # usable result (that's the point), but compose.py still needs to
         # know evidence-gathering partially failed so it can label the
         # answer honestly -- see compose.py's module docstring.
-        state.setdefault("failures", []).append(log_signal["failure"])
+        state.setdefault("failures", []).append(failure)
+    state.setdefault("resolved_entities", {})["last_node"] = node
+    state["resolved_entities"]["last_agent"] = "anomaly"
+    return state
+
+
+# --------------------------------------------------------------------
+# v0.8: dynamic multi-node fan-out (dispatch -> Send x N -> arbitrate)
+# --------------------------------------------------------------------
+
+def _incident_scope_from_living_model(query: str, known_nodes: list[KnownNode]) -> list[KnownNode]:
+    """Scopes a broad, no-specific-node incident question to whichever
+    known nodes currently have an open AnomalyFlag -- the Living Model
+    (the topology graph's current node list, intersected with the anomaly
+    detector's live output), not a fixed/hardcoded set. Returns [] for
+    anything that doesn't read as a broad incident question at all (the
+    caller falls through to the existing "couldn't tell which node"
+    clarify path in that case, same as before this existed)."""
+    if not _BROAD_INCIDENT_PATTERN.search(query):
+        return []
+
+    db = SessionLocal()
+    try:
+        flagged_hostnames = crud.list_all_open_anomaly_flag_hostnames(db)
+    finally:
+        db.close()
+
+    known_by_hostname = {n["hostname"]: n for n in known_nodes}
+    scope = [known_by_hostname[h] for h in flagged_hostnames if h in known_by_hostname]
+    return scope[:_MAX_INCIDENT_FANOUT]
+
+
+def anomaly_dispatch(state: CortexState) -> CortexState:
+    """Sequential entry point for the fan-out path (see graph.py). Decides
+    *which* nodes this turn investigates and writes that list into
+    `state["incident_scope"]` for the conditional edge right after this
+    node to turn into one Send per node -- this function itself never
+    calls an agent, it only resolves scope, so it's cheap and fast-tier
+    (node_resolver's own LLM tier) even though what follows may fan out to
+    several reasoning-tier investigations.
+    """
+    known_nodes = state["known_nodes"]
+    query = state["user_query"]
+
+    node = resolve_node(query, known_nodes, session_memory=state.get("session_memory"))
+    if node is not None:
+        state["incident_scope"] = [node]
+        state["error"] = None
+        return state
+
+    scope = _incident_scope_from_living_model(query, known_nodes)
+    if scope:
+        state["incident_scope"] = scope
+        state["error"] = None
+        return state
+
+    available = ", ".join(n["hostname"] for n in known_nodes) or "no nodes registered"
+    state["incident_scope"] = []
+    state["agent_result"] = None
+    state["error"] = f"I couldn't tell which node you meant. Known nodes: {available}."
+    return state
+
+
+def _anomaly_investigate_one_impl(payload: dict) -> dict:
+    """The actual per-node work behind one Send("anomaly_investigate", ...)
+    branch. Deliberately takes a narrow `payload` (query + one node), not
+    CortexState -- see resilience.guarded_send's docstring for why a Send
+    target can't work off the graph's full state the way every other node
+    here does."""
+    query = payload["user_query"]
+    node = payload["node"]
+    agent_result, failures = _investigate(query, node)
+    finding: IncidentFinding = {
+        "hostname": node["hostname"],
+        "agent_result": agent_result,
+        "failures": failures,
+    }
+    return {"agent_results": [finding]}
+
+
+anomaly_investigate_one = guarded_send("anomaly.investigate", timeout_seconds=30.0)(_anomaly_investigate_one_impl)
+
+
+_ARBITRATION_SYSTEM_PROMPT = """You are Cortex's incident investigation assistant. You're given \
+independent findings for several nodes, gathered because they're all part of the same broad incident \
+question. Write a short (3-5 sentence) cross-node incident summary: which node(s) look most serious \
+and why, whether the findings look related (e.g. the same likely cause recurring, or one node's \
+symptom plausibly cascading to another) or look like separate unrelated issues, and what to check or \
+prioritize first. Use ONLY the findings given -- never invent a node, a number, or a detail that \
+wasn't provided."""
+
+
+def _arbitrate_narrative(query: str, ranked: list[IncidentFinding]) -> str:
+    fallback = " ".join(
+        f"{f['hostname']} (confidence {f['agent_result']['confidence']:.2f}): {f['agent_result']['summary']}"
+        for f in ranked
+    )
+    try:
+        llm = get_chat_model(temperature=0.2, tier="reasoning")
+        findings_text = "\n\n".join(
+            f"Node: {f['hostname']}\nConfidence: {f['agent_result']['confidence']:.2f}\n"
+            f"Finding: {f['agent_result']['summary']}"
+            for f in ranked
+        )
+        response = llm.invoke(
+            [
+                SystemMessage(content=_ARBITRATION_SYSTEM_PROMPT),
+                HumanMessage(content=f"Question: {query}\n\n{findings_text}"),
+            ]
+        )
+        text = (response.content or "").strip()
+        return text or fallback
+    except LLMConfigError:
+        return fallback
+    except Exception:
+        logger.exception("anomaly_arbitrate: LLM arbitration narrative failed, using fallback summary")
+        return fallback
+
+
+def anomaly_arbitrate(state: CortexState) -> CortexState:
+    """Converges the fan-out back into the single agent_result shape every
+    downstream node (should_trigger_after_anomaly, critic, compose)
+    already expects. Ranks findings by confidence, keeps the worst/most-
+    urgent one as `agent_result`'s primary raw_data shape (so chaining
+    into openstack_expert keeps working unchanged for the common case),
+    and -- only when there's more than one finding, so the single-node
+    case costs exactly what it always did -- adds a `multi_node_findings`
+    breakdown plus a reasoning-tier cross-node narrative.
+
+    Also the one place `state["agent_results"]` gets consumed: this node
+    runs sequentially after the fan-out has fully joined and reads that
+    field to do its ranking/merging. It's safe to just read it (no need
+    to clear it afterward) precisely because state.py's `_concat` reducer
+    dedupes by hostname -- see that function's docstring for why a plain
+    concatenating reducer would otherwise silently double the fan-out's
+    findings at every downstream node instead.
+    """
+    findings: list[IncidentFinding] = state.get("agent_results") or []
+
+    if not findings:
+        # anomaly_dispatch already set state["error"] (no scope resolved)
+        # -- nothing to arbitrate, same as the old "couldn't tell which
+        # node" short-circuit.
+        return state
+
+    for finding in findings:
+        for failure in finding.get("failures") or []:
+            state.setdefault("failures", []).append(failure)
+
+    ranked = sorted(findings, key=lambda f: f["agent_result"]["confidence"], reverse=True)
+    primary = ranked[0]
+    merged_raw = dict(primary["agent_result"]["raw_data"])
+
+    if len(ranked) > 1:
+        merged_raw["multi_node_findings"] = [
+            {
+                "hostname": f["hostname"],
+                "confidence": f["agent_result"]["confidence"],
+                "summary": f["agent_result"]["summary"],
+            }
+            for f in ranked
+        ]
+        summary = _arbitrate_narrative(state["user_query"], ranked)
+    else:
+        summary = primary["agent_result"]["summary"]
+
+    state["agent_result"] = {
+        "summary": summary,
+        "confidence": primary["agent_result"]["confidence"],
+        "raw_data": merged_raw,
+    }
+    state["error"] = None
+    state.setdefault("resolved_entities", {})["last_node"] = {"hostname": primary["hostname"]}
+    state["resolved_entities"]["last_agent"] = "anomaly"
     return state

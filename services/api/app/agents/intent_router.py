@@ -29,6 +29,23 @@ monitoring" -- a guess dressed up as an answer). This only fires when the
 LLM ran successfully; an LLM failure still degrades to DEFAULT_AGENT as
 before -- clarifying requires a working classifier to tell ambiguous from
 merely-unavailable.
+
+v0.8 adds two things:
+
+- This call now runs on the fast tier (services/llm_client.py) -- routing
+  is a short, single-shot classification made on literally every turn, the
+  textbook case for the cheaper model instead of the same reasoning-tier
+  model every deep-investigation agent uses.
+- A low-confidence classification no longer *always* falls straight to
+  clarifying. A bare follow-up like "what about now?" reads exactly like
+  genuine ambiguity to a classifier with no memory of what came before --
+  but if this conversation has session memory (state["session_memory"],
+  see agents/state.py and node_resolver.py's third resolution tier) with a
+  `last_agent`, that's a much better prior than "ask again": treat a
+  low-confidence turn as *probably* a continuation of the same topic and
+  route to `last_agent` instead. Genuinely low confidence on the *first*
+  turn of a conversation (no session memory yet) still clarifies exactly
+  as before.
 """
 import logging
 import os
@@ -105,7 +122,7 @@ def route(state: CortexState) -> CortexState:
     target: AgentName = DEFAULT_AGENT
 
     try:
-        llm = get_chat_model(temperature=0)
+        llm = get_chat_model(temperature=0, tier="fast")
         structured = llm.with_structured_output(_IntentClassification)
     except LLMConfigError:
         logger.warning("intent_router: LLM not configured, defaulting to %s", DEFAULT_AGENT)
@@ -134,6 +151,17 @@ def route(state: CortexState) -> CortexState:
 
     classification = call_result.value
     if classification.confidence < CLARIFY_THRESHOLD:
+        last_agent = (state.get("session_memory") or {}).get("last_agent")
+        if last_agent:
+            logger.info(
+                "intent_router: confidence %.2f for %r below threshold %.2f, but session "
+                "memory has last_agent=%r -- treating as a follow-up instead of clarifying",
+                classification.confidence, classification.agent, CLARIFY_THRESHOLD, last_agent,
+            )
+            state["intent"] = last_agent
+            state["target_agent"] = last_agent
+            return state
+
         logger.info(
             "intent_router: confidence %.2f for %r below threshold %.2f, asking for clarification",
             classification.confidence,

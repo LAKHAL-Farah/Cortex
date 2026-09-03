@@ -18,9 +18,17 @@ Two-tier, cheapest-first:
    before being trusted, so a hallucinated hostname can't leak through.
 
 If neither tier lands on exactly one node -- including because the LLM
-isn't configured or the call fails -- this returns None rather than
-guessing, same as v0.1's behavior: a wrong node's data is worse than
-admitting we're not sure which one was meant.
+isn't configured or the call fails -- there's a third, last-resort tier
+(v0.8, session memory): if the caller passes `session_memory` and it has a
+`last_node` from an earlier turn in the same conversation, and that
+hostname is still present in the *current* `known_nodes` (re-validated
+against the Living Model, not trusted blindly -- a node removed from
+topology since that earlier turn should not still resolve), that node is
+returned. This is what lets a bare follow-up like "what about now?" -- no
+hostname in it at all -- resolve to "the node we were just talking about"
+instead of falling through to "I couldn't tell which node you meant" on
+every single-word follow-up in a conversation. Still returns None (not a
+guess) if there's no session memory to fall back on either.
 """
 import logging
 import re
@@ -80,7 +88,7 @@ def _exact_match(query: str, known_nodes: list[KnownNode]) -> KnownNode | None:
 def _llm_match(query: str, known_nodes: list[KnownNode]) -> KnownNode | None:
     hostnames = [n["hostname"] for n in known_nodes]
     try:
-        llm = get_chat_model(temperature=0)
+        llm = get_chat_model(temperature=0, tier="fast")
         structured = llm.with_structured_output(_NodeResolution)
         result = structured.invoke(
             [
@@ -115,7 +123,26 @@ def _llm_match(query: str, known_nodes: list[KnownNode]) -> KnownNode | None:
     return None
 
 
-def resolve_node(query: str, known_nodes: list[KnownNode]) -> KnownNode | None:
+def _session_memory_match(known_nodes: list[KnownNode], session_memory: dict | None) -> KnownNode | None:
+    if not session_memory:
+        return None
+    last_node = session_memory.get("last_node")
+    if not last_node or not last_node.get("hostname"):
+        return None
+    for node in known_nodes:
+        if node["hostname"] == last_node["hostname"]:
+            return node
+    # The remembered hostname isn't in today's Living Model anymore
+    # (renamed/decommissioned since that earlier turn) -- don't resolve to
+    # a node that no longer exists.
+    return None
+
+
+def resolve_node(
+    query: str,
+    known_nodes: list[KnownNode],
+    session_memory: dict | None = None,
+) -> KnownNode | None:
     if not known_nodes:
         return None
     if len(known_nodes) == 1:
@@ -127,4 +154,8 @@ def resolve_node(query: str, known_nodes: list[KnownNode]) -> KnownNode | None:
     if node is not None:
         return node
 
-    return _llm_match(query, known_nodes)
+    node = _llm_match(query, known_nodes)
+    if node is not None:
+        return node
+
+    return _session_memory_match(known_nodes, session_memory)

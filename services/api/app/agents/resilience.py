@@ -216,6 +216,65 @@ def reset_all_breakers() -> None:
         _REGISTRY.clear()
 
 
+def guarded_send(name: str, timeout_seconds: float = 20.0):
+    """Decorator for a LangGraph `Send`-target node function
+    `(payload) -> dict`, the fan-out counterpart to guarded_node below
+    (v0.8, dynamic incident fan-out -- see agents/nodes/anomaly.py's
+    anomaly_investigate_one and graph.py's Send("anomaly_investigate", ...)
+    wiring).
+
+    guarded_node's contract (mutate a copy of the *whole* state, return the
+    whole thing) only works for a single sequential node -- a Send target
+    is invoked once per fan-out branch, concurrently, each against a
+    narrow `payload` (not the graph's full state), and must return only a
+    partial update for whichever reducer-backed field it's contributing to
+    (see state.py's `agent_results`). Returning anything else -- in
+    particular, the caller's own already-read copy of that reducer field --
+    would get concatenated onto the channel a second time once LangGraph
+    merges concurrent branches, silently duplicating every finding.
+
+    On timeout/exception this still can't leave the turn hanging or crash
+    the whole fan-out over one unreachable node: instead of state["error"]
+    (guarded_node's move, which has no meaning here -- there is no single
+    shared "the turn failed") this returns one degraded IncidentFinding
+    for `payload["node"]` -- confidence 0.0, the failure explained in its
+    own summary -- so one bad node shows up as one bad row in the incident,
+    not a lost turn.
+    """
+    breaker = get_breaker(name, timeout_seconds=timeout_seconds)
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapped(payload):
+            result = breaker.call(fn, payload)
+            if result.ok:
+                return result.value
+
+            hostname = (payload.get("node") or {}).get("hostname", "unknown")
+            logger.warning(
+                "%s: Send-target call failed for %s, degrading that node's finding: %s",
+                name, hostname, result.failure,
+            )
+            return {
+                "agent_results": [{
+                    "hostname": hostname,
+                    "agent_result": {
+                        "summary": (
+                            f"Couldn't investigate {hostname} in time "
+                            f"({result.failure['error_type']}); skipped for this incident."
+                        ),
+                        "confidence": 0.0,
+                        "raw_data": {"hostname": hostname, "error": result.failure},
+                    },
+                    "failures": [result.failure],
+                }],
+            }
+
+        return wrapped
+
+    return decorator
+
+
 def guarded_node(name: str, timeout_seconds: float = 20.0):
     """Decorator for a LangGraph node function `(state) -> state`.
 
@@ -231,6 +290,15 @@ def guarded_node(name: str, timeout_seconds: float = 20.0):
     be mutating that copy after this function has already moved on to the
     fallback branch -- using a copy means that straggler can never write
     into the state this function (or the graph) actually returns.
+
+    Merges `result.value` back onto `state` via clear-then-update rather
+    than a plain `state.update(...)`, so a node that removes a key (rather
+    than only adding/overwriting one) actually removes it from the state
+    LangGraph sees too -- a plain `.update()` can't express a deletion.
+    Every node here already returns the complete state it was given
+    (mutated in place), so this behaves identically to the old `.update()`
+    in every case that already existed; it only matters for a node that
+    deliberately drops a key.
     """
     breaker = get_breaker(name, timeout_seconds=timeout_seconds)
 
@@ -242,6 +310,7 @@ def guarded_node(name: str, timeout_seconds: float = 20.0):
             duration_ms = (time.monotonic() - started) * 1000
 
             if result.ok:
+                state.clear()
                 state.update(result.value)
                 record_step(state, name, "ok", duration_ms)
                 return state
