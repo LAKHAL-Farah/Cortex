@@ -48,7 +48,22 @@ NVIDIA_NIM_BASE_URL = os.environ.get("NVIDIA_NIM_BASE_URL") or None
 # container by setting NVIDIA_NIM_FAST_BASE_URL, same knob shape as the
 # reasoning tier's own NVIDIA_NIM_BASE_URL, kept independent so the two
 # tiers can live on entirely different infra.
-NVIDIA_NIM_FAST_MODEL = os.environ.get("NVIDIA_NIM_FAST_MODEL", "meta/llama-3.1-8b-instruct")
+#
+# meta/llama-3.1-8b-instruct reached NIM end-of-life on 2026-08-26 (410
+# Gone). Every fast-tier call site does LLM-touching *structured* output
+# (.with_structured_output() in intent_router/node_resolver/prediction), so
+# the replacement needs supports_structured_output=True, not just a live
+# chat endpoint. Note langchain-nvidia-ai-endpoints' with_structured_output()
+# doesn't use OpenAI-style tools=[...]/tool_calls under the hood at all --
+# it uses NVIDIA's guided_json / OpenAI-compatible response_format
+# json_schema -- so a model failing a raw tool-call probe can still work
+# fine here; verify against the actual .with_structured_output() path (see
+# scripts/check_nvidia_models.py), not a tool_call probe.
+# nemotron-3-nano-30b-a3b is the small sibling of the reasoning tier's
+# nemotron-3-super-120b-a12b (same family, both flagged supports_tools=True
+# and supports_structured_output=True in langchain_nvidia_ai_endpoints'
+# model table) and is this package version's own default model.
+NVIDIA_NIM_FAST_MODEL = os.environ.get("NVIDIA_NIM_FAST_MODEL", "nvidia/nemotron-3-nano-30b-a3b")
 NVIDIA_NIM_FAST_BASE_URL = os.environ.get("NVIDIA_NIM_FAST_BASE_URL") or None
 # Falls back to NVIDIA_API_KEY -- only set this separately if the fast
 # tier's endpoint (e.g. a local/self-hosted NIM container) uses its own
