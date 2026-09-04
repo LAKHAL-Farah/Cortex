@@ -22,11 +22,12 @@ every entry is authored in:
 Two ways into this agent, distinguished by what's already in `state` when
 it runs (see graph.py):
 
-- **Chained**: routed here automatically straight after anomaly_agent or
-  monitoring_agent produced a real finding (see should_trigger_after_
-  anomaly/should_trigger_after_monitoring, which graph.py's conditional
-  edges call). `state["target_agent"]` is still "anomaly" or "monitoring"
-  at that point -- this agent reads that to know it's chained, and to know
+- **Chained**: routed here automatically straight after anomaly_agent,
+  monitoring_agent, or (v0.9) network_agent produced a real finding (see
+  should_trigger_after_anomaly/should_trigger_after_monitoring/
+  should_trigger_after_network, which graph.py's conditional edges call).
+  `state["target_agent"]` is still "anomaly"/"monitoring"/"network" at
+  that point -- this agent reads that to know it's chained, and to know
   which upstream `raw_data` shape to pull evidence from, then overwrites
   `target_agent` to "openstack_expert" once it has produced its own
   result (the original diagnosis's `raw_data` is nested under
@@ -39,6 +40,16 @@ it runs (see graph.py):
 Both paths converge on the same `_match_symptoms` -> `_render_answer`
 pipeline; only how the matcher's inputs (metric name, service binaries,
 free-text keywords, log line content) get assembled differs.
+
+v0.9 adds a third chaining source: network_agent (nodes/network.py). Its
+finding's `raw_data["neutron_signal"]["down_agents"]` maps straight onto
+`service_binaries` (a Neutron agent's `binary`, e.g. "neutron-l3-agent"),
+which is exactly what the catalog's neutron-dhcp-agent-down/
+neutron-l3-agent-down/neutron-ovs-agent-down entries already match on --
+those entries existed since before this agent had any live trigger for
+them (openstack_expert_catalog.py ships with every service-agent entry
+up front), so this is purely a new `_evidence_from_*` extractor plus one
+more `should_trigger_after_*` gate, no new catalog content.
 """
 import logging
 import re
@@ -203,6 +214,31 @@ def _evidence_from_monitoring(raw_data: dict) -> dict:
     }
 
 
+def _evidence_from_network(raw_data: dict) -> dict:
+    """network_agent (nodes/network.py) never produces free-text log
+    lines the way anomaly.py does -- its two checks are structured
+    readings (interface counters, Neutron agent/router/network/FIP
+    status), not a log stream to search for keywords. `down_agents`'
+    binaries feed `service_binaries` the same way anomaly's log-detected
+    binaries do; there's simply nothing to put in `log_lines` here, so
+    `_match_symptoms`' keyword-in-log-line scoring is a no-op for this
+    source rather than a gap.
+    """
+    neutron_signal = raw_data.get("neutron_signal") or {}
+    metric_signal = raw_data.get("metric_signal") or {}
+    down_agents = neutron_signal.get("down_agents") or []
+    service_binaries = [a["binary"] for a in down_agents if a.get("binary")]
+
+    evidence_sentences = [metric_signal.get("detail", ""), neutron_signal.get("detail", "")]
+    return {
+        "metric_name": None,
+        "service_binaries": service_binaries,
+        "log_lines": [],
+        "evidence_line": " ".join(s for s in evidence_sentences if s),
+        "hostname": raw_data.get("hostname"),
+    }
+
+
 def should_trigger_after_anomaly(state: CortexState) -> bool:
     """Whether anomaly_agent's result has anything for this agent to
     explain -- called from graph.py's conditional edge, and mirrors what
@@ -230,6 +266,27 @@ def should_trigger_after_monitoring(state: CortexState) -> bool:
         return False
     metrics = state["agent_result"]["raw_data"]
     return metrics.get("status") != "up" or metrics.get("health") != "healthy"
+
+
+def should_trigger_after_network(state: CortexState) -> bool:
+    """Whether network_agent's finding has anything for this agent to
+    explain -- same shape as should_trigger_after_anomaly: fires whenever
+    either of network_agent's two checks found something (a nonzero
+    error/drop rate, or a Neutron agent/router/network/FIP not fully up),
+    and leaves it to `_match_symptoms` to decide whether that something is
+    specific enough to actually match a catalog entry (see `_run_chained`'s
+    "no positive match -> leave upstream diagnosis as the final answer").
+    """
+    if state.get("error") or not state.get("agent_result"):
+        return False
+    raw_data = state["agent_result"]["raw_data"]
+    metric_signal = raw_data.get("metric_signal") or {}
+    neutron_signal = raw_data.get("neutron_signal") or {}
+    return bool(
+        metric_signal.get("has_signal")
+        or neutron_signal.get("has_signal")
+        or neutron_signal.get("degraded")
+    )
 
 
 # --------------------------------------------------------------------
@@ -330,6 +387,8 @@ def _run_chained(state: CortexState, upstream: str) -> CortexState:
 
     if upstream == "anomaly":
         evidence = _evidence_from_anomaly(raw_data)
+    elif upstream == "network":
+        evidence = _evidence_from_network(raw_data)
     else:
         evidence = _evidence_from_monitoring(raw_data)
 
@@ -395,6 +454,6 @@ def _run_standalone(state: CortexState) -> CortexState:
 
 def openstack_expert_agent(state: CortexState) -> CortexState:
     upstream = state.get("target_agent")
-    if upstream in ("anomaly", "monitoring") and state.get("agent_result") and not state.get("error"):
+    if upstream in ("anomaly", "monitoring", "network") and state.get("agent_result") and not state.get("error"):
         return _run_chained(state, upstream)
     return _run_standalone(state)

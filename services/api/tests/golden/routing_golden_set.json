@@ -7,6 +7,12 @@
     {"id": "r04", "query": "how much disk is free on compute-02", "expected_target_agent": "monitoring", "source": "extrapolated"},
     {"id": "r05", "query": "is nova-scheduler healthy right now", "expected_target_agent": "monitoring", "source": "extrapolated"},
 
+    {"id": "r41", "query": "is the network okay on compute-02", "expected_target_agent": "network", "source": "router_prompt_example"},
+    {"id": "r42", "query": "any floating IP issues", "expected_target_agent": "network", "source": "router_prompt_example"},
+    {"id": "r43", "query": "check router status", "expected_target_agent": "network", "source": "router_prompt_example"},
+    {"id": "r44", "query": "is there packet loss on storage-09", "expected_target_agent": "network", "source": "router_prompt_example"},
+    {"id": "r45", "query": "is neutron-openvswitch-agent up on compute-02", "expected_target_agent": "network", "source": "extrapolated", "notes": "Contrast with r31/r34 (openstack_expert): those ask HOW to confirm an agent is up (a command-level answer); this asks whether it IS up right now (a live status read) -- see intent_router.py's network bullet."},
+
     {"id": "r06", "query": "will compute-02 run out of disk", "expected_target_agent": "prediction", "source": "router_prompt_example"},
     {"id": "r07", "query": "what's the CPU trend for compute-02 over the next week", "expected_target_agent": "prediction", "source": "router_prompt_example"},
     {"id": "r08", "query": "when will storage-09 hit 90% disk usage", "expected_target_agent": "prediction", "source": "router_prompt_example"},

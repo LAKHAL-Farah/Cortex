@@ -72,6 +72,18 @@ external dependency on their own account, so there's no timeout/degrade
 case worth the guarded_node machinery -- they just need a trace event
 recorded, which trace.traced does directly.
 
+v0.9 adds a seventh node, "network" (nodes/network.py) -- router/
+floating-IP/agent health plus node-level network-traffic signals. It's a
+plain leaf, wired exactly like monitoring: one more conditional-edge
+target off the router, and its own should_trigger_after_network ->
+openstack_expert chain (reusing the neutron-*-agent-down catalog entries
+that were already sitting unused in openstack_expert_catalog.py). This
+does not yet touch the anomaly fan-out above -- a broad "is anything
+wrong" question still only dispatches Anomaly investigations; fanning
+that dispatch out across Network (and Security, once it exists) so
+compose.py's arbitration has more than one agent's theory to compare is
+deferred to when the Security Agent lands (see compose.py's docstring).
+
 v0.8 (efficiency & scale prep) replaces the single "anomaly" node with
 three: "anomaly_dispatch" (resolves which node(s) this turn investigates,
 scoped by the Living Model rather than any fixed list -- see nodes/
@@ -103,10 +115,12 @@ from .nodes.anomaly import (
 )
 from .nodes.critic import critic_check
 from .nodes.monitoring import monitoring_agent
+from .nodes.network import network_agent
 from .nodes.openstack_expert import (
     openstack_expert_agent,
     should_trigger_after_anomaly,
     should_trigger_after_monitoring,
+    should_trigger_after_network,
 )
 from .nodes.prediction import prediction_agent
 from .nodes.rag import rag_agent
@@ -133,6 +147,7 @@ def build_graph():
     graph = StateGraph(CortexState)
     graph.add_node("router", traced("router")(route))
     graph.add_node("monitoring", guarded_node("monitoring", timeout_seconds=15.0)(monitoring_agent))
+    graph.add_node("network", guarded_node("network", timeout_seconds=15.0)(network_agent))
     graph.add_node("prediction", guarded_node("prediction", timeout_seconds=15.0)(prediction_agent))
     graph.add_node("rag", guarded_node("rag", timeout_seconds=25.0)(rag_agent))
     graph.add_node("anomaly_dispatch", guarded_node("anomaly_dispatch", timeout_seconds=8.0)(anomaly_dispatch))
@@ -151,6 +166,7 @@ def build_graph():
         lambda state: state["target_agent"],
         {
             "monitoring": "monitoring",
+            "network": "network",
             "prediction": "prediction",
             "rag": "rag",
             "anomaly": "anomaly_dispatch",
@@ -172,6 +188,11 @@ def build_graph():
     graph.add_conditional_edges(
         "monitoring",
         lambda state: "openstack_expert" if should_trigger_after_monitoring(state) else "critic",
+        {"openstack_expert": "openstack_expert", "critic": "critic"},
+    )
+    graph.add_conditional_edges(
+        "network",
+        lambda state: "openstack_expert" if should_trigger_after_network(state) else "critic",
         {"openstack_expert": "openstack_expert", "critic": "critic"},
     )
     graph.add_edge("prediction", "critic")

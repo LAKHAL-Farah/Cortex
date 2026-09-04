@@ -30,6 +30,12 @@ LLM ran successfully; an LLM failure still degrades to DEFAULT_AGENT as
 before -- clarifying requires a working classifier to tell ambiguous from
 merely-unavailable.
 
+v0.9 adds a sixth branch, "network" -- router/floating-IP/agent health and
+node-level network-traffic anomalies (see nodes/network.py). Same
+"leaf, straightforward" shape as monitoring, so it's a plain addition to
+the enum/prompt below, not a structural change to how routing itself
+works.
+
 v0.8 adds two things:
 
 - This call now runs on the fast tier (services/llm_client.py) -- routing
@@ -59,7 +65,7 @@ from .state import CortexState
 
 logger = logging.getLogger(__name__)
 
-AgentName = Literal["monitoring", "prediction", "rag", "anomaly", "openstack_expert"]
+AgentName = Literal["monitoring", "prediction", "rag", "anomaly", "openstack_expert", "network"]
 
 # Safest, cheapest default: a direct status pull, no forecast math,
 # knowledge-base retrieval, or multi-source investigation involved.
@@ -73,16 +79,20 @@ CLARIFY_THRESHOLD = float(os.environ.get("ROUTER_CLARIFY_THRESHOLD", "0.5"))
 
 _CLARIFYING_QUESTION = (
     "I'm not confident which of these you're asking about -- could you clarify? "
-    "I can check current live status (CPU/RAM/disk/uptime/health), forecast a future trend "
-    "(e.g. \"will X run out of disk\"), look up how-to/troubleshooting guidance from the "
-    "knowledge base, investigate a suspected incident by correlating metrics and logs, or walk "
-    "through a specific known symptom (a service down, a resource pressure) with commands to "
-    "check and fix it."
+    "I can check current live status (CPU/RAM/disk/uptime/health), check network/router/"
+    "floating-IP health, forecast a future trend (e.g. \"will X run out of disk\"), look up "
+    "how-to/troubleshooting guidance from the knowledge base, investigate a suspected incident "
+    "by correlating metrics and logs, or walk through a specific known symptom (a service down, "
+    "a resource pressure) with commands to check and fix it."
 )
 
 _SYSTEM_PROMPT = """You route a user's infrastructure question to exactly one specialist agent:
 
 - monitoring: current/live status right now -- CPU, RAM, disk, uptime, up/down, health.
+- network: network/connectivity health for a node -- router or floating-IP status, whether a \
+Neutron agent (neutron-l3-agent/neutron-dhcp-agent/neutron-openvswitch-agent) is up, or \
+node-level network interface errors/drops/throughput. E.g. "is the network okay on compute-02", \
+"any floating IP issues", "check router status", "is there packet loss on storage-09".
 - prediction: forecast / future-trend questions -- "will X run out of disk", "CPU trend for \
 the next week", "when will Y hit 90%".
 - rag: how-to / troubleshooting / explanatory questions -- "how do we fix X", "why does Y \
@@ -90,7 +100,8 @@ happen", "what's the procedure for Z", anything about docs, runbooks, or how a s
 - anomaly: something is wrong / investigate an incident -- "something's wrong with compute-01", \
 "why is X acting up", "investigate this alert", "is X having an issue" -- questions that need \
 correlating metric and log evidence to figure out what's actually happening, as opposed to a \
-plain current-value read (that's monitoring).
+plain current-value read (that's monitoring) or a plain network/connectivity check (that's \
+network).
 - openstack_expert: you already have a specific, named technical symptom in mind -- a resource \
 metric, or a specific OpenStack service like nova-compute/nova-scheduler/cinder-volume/ \
 neutron-l3-agent/neutron-dhcp-agent/neutron-openvswitch-agent, or a hypervisor/libvirt/RabbitMQ/ \

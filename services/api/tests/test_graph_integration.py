@@ -18,8 +18,9 @@ from types import SimpleNamespace
 import app.agents.intent_router as intent_router
 import app.agents.nodes.anomaly as anomaly
 import app.agents.nodes.monitoring as monitoring
+import app.agents.nodes.network as network
 from app.agents.graph import app_graph
-from app.services import loki_client
+from app.services import loki_client, network_health
 
 NODE = {"hostname": "compute-02", "role": "compute", "instance": "10.0.1.12:9100"}
 KNOWN_NODES = [NODE]
@@ -158,6 +159,92 @@ def test_healthy_monitoring_reading_does_not_chain_into_expert_agent(monkeypatch
 
     assert result["target_agent"] == "monitoring"  # never chained -- nothing to teach
     assert "What's happening" not in result["final_answer"]
+
+
+# --------------------------------------------------------------------
+# Chaining after network (v0.9)
+# --------------------------------------------------------------------
+
+def _network_health(agents=None, routers=None, networks=None, floating_ips=None):
+    return {
+        "hostname": NODE["hostname"], "agents": agents or [], "routers": routers or [],
+        "networks": networks or [], "floating_ips": floating_ips or [],
+    }
+
+
+def test_down_neutron_agent_chains_into_expert_agent(monkeypatch):
+    _route_to(monkeypatch, "network")
+    monkeypatch.setattr(network, "collect_network_metrics", lambda: [{
+        "instance": NODE["instance"], "node": NODE["hostname"], "role": NODE["role"],
+        "network_rx_bytes": 1000.0, "network_tx_bytes": 500.0,
+        "network_errors_per_sec": 0.0, "network_drops_per_sec": 0.0, "status": "up",
+    }])
+    down_agent = {
+        "id": "a1", "binary": "neutron-openvswitch-agent", "agent_type": "Open vSwitch agent",
+        "host": NODE["hostname"], "alive": False, "admin_state_up": True,
+    }
+    monkeypatch.setattr(
+        network_health, "get_node_network_health",
+        lambda hostname, conn=None: _network_health(agents=[down_agent]),
+    )
+
+    result = _invoke("is the network okay on compute-02")
+
+    assert result["target_agent"] == "openstack_expert"
+    assert result["agent_result"]["raw_data"]["matched_symptom_id"] == "neutron-ovs-agent-down"
+    assert result["agent_result"]["raw_data"]["diagnosed_by"] == "network"
+    answer = result["final_answer"]
+    assert "What's happening" in answer
+    assert "How to confirm it yourself" in answer
+    assert "What's usually done about it" in answer
+
+
+def test_healthy_network_reading_does_not_chain_into_expert_agent(monkeypatch):
+    _route_to(monkeypatch, "network")
+    monkeypatch.setattr(network, "collect_network_metrics", lambda: [{
+        "instance": NODE["instance"], "node": NODE["hostname"], "role": NODE["role"],
+        "network_rx_bytes": 1000.0, "network_tx_bytes": 500.0,
+        "network_errors_per_sec": 0.0, "network_drops_per_sec": 0.0, "status": "up",
+    }])
+    healthy_agent = {
+        "id": "a1", "binary": "neutron-openvswitch-agent", "agent_type": "Open vSwitch agent",
+        "host": NODE["hostname"], "alive": True, "admin_state_up": True,
+    }
+    monkeypatch.setattr(
+        network_health, "get_node_network_health",
+        lambda hostname, conn=None: _network_health(agents=[healthy_agent]),
+    )
+
+    result = _invoke("is the network okay on compute-02")
+
+    assert result["target_agent"] == "network"  # never chained -- nothing to teach
+    assert "What's happening" not in result["final_answer"]
+
+
+def test_neutron_outage_during_network_check_degrades_but_does_not_hang(monkeypatch):
+    _route_to(monkeypatch, "network")
+    monkeypatch.setattr(network, "collect_network_metrics", lambda: [{
+        "instance": NODE["instance"], "node": NODE["hostname"], "role": NODE["role"],
+        "network_rx_bytes": 1000.0, "network_tx_bytes": 500.0,
+        "network_errors_per_sec": 0.0, "network_drops_per_sec": 0.0, "status": "up",
+    }])
+
+    def _dead_connection(hostname, conn=None):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(network_health, "get_node_network_health", _dead_connection)
+
+    started = time.monotonic()
+    result = _invoke("is the network okay on compute-02")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0
+    assert result["failures"], "a failed Neutron call must surface as a FailureRecord"
+    assert result["failures"][0]["source"] == "network.neutron"
+    assert result["target_agent"] == "network"  # chain attempted (degraded still triggers,
+    # same idiom as anomaly.py's log_signal.get("degraded")) but with no down_agents to
+    # match against, openstack_expert finds nothing and leaves this diagnosis as final.
+    assert "couldn't complete" in result["final_answer"].lower()
 
 
 # --------------------------------------------------------------------
