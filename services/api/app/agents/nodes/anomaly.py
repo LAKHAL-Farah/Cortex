@@ -662,7 +662,10 @@ def _anomaly_investigate_one_impl(payload: dict) -> dict:
     return {"agent_results": [finding]}
 
 
-anomaly_investigate_one = guarded_send("anomaly.investigate", timeout_seconds=30.0)(_anomaly_investigate_one_impl)
+# TEMP (2026-09-04, revised): 60s (not None) -- see graph.py's build_graph
+# for why. _narrate() inside this call is what hits the LLM. Put 30.0 back
+# once NIM's current instability is resolved.
+anomaly_investigate_one = guarded_send("anomaly.investigate", timeout_seconds=60.0)(_anomaly_investigate_one_impl)
 
 
 _ARBITRATION_SYSTEM_PROMPT = """You are Cortex's incident investigation assistant. You're given \

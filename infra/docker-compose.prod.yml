@@ -94,6 +94,9 @@ services:
       # with NVIDIA_API_KEY unset.
       NVIDIA_API_KEY: ${NVIDIA_API_KEY}
       NVIDIA_NIM_MODEL: ${NVIDIA_NIM_MODEL:-nvidia/nemotron-3-super-120b-a12b}
+      # Fast tier (v0.8) -- router/node_resolver/monitoring/prediction. See
+      # infra/.env.example.
+      NVIDIA_NIM_FAST_MODEL: ${NVIDIA_NIM_FAST_MODEL:-nvidia/nemotron-3-super-120b-a12b}
       KNOWLEDGE_CHAT_MIN_SCORE: ${KNOWLEDGE_CHAT_MIN_SCORE:-0.2}
     volumes:
       - ../services/api:/app

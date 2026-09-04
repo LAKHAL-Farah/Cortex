@@ -141,7 +141,10 @@ def route(state: CortexState) -> CortexState:
         state["target_agent"] = target
         return state
 
-    breaker = get_breaker("router.intent_llm", timeout_seconds=6.0, max_retries=1)
+    # TEMP (2026-09-04, revised): 60s (not None) -- see graph.py's
+    # build_graph for why. Put a smaller number back (was 6.0) once NIM's
+    # current instability is resolved.
+    breaker = get_breaker("router.intent_llm", timeout_seconds=60.0, max_retries=1)
     call_result = breaker.call(
         structured.invoke,
         [

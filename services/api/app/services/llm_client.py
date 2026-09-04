@@ -28,6 +28,19 @@ Same NVIDIA NIM setup this always used (adr-0005): NVIDIA_API_KEY is
 required for both tiers, NVIDIA_NIM_MODEL/NVIDIA_NIM_BASE_URL are optional
 overrides for the reasoning tier specifically (unchanged env var names, so
 an existing deployment's config keeps meaning exactly what it always did).
+
+Incident note (2026-09-04): NVIDIA NIM had a rough week on this key --
+nemotron-3-nano-30b-a3b and llama-3.3-70b-instruct hit end-of-life (410),
+qwen2.5-72b-instruct wasn't resolvable (404), nemotron-3-ultra-550b-a55b
+was overloaded (503), and even nemotron-3-super-120b-a12b -- otherwise the
+most reliable model on this key -- returned a bare [500] Internal Server
+Error after a 49s hang under real traffic. That last one in particular
+means the *model choice* isn't the whole story here: this looks like
+capacity/incident issues on NVIDIA's side, not just "pick a better model."
+Before spending more time swapping models, check NVIDIA's status page /
+your build.nvidia.com account for an active incident, and re-run
+scripts/check_nvidia_models.py -- more than once, not just on a quiet
+moment -- to see whether this has resolved.
 """
 import os
 from typing import Literal
@@ -49,21 +62,23 @@ NVIDIA_NIM_BASE_URL = os.environ.get("NVIDIA_NIM_BASE_URL") or None
 # reasoning tier's own NVIDIA_NIM_BASE_URL, kept independent so the two
 # tiers can live on entirely different infra.
 #
-# meta/llama-3.1-8b-instruct reached NIM end-of-life on 2026-08-26 (410
-# Gone). Every fast-tier call site does LLM-touching *structured* output
-# (.with_structured_output() in intent_router/node_resolver/prediction), so
-# the replacement needs supports_structured_output=True, not just a live
-# chat endpoint. Note langchain-nvidia-ai-endpoints' with_structured_output()
-# doesn't use OpenAI-style tools=[...]/tool_calls under the hood at all --
-# it uses NVIDIA's guided_json / OpenAI-compatible response_format
-# json_schema -- so a model failing a raw tool-call probe can still work
-# fine here; verify against the actual .with_structured_output() path (see
-# scripts/check_nvidia_models.py), not a tool_call probe.
-# nemotron-3-nano-30b-a3b is the small sibling of the reasoning tier's
-# nemotron-3-super-120b-a12b (same family, both flagged supports_tools=True
-# and supports_structured_output=True in langchain_nvidia_ai_endpoints'
-# model table) and is this package version's own default model.
-NVIDIA_NIM_FAST_MODEL = os.environ.get("NVIDIA_NIM_FAST_MODEL", "nvidia/nemotron-3-nano-30b-a3b")
+# meta/llama-3.1-8b-instruct (the original default here) reached NVIDIA NIM
+# end-of-life and 410'd on every call. mistralai/mistral-nemotron (tried
+# next, 2026-09-04) answers chat fine but is NOT reliable for
+# .with_structured_output() -- langchain_nvidia_ai_endpoints warns it's
+# "not known to support structured output", and in practice it intermittently
+# returns malformed/null structured results, which silently broke both
+# intent_router's classification (wrong agent picked) and node_resolver's
+# fuzzy hostname match (falls through to "I couldn't tell which node you
+# meant") -- worse than a hard failure since it looks like it's working most
+# of the time. Falling back to the reasoning-tier model here trades away the
+# fast tier's cost/latency benefit, but every fast-tier call site
+# (intent_router, node_resolver, monitoring) needs structured output or a
+# short, must-be-correct answer, so correctness comes first. Re-split once a
+# small model is confirmed *consistently* clean on structured output --
+# don't trust a single passing run of scripts/check_nvidia_models.py for
+# this again; run it multiple times / on real traffic.
+NVIDIA_NIM_FAST_MODEL = os.environ.get("NVIDIA_NIM_FAST_MODEL", "nvidia/nemotron-3-super-120b-a12b")
 NVIDIA_NIM_FAST_BASE_URL = os.environ.get("NVIDIA_NIM_FAST_BASE_URL") or None
 # Falls back to NVIDIA_API_KEY -- only set this separately if the fast
 # tier's endpoint (e.g. a local/self-hosted NIM container) uses its own

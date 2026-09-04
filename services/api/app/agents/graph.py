@@ -146,13 +146,23 @@ def _fan_out_to_investigate(state: CortexState):
 def build_graph():
     graph = StateGraph(CortexState)
     graph.add_node("router", traced("router")(route))
-    graph.add_node("monitoring", guarded_node("monitoring", timeout_seconds=15.0)(monitoring_agent))
-    graph.add_node("network", guarded_node("network", timeout_seconds=15.0)(network_agent))
-    graph.add_node("prediction", guarded_node("prediction", timeout_seconds=15.0)(prediction_agent))
-    graph.add_node("rag", guarded_node("rag", timeout_seconds=25.0)(rag_agent))
+    # TEMP (2026-09-04, revised): a bounded but generous 60s, not None
+    # anymore -- an actual NVIDIA NIM 500 in production took 49s to even
+    # fail (see incident note in llm_client.py), and an unbounded
+    # timeout_seconds=None on a call that hangs instead of erroring would
+    # tie up one of _EXECUTOR's 16 worker threads forever, eventually
+    # starving unrelated requests. 60s gives real slow-but-working calls
+    # room while still bounding the damage from a stuck one. Put a
+    # smaller, latency-tuned number back (was 15.0/15.0/15.0/25.0/30.0 in
+    # that order) once NIM's current instability (see llm_client.py) is
+    # resolved and you have clean latency numbers to size against.
+    graph.add_node("monitoring", guarded_node("monitoring", timeout_seconds=60.0)(monitoring_agent))
+    graph.add_node("network", guarded_node("network", timeout_seconds=60.0)(network_agent))
+    graph.add_node("prediction", guarded_node("prediction", timeout_seconds=60.0)(prediction_agent))
+    graph.add_node("rag", guarded_node("rag", timeout_seconds=60.0)(rag_agent))
     graph.add_node("anomaly_dispatch", guarded_node("anomaly_dispatch", timeout_seconds=8.0)(anomaly_dispatch))
     graph.add_node("anomaly_investigate", anomaly_investigate_one)
-    graph.add_node("anomaly_arbitrate", guarded_node("anomaly", timeout_seconds=30.0)(anomaly_arbitrate))
+    graph.add_node("anomaly_arbitrate", guarded_node("anomaly", timeout_seconds=60.0)(anomaly_arbitrate))
     graph.add_node(
         "openstack_expert",
         guarded_node("openstack_expert", timeout_seconds=20.0)(openstack_expert_agent),

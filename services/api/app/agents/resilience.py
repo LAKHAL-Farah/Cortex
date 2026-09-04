@@ -116,11 +116,21 @@ class CircuitBreaker:
     def __init__(
         self,
         name: str,
-        timeout_seconds: float = 8.0,
+        timeout_seconds: Optional[float] = 8.0,
         max_retries: int = 1,
         failure_threshold: int = 3,
         reset_after_seconds: float = 30.0,
     ):
+        """`timeout_seconds=None` disables the wall-clock timeout for this
+        breaker (the call blocks until it returns, however long that
+        takes). Only meant as a temporary diagnostic knob -- e.g. to tell
+        "the new model is slow" apart from "the new model is broken" right
+        after a model swap -- not a permanent setting: a truly hung call
+        (LLM connection that never resolves) would then hang the whole
+        turn instead of degrading it, which is the exact failure mode this
+        module exists to prevent. Put a real number back once whatever
+        prompted the None is understood.
+        """
         self.name = name
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
@@ -170,14 +180,26 @@ class CircuitBreaker:
         attempts = 0
         error_type = "unknown"
         message = ""
-        for _ in range(1 + self.max_retries):
+        for attempt_index in range(1 + self.max_retries):
             attempts += 1
+            if attempt_index > 0:
+                # Brief pause before a retry -- an immediate re-attempt
+                # against an endpoint that just 500'd (NIM overload/
+                # incident, not our request) doesn't improve the odds and
+                # can pile onto the same overload. Fixed 2s rather than
+                # exponential: max_retries is 1 almost everywhere here, so
+                # there's nothing to back off progressively over.
+                time.sleep(2.0)
             try:
                 future = _EXECUTOR.submit(fn, *args, **kwargs)
                 value = future.result(timeout=self.timeout_seconds)
                 self._record_success()
                 return CallResult(ok=True, value=value)
             except FutureTimeoutError:
+                # Unreachable when timeout_seconds is None (future.result
+                # never raises this), but kept as the branch rather than
+                # special-cased away so re-enabling a real timeout later
+                # doesn't require touching this logic again.
                 error_type = "timeout"
                 message = f"{self.name}: call exceeded {self.timeout_seconds}s budget"
                 logger.warning("%s: attempt %d timed out after %.1fs", self.name, attempts, self.timeout_seconds)
@@ -216,7 +238,7 @@ def reset_all_breakers() -> None:
         _REGISTRY.clear()
 
 
-def guarded_send(name: str, timeout_seconds: float = 20.0):
+def guarded_send(name: str, timeout_seconds: Optional[float] = 20.0):
     """Decorator for a LangGraph `Send`-target node function
     `(payload) -> dict`, the fan-out counterpart to guarded_node below
     (v0.8, dynamic incident fan-out -- see agents/nodes/anomaly.py's
@@ -275,7 +297,7 @@ def guarded_send(name: str, timeout_seconds: float = 20.0):
     return decorator
 
 
-def guarded_node(name: str, timeout_seconds: float = 20.0):
+def guarded_node(name: str, timeout_seconds: Optional[float] = 20.0):
     """Decorator for a LangGraph node function `(state) -> state`.
 
     Every node already handles its own *known* failure modes inline (an

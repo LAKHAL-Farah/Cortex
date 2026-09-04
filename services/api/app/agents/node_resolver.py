@@ -106,10 +106,16 @@ def _llm_match(query: str, known_nodes: list[KnownNode]) -> KnownNode | None:
         logger.info("node_resolver: LLM not configured, no fuzzy match attempted")
         return None
     except Exception:
-        logger.exception("node_resolver: LLM node resolution failed")
+        # Includes structured-output parsing failures (a model that
+        # doesn't reliably conform to _NodeResolution's schema raises
+        # here, it doesn't return hostname=None) -- logged at warning, not
+        # info, since this is the "the model itself is unreliable" case,
+        # not the routine "no node mentioned" case below.
+        logger.warning("node_resolver: LLM node resolution call failed", exc_info=True)
         return None
 
     if not result.hostname:
+        logger.info("node_resolver: LLM found no matching node in query %r", query)
         return None
     for node in known_nodes:
         if node["hostname"] == result.hostname:
