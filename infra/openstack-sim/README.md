@@ -23,7 +23,9 @@ Keystone v3 / Nova v2.1 / Cinder v3 / Neutron v2.0 REST surface for
   `volume`), `GET /volume/v3/limits` (volume/gigabyte quota usage/caps)
 - Neutron: `GET /networks`, `/subnets`, `/routers`, `/floatingips`, `/agents`,
   `/agents/{id}/dhcp-networks`, `/agents/{id}/l3-routers` (the DHCP/L3
-  hosting-endpoint calls `topology_sync.py`'s Phase 3 needs)
+  hosting-endpoint calls `topology_sync.py`'s Phase 3 needs), `GET /ports`
+- Nova (continued): `GET /servers[/detail]` -- `topology_sync.py`'s Phase 6
+  needs
 
 **Not a real OpenStack** — no writes, no auth checks (any username/password
 in `clouds.sandbox.yaml` is accepted), no other endpoints. It exists purely
@@ -62,6 +64,17 @@ Network/Router edges too. The two `neutron-openvswitch-agent` agents (`a3`,
 plain RUNS_ON services. Edit the lists at the top of `app.py` directly if
 you need different/more topology to test against -- there's no database
 backing this, it's just Python literals.
+
+Plus three VMs (`SERVERS`) on `sandbox-net`, wired to it via three ports
+(`PORTS`) -- `sandbox-vm-1` on `compute1-sim`, `sandbox-vm-2` on
+`compute2-sim` (so a sync exercises the Instance-[:RUNS_ON]->Node edge
+against both hypervisors), and `sandbox-vm-3-broken`, deliberately seeded
+in `ERROR` status with its port `DOWN`/`admin_state_up: false` -- a
+realistic broken pairing (a failed port bind commonly leaves the instance
+stuck in `ERROR` too) so there's always a real problem for the planned
+network-topology visualization to show, the same way `ROUTERS[0]`/
+`NEUTRON_AGENTS` above always have one real, healthy structural edge to
+test against.
 
 ## Running it standalone (without the rest of the sandbox stack)
 
@@ -154,6 +167,55 @@ To see the mark-and-sweep in action, comment out `ROUTERS[0]` (or any
 other entity) in `app.py`, restart the `openstack-sim` container, run the
 sync again, and confirm the corresponding vertex (and any CONNECTS/SERVES
 edge pointing at it) is gone from the graph.
+
+## Testing the workload topology (Phase 6) against this sim
+
+With the sandbox stack up, trigger a sync pass the same way as the Phase
+2/3 section above:
+
+```bash
+docker compose exec api python3 -c "
+from app.db import SessionLocal
+from app.services.topology_sync import sync_topology
+import json
+with SessionLocal() as db:
+    print(json.dumps(sync_topology(db), indent=2))
+"
+```
+
+Expect `instances: 3, ports: 3, workload_topology_ok: true` added to the
+summary alongside the Phase 2/3 counts. Then, via `docker compose exec
+neo4j cypher-shell`:
+
+```cypher
+// Every VM, which hypervisor it's on, and its flavor.
+MATCH (i:Instance) RETURN i.name, i.status, i.flavor_name;
+
+// RUNS_ON: which VM is on which hypervisor -- sandbox-vm-1/compute1-sim,
+// sandbox-vm-2/compute2-sim, sandbox-vm-3-broken/compute1-sim.
+MATCH (i:Instance)-[:RUNS_ON]->(n:Node) RETURN i.name, n.id;
+
+// HAS_PORT + CONNECTS chained: VM -> its port -> the subnet it's on.
+MATCH (i:Instance)-[:HAS_PORT]->(p:Port)-[:CONNECTS]->(s:Subnet)
+RETURN i.name, i.status, p.status, p.admin_state_up, s.id;
+```
+
+The last query is the one to look at for the deliberately-broken case:
+`sandbox-vm-3-broken` should show `i.status: "ERROR"` alongside its port's
+`p.status: "DOWN"`, `p.admin_state_up: false` -- a real, correlated
+instance+port problem for whatever reads this later (the network agent,
+the planned topology visualization) to have something to actually surface.
+
+To see the mark-and-sweep in action here too, comment out `SERVERS[2]`
+(and its matching `PORTS[2]`) in `app.py`, restart `openstack-sim`, run
+the sync again, and confirm both the Instance and Port vertex (and the
+RUNS_ON/HAS_PORT/CONNECTS edges pointing at them) are gone from the graph.
+
+To see a live migration in action, leave the seed data alone and instead
+change `SERVERS[0]`'s `"OS-EXT-SRV-ATTR:hypervisor_hostname"` from
+`"compute1-sim"` to `"compute2-sim"`, restart, and re-sync -- the first
+query above should now show `sandbox-vm-1` on `compute2-sim`, with no
+leftover edge to `compute1-sim`.
 
 ## Testing the Prometheus cross-check (Phase 4) against this sim
 

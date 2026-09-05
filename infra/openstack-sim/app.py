@@ -155,6 +155,87 @@ NEUTRON_AGENTS = [
     {"id": "a4", "binary": "neutron-openvswitch-agent", "host": "compute2-sim", "agent_type": "Open vSwitch agent", "alive": True, "admin_state_up": True},
 ]
 
+# Phase 6 seed data (topology_sync.py's instance/port sync) -- three VMs on
+# sandbox-net, two healthy (one per compute-sim node, exercising the
+# Instance-[:RUNS_ON]->Node edge across both hypervisors) and one
+# deliberately broken (ERROR status + its port DOWN/admin_state_up False),
+# so a sync against this sim always has a real problem to show on the
+# planned network-topology visualization, the same way ROUTERS/
+# NEUTRON_AGENTS above always have one real, working structural edge to
+# test against.
+SERVERS = [
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000041",
+        "name": "sandbox-vm-1",
+        "status": "ACTIVE",
+        "tenant_id": "sandbox-project",
+        # Extended attribute -- see topology_sync.py's Phase 6 docstring on
+        # why real Nova sometimes gates this field behind an admin-only
+        # policy even when the server listing itself is visible. The sim
+        # has no policy engine, so it's always present here.
+        "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute1-sim",
+        "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000042",
+        "name": "sandbox-vm-2",
+        "status": "ACTIVE",
+        "tenant_id": "sandbox-project",
+        "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute2-sim",
+        "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000043",
+        "name": "sandbox-vm-3-broken",
+        "status": "ERROR",
+        "tenant_id": "sandbox-project",
+        "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute1-sim",
+        "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
+    },
+]
+
+PORTS = [
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000051",
+        "name": "sandbox-vm-1-port",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:51",
+        "device_id": SERVERS[0]["id"],
+        "device_owner": "compute:nova",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.101"}],
+        "tenant_id": "sandbox-project",
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000052",
+        "name": "sandbox-vm-2-port",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:52",
+        "device_id": SERVERS[1]["id"],
+        "device_owner": "compute:nova",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.102"}],
+        "tenant_id": "sandbox-project",
+    },
+    {
+        # The broken pairing: sandbox-vm-3-broken's port is DOWN and
+        # admin-disabled -- a realistic combination (a failed port bind
+        # commonly leaves the instance stuck in ERROR too).
+        "id": "8f3f0f4a-0000-0000-0000-000000000053",
+        "name": "sandbox-vm-3-port",
+        "status": "DOWN",
+        "admin_state_up": False,
+        "mac_address": "fa:16:3e:00:00:53",
+        "device_id": SERVERS[2]["id"],
+        "device_owner": "compute:nova",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.103"}],
+        "tenant_id": "sandbox-project",
+    },
+]
+
 # DHCP/L3 hosting-endpoint seed data -- what
 # GET /v2.0/agents/{agent_id}/dhcp-networks and .../l3-routers return,
 # keyed by agent id. Mirrors what conn.network.dhcp_agent_hosting_networks()
@@ -337,6 +418,22 @@ def list_services():
     return {"services": NOVA_SERVICES}
 
 
+@app.get("/v2.1/servers/detail")
+def list_servers_detail():
+    # openstacksdk's compute.servers(details=True) hits this path.
+    # Real Nova also accepts filters (?status=, ?host=, ?all_tenants=,
+    # ...) as query params; the sim ignores them and always returns the
+    # full seed list, same simplification every other list endpoint here
+    # makes. See topology_sync.py's Phase 6 docstring for why
+    # all_projects/all_tenants isn't something Cortex actually asks for.
+    return {"servers": SERVERS}
+
+
+@app.get("/v2.1/servers")
+def list_servers():
+    return {"servers": SERVERS}
+
+
 @app.get("/v2.1/limits")
 def get_compute_limits(tenant_id: str | None = None):
     # `tenant_id` is what openstacksdk's compute.get_limits(project_id=...)
@@ -418,6 +515,11 @@ def list_dhcp_agent_networks(agent_id: str):
 @app.get("/v2.0/agents/{agent_id}/l3-routers")
 def list_l3_agent_routers(agent_id: str):
     return {"routers": L3_AGENT_ROUTERS.get(agent_id, [])}
+
+
+@app.get("/v2.0/ports")
+def list_ports():
+    return {"ports": PORTS}
 
 
 @app.get("/healthz")

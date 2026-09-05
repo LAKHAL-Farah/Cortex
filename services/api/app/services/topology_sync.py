@@ -12,6 +12,37 @@ the Neutron entities' own structural links to each other -- Subnet to its
 Network, a Router's external gateway to its Network, a FloatingIP to its
 Network and (if associated) its Router.
 
+Phase 6: Nova server instances and Neutron ports -> (:Instance)/(:Port),
+plus (:Instance)-[:RUNS_ON]->(:Node) (which hypervisor a VM currently runs
+on -- unlike every other RUNS_ON edge in this graph, this one *can* change
+after creation via live migration, so it gets the same clear-then-recreate
+treatment as a router's gateway rather than a plain MERGE),
+(:Instance)-[:HAS_PORT]->(:Port) (from a port's own `device_id`/
+`device_owner`, scoped to `device_owner` starting with "compute:" --
+DHCP/router-interface/floating-IP ports exist in Neutron too but aren't
+vertices here; the Router/FloatingIP vertices and their existing CONNECTS
+edges already cover what those represent), and (:Port)-[:CONNECTS]->
+(:Subnet) (one edge per entry in the port's `fixed_ips`, so a dual-stack
+port lands on both its subnets).
+
+Two things worth knowing before touching this phase:
+
+- `servers()` is called *without* `all_projects=True`. `cortex-reader`
+  (adr-0002) is a project-scoped reader on whichever project owns the
+  hypervisors, and asking for every project's servers needs broader
+  visibility than that credential was ever provisioned for. This only
+  syncs instances in that same project -- multi-project visibility is a
+  deliberate non-goal here, not an oversight, until there's a real reason
+  to widen the credential.
+- A server's hypervisor host (`OS-EXT-SRV-ATTR:hypervisor_hostname`) is
+  itself a policy-gated field in real Nova, commonly admin-only even when
+  the server listing itself is visible. If `cortex-reader` can't see it,
+  `hypervisor_hostname` comes back `None` per server and this phase simply
+  doesn't create that instance's RUNS_ON edge that pass -- the Instance
+  vertex and its HAS_PORT/CONNECTS edges (which don't depend on this
+  field) are synced regardless. Not treated as a failure worth logging
+  per-instance; expected to be silent and permanent on some clouds.
+
 Both phases share one mark-and-sweep pass that removes graph vertices (and,
 for the edges that can legitimately change target -- router gateways,
 floating IP associations, agent hosting assignments -- the edges too) for
@@ -104,6 +135,39 @@ def _gateway_network_id(router: Any) -> str | None:
     if not info:
         return None
     return info.get("network_id")
+
+
+def _flavor_fields(server: Any) -> tuple[str | None, int | None, int | None]:
+    """A server's `flavor` is a nested dict (embedded since Nova
+    microversion 2.47), not a scalar -- Neo4j node properties can only be
+    primitives/arrays of primitives, so this pulls out just the three
+    scalar fields worth displaying (name, vcpus, ram) rather than storing
+    the dict itself, which would make the graph write throw. Returns all
+    None if `flavor` is missing or not a dict (e.g. an older microversion
+    that only embeds a flavor id + links).
+    """
+    flavor = getattr(server, "flavor", None)
+    if not isinstance(flavor, dict):
+        return None, None, None
+    name = flavor.get("original_name") or flavor.get("id")
+    return name, flavor.get("vcpus"), flavor.get("ram")
+
+
+def _port_fixed_ip_address(port: Any) -> str | None:
+    """First fixed IP's address, for display -- same
+    single-scalar-property convention `FloatingIP.fixed_ip_address`
+    already uses elsewhere in this graph. The full `fixed_ips` list (each
+    entry a {subnet_id, ip_address} dict) isn't stored as a property for
+    the same reason `_flavor_fields` doesn't store the flavor dict --
+    Neo4j properties can't hold a list of maps. The subnet relationships
+    it carries are captured properly as CONNECTS edges instead (see
+    _sync_port_subnets_to_graph), this is just a convenience field for
+    display.
+    """
+    fixed_ips = getattr(port, "fixed_ips", None) or []
+    if not fixed_ips:
+        return None
+    return fixed_ips[0].get("ip_address")
 
 
 def _register_new_hypervisor(db: Session, hostname: str, ip_address: str) -> schemas.NodeOut | None:
@@ -399,6 +463,148 @@ def _sync_l3_hosting_to_graph(session, agent_ids: list[str], hosting: list[dict]
         )
 
 
+def _sync_instances_to_graph(session, instances: list[dict]) -> None:
+    """Upserts :Instance vertices only -- no RUNS_ON here, see
+    _sync_instance_hosts_to_graph, which needs its own clear-then-recreate
+    pass since (unlike every other vertex synced by a plain MERGE in this
+    module) a VM's host can change after creation.
+    """
+    session.run(
+        """
+        UNWIND $instances AS inst
+        MERGE (i:Instance {id: inst.id})
+        SET i.name = inst.name,
+            i.status = inst.status,
+            i.project_id = inst.project_id,
+            i.flavor_name = inst.flavor_name,
+            i.flavor_vcpus = inst.flavor_vcpus,
+            i.flavor_ram_mb = inst.flavor_ram_mb,
+            i.last_synced_at = datetime()
+        """,
+        instances=instances,
+    )
+
+
+def _sync_instance_hosts_to_graph(session, instances: list[dict]) -> None:
+    """RUNS_ON Instance->Node, clear-then-recreate like
+    _sync_router_gateways_to_graph -- a live migration moves a VM to a
+    different hypervisor, so a plain MERGE would leave the edge to the old
+    host dangling alongside the new one instead of replacing it. Instances
+    with no visible `hypervisor_hostname` this pass (see this module's
+    docstring: real Nova's extended server attributes are often
+    admin-only) have their old edge cleared but no new one created --
+    correct behavior once the field is genuinely gone, but also what
+    happens on a cloud where the field was never visible to begin with,
+    which is why this isn't logged as a failure.
+    """
+    session.run(
+        """
+        UNWIND $instances AS inst
+        MATCH (i:Instance {id: inst.id})
+        OPTIONAL MATCH (i)-[old:RUNS_ON]->(:Node)
+        DELETE old
+        """,
+        instances=instances,
+    )
+    hosted = [inst for inst in instances if inst["hypervisor_hostname"]]
+    if hosted:
+        session.run(
+            """
+            UNWIND $instances AS inst
+            MATCH (i:Instance {id: inst.id})
+            MATCH (n:Node {id: inst.hypervisor_hostname})
+            MERGE (i)-[:RUNS_ON]->(n)
+            """,
+            instances=hosted,
+        )
+
+
+def _sync_ports_to_graph(session, ports: list[dict]) -> None:
+    """Upserts :Port vertices only -- no edges here, see
+    _sync_instance_ports_to_graph/_sync_port_subnets_to_graph."""
+    session.run(
+        """
+        UNWIND $ports AS p
+        MERGE (port:Port {id: p.id})
+        SET port.name = p.name,
+            port.status = p.status,
+            port.admin_state_up = p.admin_state_up,
+            port.mac_address = p.mac_address,
+            port.device_owner = p.device_owner,
+            port.fixed_ip_address = p.fixed_ip_address,
+            port.last_synced_at = datetime()
+        """,
+        ports=ports,
+    )
+
+
+def _sync_instance_ports_to_graph(session, ports: list[dict]) -> None:
+    """HAS_PORT Instance->Port, clear-then-recreate per port (mirrors
+    _sync_floating_ip_routers_to_graph's per-target-vertex approach) --
+    port reassignment between VMs is unusual but not impossible on some
+    SDN setups, and this is cheap insurance against a stale edge either
+    way. Scoped to `device_owner` starting with "compute:" -- this graph
+    only models the VM-facing side of Neutron ports (see this module's
+    docstring); a DHCP or router-interface port never gets a HAS_PORT
+    edge, only a Port vertex.
+    """
+    session.run(
+        """
+        UNWIND $ports AS p
+        MATCH (port:Port {id: p.id})
+        OPTIONAL MATCH (:Instance)-[old:HAS_PORT]->(port)
+        DELETE old
+        """,
+        ports=ports,
+    )
+    vm_owned = [p for p in ports if p["device_id"] and p["device_owner"] and p["device_owner"].startswith("compute:")]
+    if vm_owned:
+        session.run(
+            """
+            UNWIND $ports AS p
+            MATCH (i:Instance {id: p.device_id})
+            MATCH (port:Port {id: p.id})
+            MERGE (i)-[:HAS_PORT]->(port)
+            """,
+            ports=vm_owned,
+        )
+
+
+def _sync_port_subnets_to_graph(session, ports: list[dict]) -> None:
+    """CONNECTS Port->Subnet, one edge per `fixed_ips` entry, clear-then-
+    recreate per port -- an IP (and therefore subnet) reassignment on an
+    existing port needs the old edge gone, same reasoning as every other
+    clear-then-recreate pass in this module. `fixed_ip_subnets` is
+    `fixed_ips` pre-flattened to just the subnet ids the caller needs
+    (see sync_topology) -- keeps this function from having to know
+    anything about fixed_ips' full shape.
+    """
+    session.run(
+        """
+        UNWIND $ports AS p
+        MATCH (port:Port {id: p.id})
+        OPTIONAL MATCH (port)-[old:CONNECTS]->(:Subnet)
+        DELETE old
+        """,
+        ports=ports,
+    )
+    edges = [
+        {"port_id": p["id"], "subnet_id": subnet_id}
+        for p in ports
+        for subnet_id in p["fixed_ip_subnets"]
+    ]
+    if edges:
+        session.run(
+            """
+            UNWIND $edges AS e
+            MATCH (port:Port {id: e.port_id})
+            MATCH (sub:Subnet {id: e.subnet_id})
+            MERGE (port)-[:CONNECTS]->(sub)
+            """,
+            edges=edges,
+        )
+
+
 def _sweep_stale_services(session, seen_ids: set[str]) -> int:
     """Removes any :Service vertex not touched by this pass -- a service
     that no longer shows up in Nova's or Cinder's service list (binary
@@ -463,14 +669,15 @@ def _sweep_stale_vertices(session, label: str, seen_ids: set[str]) -> int:
 
 def sync_topology(db: Session) -> dict:
     """One full pass: discover hypervisors/Nova services/Cinder services and
-    Neutron networks/subnets/routers/floating IPs/agents from OpenStack,
-    register any new hypervisor as a Postgres Node (see
+    Neutron networks/subnets/routers/floating IPs/agents/instances/ports
+    from OpenStack, register any new hypervisor as a Postgres Node (see
     _register_new_hypervisor), upsert the current picture into the graph
-    (Node/Service/Network/Subnet/Router/FloatingIP vertices, RUNS_ON/SERVES/
-    CONNECTS edges), then mark-and-sweep -- delete any vertex (and, where a
-    target can legitimately change over time, any edge) this pass didn't
-    touch, so decommissioned hosts, removed services, and deleted Neutron
-    resources don't linger in the graph forever.
+    (Node/Service/Network/Subnet/Router/FloatingIP/Instance/Port vertices,
+    RUNS_ON/SERVES/CONNECTS/HAS_PORT edges), then mark-and-sweep -- delete
+    any vertex (and, where a target can legitimately change over time, any
+    edge) this pass didn't touch, so decommissioned hosts, removed
+    services, and deleted Neutron resources don't linger in the graph
+    forever.
 
     Safe to call on a fixed interval (see main.py) -- every upsert is a
     MERGE keyed on a stable id, so re-running with unchanged OpenStack
@@ -492,8 +699,11 @@ def sync_topology(db: Session) -> dict:
     routers: list = []
     floating_ips: list = []
     neutron_agents: list = []
+    instances: list = []
+    ports: list = []
     hypervisors_ok = nova_services_ok = cinder_services_ok = False
     networks_ok = subnets_ok = routers_ok = floating_ips_ok = neutron_agents_ok = False
+    instances_ok = ports_ok = False
 
     try:
         hypervisors = list(conn.compute.hypervisors(details=True))
@@ -542,6 +752,20 @@ def sync_topology(db: Session) -> dict:
         neutron_agents_ok = True
     except Exception:
         logger.exception("topology sync: failed to list Neutron agents")
+
+    try:
+        # Deliberately no all_projects=True -- see this module's docstring
+        # (Phase 6) for why that's a scope decision, not an oversight.
+        instances = list(conn.compute.servers(details=True))
+        instances_ok = True
+    except Exception:
+        logger.exception("topology sync: failed to list Nova instances")
+
+    try:
+        ports = list(conn.network.ports())
+        ports_ok = True
+    except Exception:
+        logger.exception("topology sync: failed to list Neutron ports")
 
     existing_by_hostname = {n.hostname: n for n in crud.list_nodes(db)}
 
@@ -748,6 +972,35 @@ def sync_topology(db: Session) -> dict:
         }
         for fip in floating_ips
     ]
+    graph_instances = []
+    for server in instances:
+        flavor_name, flavor_vcpus, flavor_ram_mb = _flavor_fields(server)
+        graph_instances.append(
+            {
+                "id": server.id,
+                "name": getattr(server, "name", None),
+                "status": getattr(server, "status", None),
+                "project_id": getattr(server, "project_id", None),
+                "hypervisor_hostname": getattr(server, "hypervisor_hostname", None),
+                "flavor_name": flavor_name,
+                "flavor_vcpus": flavor_vcpus,
+                "flavor_ram_mb": flavor_ram_mb,
+            }
+        )
+    graph_ports = [
+        {
+            "id": port.id,
+            "name": getattr(port, "name", None),
+            "status": getattr(port, "status", None),
+            "admin_state_up": getattr(port, "is_admin_state_up", None),
+            "mac_address": getattr(port, "mac_address", None),
+            "device_id": getattr(port, "device_id", None),
+            "device_owner": getattr(port, "device_owner", None),
+            "fixed_ip_address": _port_fixed_ip_address(port),
+            "fixed_ip_subnets": [ip.get("subnet_id") for ip in (getattr(port, "fixed_ips", None) or []) if ip.get("subnet_id")],
+        }
+        for port in ports
+    ]
 
     # Only trust this pass to sweep if every listing it depends on actually
     # succeeded -- a partial picture (e.g. Cinder unreachable this tick)
@@ -760,12 +1013,19 @@ def sync_topology(db: Session) -> dict:
     # Nova/Cinder's sweep, and vice versa.
     complete_picture = hypervisors_ok and nova_services_ok and cinder_services_ok and neutron_agents_ok
     network_topology_ok = networks_ok and subnets_ok and routers_ok and floating_ips_ok
+    # Own guard, independent of network_topology_ok above: instances/ports
+    # depend on Nova/Neutron listing calls that networks/subnets/routers/
+    # floating_ips don't, and vice versa -- an outage in one shouldn't
+    # block the other's sweep, same reasoning as every other guard here.
+    workload_topology_ok = instances_ok and ports_ok
     swept_nodes = 0
     swept_services = 0
     swept_networks = 0
     swept_subnets = 0
     swept_routers = 0
     swept_floating_ips = 0
+    swept_instances = 0
+    swept_ports = 0
 
     with graph_db.driver.session() as session:
         if graph_nodes:
@@ -785,6 +1045,14 @@ def sync_topology(db: Session) -> dict:
             _sync_floating_ip_routers_to_graph(session, graph_floating_ips)
         _sync_dhcp_hosting_to_graph(session, dhcp_synced_agent_ids, dhcp_hosting)
         _sync_l3_hosting_to_graph(session, l3_synced_agent_ids, l3_hosting)
+
+        if graph_instances:
+            _sync_instances_to_graph(session, graph_instances)
+            _sync_instance_hosts_to_graph(session, graph_instances)
+        if graph_ports:
+            _sync_ports_to_graph(session, graph_ports)
+            _sync_instance_ports_to_graph(session, graph_ports)
+            _sync_port_subnets_to_graph(session, graph_ports)
 
         if complete_picture:
             swept_services = _sweep_stale_services(session, {s["id"] for s in graph_services})
@@ -810,16 +1078,29 @@ def sync_topology(db: Session) -> dict:
                 networks_ok, subnets_ok, routers_ok, floating_ips_ok,
             )
 
+        if workload_topology_ok:
+            swept_instances = _sweep_stale_vertices(session, "Instance", {i["id"] for i in graph_instances})
+            swept_ports = _sweep_stale_vertices(session, "Port", {p["id"] for p in graph_ports})
+        else:
+            logger.warning(
+                "topology sync: skipping instance/port mark-and-sweep this pass -- "
+                "incomplete picture (instances_ok=%s, ports_ok=%s)",
+                instances_ok, ports_ok,
+            )
+
     logger.info(
         "topology sync: %d hypervisor(s), %d Nova service(s), %d Cinder service(s), "
         "%d Neutron agent(s), %d network(s), %d subnet(s), %d router(s), %d floating IP(s), "
+        "%d instance(s), %d port(s), "
         "%d new compute node(s) registered, %d unresolved service host(s), "
         "%d stale node(s)/%d stale service(s)/%d stale network(s)/%d stale subnet(s)/"
-        "%d stale router(s)/%d stale floating IP(s) swept",
+        "%d stale router(s)/%d stale floating IP(s)/%d stale instance(s)/%d stale port(s) swept",
         len(hypervisors), len(nova_services), len(cinder_services),
         len(neutron_agents), len(networks), len(subnets), len(routers), len(floating_ips),
+        len(instances), len(ports),
         new_computes, len(unresolved_hosts), swept_nodes, swept_services,
         swept_networks, swept_subnets, swept_routers, swept_floating_ips,
+        swept_instances, swept_ports,
     )
 
     return {
@@ -831,6 +1112,8 @@ def sync_topology(db: Session) -> dict:
         "subnets": len(subnets),
         "routers": len(routers),
         "floating_ips": len(floating_ips),
+        "instances": len(instances),
+        "ports": len(ports),
         "dhcp_hosting_edges": len(dhcp_hosting),
         "l3_hosting_edges": len(l3_hosting),
         "new_computes": new_computes,
@@ -839,10 +1122,13 @@ def sync_topology(db: Session) -> dict:
         "unresolved_hosts": len(unresolved_hosts),
         "complete_picture": complete_picture,
         "network_topology_ok": network_topology_ok,
+        "workload_topology_ok": workload_topology_ok,
         "swept_nodes": swept_nodes,
         "swept_services": swept_services,
         "swept_networks": swept_networks,
         "swept_subnets": swept_subnets,
         "swept_routers": swept_routers,
         "swept_floating_ips": swept_floating_ips,
+        "swept_instances": swept_instances,
+        "swept_ports": swept_ports,
     }

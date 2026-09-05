@@ -35,6 +35,9 @@ SCHEMA_CONSTRAINTS = [
     "CREATE CONSTRAINT subnet_id IF NOT EXISTS FOR (s:Subnet) REQUIRE s.id IS UNIQUE",
     "CREATE CONSTRAINT router_id IF NOT EXISTS FOR (r:Router) REQUIRE r.id IS UNIQUE",
     "CREATE CONSTRAINT fip_id IF NOT EXISTS FOR (f:FloatingIP) REQUIRE f.id IS UNIQUE",
+    # Phase 6 (topology_sync.py's instance/port sync) additions.
+    "CREATE CONSTRAINT instance_id IF NOT EXISTS FOR (i:Instance) REQUIRE i.id IS UNIQUE",
+    "CREATE CONSTRAINT port_id IF NOT EXISTS FOR (p:Port) REQUIRE p.id IS UNIQUE",
 ]
 
 
@@ -57,9 +60,10 @@ def close_driver() -> None:
 # Phase 5 (API) read helpers.
 #
 # Everything topology_sync.py/prometheus_health.py write above is a plain
-# property graph over six vertex labels (Node, Service, Network, Subnet,
-# Router, FloatingIP) and three relationship types (RUNS_ON, SERVES,
-# CONNECTS) -- see docs/architecture/adr-0002-topology-graph.md and
+# property graph over eight vertex labels (Node, Service, Network, Subnet,
+# Router, FloatingIP, and, as of Phase 6, Instance and Port) and four
+# relationship types (RUNS_ON, SERVES, CONNECTS, and, as of Phase 6,
+# HAS_PORT) -- see docs/architecture/adr-0002-topology-graph.md and
 # adr-0003-prometheus-cross-check.md. These functions are the read side of
 # that same graph for routers/topology.py: no writes, no schema changes,
 # just Cypher that mirrors the shapes the sync code above already

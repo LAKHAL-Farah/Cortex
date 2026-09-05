@@ -83,6 +83,27 @@ def _agent(id, binary, host, agent_type, is_alive=True, is_admin_state_up=True, 
     )
 
 
+def _server(id, name="vm", status="ACTIVE", project_id="proj", hypervisor_hostname=None, flavor=None):
+    # `flavor` mirrors what openstacksdk actually hands back for an
+    # embedded flavor -- a dict-like object, not a plain dict, but a
+    # plain dict literal here behaves identically for _flavor_fields'
+    # purposes (isinstance(..., dict) and .get() both still work).
+    return types.SimpleNamespace(
+        id=id, name=name, status=status, project_id=project_id,
+        hypervisor_hostname=hypervisor_hostname,
+        flavor=flavor if flavor is not None else {"original_name": "m1.small", "vcpus": 1, "ram": 2048},
+    )
+
+
+def _port(id, name="port", status="ACTIVE", is_admin_state_up=True, mac_address="fa:16:3e:00:00:00",
+          device_id=None, device_owner=None, fixed_ips=None):
+    return types.SimpleNamespace(
+        id=id, name=name, status=status, is_admin_state_up=is_admin_state_up,
+        mac_address=mac_address, device_id=device_id, device_owner=device_owner,
+        fixed_ips=fixed_ips or [],
+    )
+
+
 class _FakeResult:
     def __init__(self, record):
         self._record = record
@@ -112,6 +133,12 @@ class _FakeGraphStore:
         self.fip_router_edges: dict[str, str] = {}
         self.dhcp_serves: dict[str, set] = {}
         self.l3_serves: dict[str, set] = {}
+        # Phase 6.
+        self.instances: dict[str, dict] = {}
+        self.ports: dict[str, dict] = {}
+        self.instance_host_edges: dict[str, str] = {}  # instance_id -> node_id
+        self.instance_port_edges: dict[str, str] = {}  # port_id -> instance_id
+        self.port_subnet_edges: dict[str, set] = {}  # port_id -> {subnet_id, ...}
 
 
 class _FakeSession:
@@ -254,6 +281,71 @@ class _FakeSession:
                 self.store.fip_router_edges.pop(i, None)
             return _FakeResult({"removed": len(stale)})
 
+        # ---- Phase 6: Instance/Port + RUNS_ON/HAS_PORT/CONNECTS ----
+
+        if "MERGE (i:Instance {id: inst.id})" in query:
+            for inst in kwargs["instances"]:
+                self.store.instances[inst["id"]] = inst
+            return _FakeResult(None)
+
+        if "OPTIONAL MATCH (i)-[old:RUNS_ON]->(:Node)" in query:
+            for inst in kwargs["instances"]:
+                self.store.instance_host_edges.pop(inst["id"], None)
+            return _FakeResult(None)
+
+        if "MATCH (n:Node {id: inst.hypervisor_hostname})" in query:
+            for inst in kwargs["instances"]:
+                if inst["id"] in self.store.instances and inst["hypervisor_hostname"] in self.store.nodes:
+                    self.store.instance_host_edges[inst["id"]] = inst["hypervisor_hostname"]
+            return _FakeResult(None)
+
+        if "MERGE (port:Port {id: p.id})" in query:
+            for p in kwargs["ports"]:
+                self.store.ports[p["id"]] = p
+            return _FakeResult(None)
+
+        if "OPTIONAL MATCH (:Instance)-[old:HAS_PORT]->(port)" in query:
+            for p in kwargs["ports"]:
+                self.store.instance_port_edges.pop(p["id"], None)
+            return _FakeResult(None)
+
+        if "MATCH (i:Instance {id: p.device_id})" in query:
+            for p in kwargs["ports"]:
+                if p["id"] in self.store.ports and p["device_id"] in self.store.instances:
+                    self.store.instance_port_edges[p["id"]] = p["device_id"]
+            return _FakeResult(None)
+
+        if "OPTIONAL MATCH (port)-[old:CONNECTS]->(:Subnet)" in query:
+            for p in kwargs["ports"]:
+                self.store.port_subnet_edges.pop(p["id"], None)
+            return _FakeResult(None)
+
+        if "MATCH (sub:Subnet {id: e.subnet_id})" in query:
+            for e in kwargs["edges"]:
+                if e["port_id"] in self.store.ports and e["subnet_id"] in self.store.subnets:
+                    self.store.port_subnet_edges.setdefault(e["port_id"], set()).add(e["subnet_id"])
+            return _FakeResult(None)
+
+        if "MATCH (v:Instance)" in query and "DETACH DELETE" in query:
+            seen = set(kwargs["seen_ids"])
+            stale = [i for i in self.store.instances if i not in seen]
+            for i in stale:
+                del self.store.instances[i]
+                self.store.instance_host_edges.pop(i, None)
+                for port_id, instance_id in list(self.store.instance_port_edges.items()):
+                    if instance_id == i:
+                        del self.store.instance_port_edges[port_id]
+            return _FakeResult({"removed": len(stale)})
+
+        if "MATCH (v:Port)" in query and "DETACH DELETE" in query:
+            seen = set(kwargs["seen_ids"])
+            stale = [i for i in self.store.ports if i not in seen]
+            for i in stale:
+                del self.store.ports[i]
+                self.store.port_subnet_edges.pop(i, None)
+                self.store.instance_port_edges.pop(i, None)
+            return _FakeResult({"removed": len(stale)})
+
         return _FakeResult(None)
 
     def __enter__(self):
@@ -284,7 +376,8 @@ class _FakeConn:
                  networks_raise=False, subnets_raise=False, routers_raise=False,
                  floating_ips_raise=False, neutron_agents_raise=False,
                  dhcp_hosting=None, dhcp_hosting_raise_for=None,
-                 l3_hosting=None, l3_hosting_raise_for=None):
+                 l3_hosting=None, l3_hosting_raise_for=None,
+                 instances=None, ports=None, instances_raise=False, ports_raise=False):
         def _hypervisors(details=False):
             if hypervisors_raise:
                 raise RuntimeError("nova hypervisors unreachable")
@@ -300,7 +393,12 @@ class _FakeConn:
                 raise RuntimeError("cinder services unreachable")
             return iter(cinder_services or [])
 
-        self.compute = types.SimpleNamespace(hypervisors=_hypervisors, services=_nova_services)
+        def _servers(details=False):
+            if instances_raise:
+                raise RuntimeError("nova servers unreachable")
+            return iter(instances or [])
+
+        self.compute = types.SimpleNamespace(hypervisors=_hypervisors, services=_nova_services, servers=_servers)
         self.block_storage = types.SimpleNamespace(services=_cinder_services)
 
         def _networks(**kw):
@@ -343,6 +441,11 @@ class _FakeConn:
                 raise RuntimeError(f"l3 hosting unreachable for {agent.id}")
             return iter(_l3_hosting.get(agent.id, []))
 
+        def _ports(**kw):
+            if ports_raise:
+                raise RuntimeError("neutron ports unreachable")
+            return iter(ports or [])
+
         self.network = types.SimpleNamespace(
             networks=_networks,
             subnets=_subnets,
@@ -351,6 +454,7 @@ class _FakeConn:
             agents=_agents,
             dhcp_agent_hosting_networks=_dhcp_agent_hosting_networks,
             agent_hosted_routers=_agent_hosted_routers,
+            ports=_ports,
         )
 
 
@@ -918,3 +1022,168 @@ def test_neutron_agents_failure_blocks_compute_sweep_too(monkeypatch):
     # agents, since they can populate placeholder Nodes too), so it's
     # skipped entirely on a partial picture -- compute1 survives.
     assert "compute1" in fake_driver.store.nodes
+
+
+# ------------------------------------------------------ Phase 6: instances/ports --
+
+def test_instance_and_port_synced_with_edges(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    server = _server("vm-1", hypervisor_hostname="compute1")
+    port = _port("port-1", device_id="vm-1", device_owner="compute:nova",
+                 fixed_ips=[{"subnet_id": "subnet-1", "ip_address": "10.0.1.101"}])
+    _set_conn(monkeypatch, _FakeConn(
+        hypervisors=[_hv("compute1")],
+        networks=[_network("net-1")],
+        subnets=[_subnet("subnet-1", network_id="net-1")],
+        instances=[server],
+        ports=[port],
+    ))
+
+    result = topology_sync.sync_topology(db)
+
+    store = fake_driver.store
+    assert result["instances"] == 1
+    assert result["ports"] == 1
+    assert store.instances["vm-1"]["flavor_name"] == "m1.small"
+    assert store.instances["vm-1"]["flavor_vcpus"] == 1
+    assert store.ports["port-1"]["fixed_ip_address"] == "10.0.1.101"
+    # RUNS_ON: instance -> its hypervisor.
+    assert store.instance_host_edges["vm-1"] == "compute1"
+    # HAS_PORT: instance -> its port.
+    assert store.instance_port_edges["port-1"] == "vm-1"
+    # CONNECTS: port -> the subnet its fixed IP lives on.
+    assert store.port_subnet_edges["port-1"] == {"subnet-1"}
+
+
+def test_instance_with_no_visible_hypervisor_hostname_gets_no_runs_on_edge(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    # hypervisor_hostname=None -- the real-world case of a cloud that
+    # gates OS-EXT-SRV-ATTR:hypervisor_hostname behind an admin-only
+    # policy cortex-reader doesn't have (see topology_sync.py's Phase 6
+    # docstring).
+    server = _server("vm-1", hypervisor_hostname=None)
+    _set_conn(monkeypatch, _FakeConn(hypervisors=[_hv("compute1")], instances=[server]))
+
+    result = topology_sync.sync_topology(db)
+
+    assert result["instances"] == 1
+    assert "vm-1" in fake_driver.store.instances
+    assert "vm-1" not in fake_driver.store.instance_host_edges
+
+
+def test_instance_migration_moves_runs_on_edge(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    server = _server("vm-1", hypervisor_hostname="compute1")
+    _set_conn(monkeypatch, _FakeConn(hypervisors=[_hv("compute1"), _hv("compute2")], instances=[server]))
+    topology_sync.sync_topology(db)
+    assert fake_driver.store.instance_host_edges["vm-1"] == "compute1"
+
+    # Same VM, now live-migrated onto compute2.
+    server.hypervisor_hostname = "compute2"
+    topology_sync.sync_topology(db)
+
+    assert fake_driver.store.instance_host_edges["vm-1"] == "compute2"
+
+
+def test_non_compute_port_gets_no_has_port_edge(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    server = _server("vm-1")
+    # A DHCP port -- exists in real Neutron, but this graph only models
+    # the VM-facing side of ports (see topology_sync.py's Phase 6
+    # docstring), so it gets a Port vertex and nothing else.
+    dhcp_port = _port("port-1", device_id="agent-1", device_owner="network:dhcp")
+    _set_conn(monkeypatch, _FakeConn(instances=[server], ports=[dhcp_port]))
+
+    result = topology_sync.sync_topology(db)
+
+    assert result["ports"] == 1
+    assert "port-1" in fake_driver.store.ports
+    assert "port-1" not in fake_driver.store.instance_port_edges
+
+
+def test_port_ip_reassignment_to_different_subnet_clears_old_edge(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    net1 = _network("net-1")
+    port = _port("port-1", device_id="vm-1", device_owner="compute:nova",
+                 fixed_ips=[{"subnet_id": "subnet-1", "ip_address": "10.0.1.101"}])
+    _set_conn(monkeypatch, _FakeConn(
+        instances=[_server("vm-1")],
+        networks=[net1],
+        subnets=[_subnet("subnet-1", network_id="net-1"), _subnet("subnet-2", network_id="net-1")],
+        ports=[port],
+    ))
+    topology_sync.sync_topology(db)
+    assert fake_driver.store.port_subnet_edges["port-1"] == {"subnet-1"}
+
+    # Same port, IP reassigned onto subnet-2 instead.
+    port.fixed_ips = [{"subnet_id": "subnet-2", "ip_address": "10.0.1.201"}]
+    topology_sync.sync_topology(db)
+
+    assert fake_driver.store.port_subnet_edges["port-1"] == {"subnet-2"}
+
+
+def test_workload_topology_sweep_removes_deleted_instance_and_port(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    server = _server("vm-1", hypervisor_hostname="compute1")
+    port = _port("port-1", device_id="vm-1", device_owner="compute:nova")
+    _set_conn(monkeypatch, _FakeConn(hypervisors=[_hv("compute1")], instances=[server], ports=[port]))
+    topology_sync.sync_topology(db)
+    store = fake_driver.store
+    assert set(store.instances) == {"vm-1"}
+    assert set(store.ports) == {"port-1"}
+    assert "vm-1" in store.instance_host_edges
+    assert "port-1" in store.instance_port_edges
+
+    # Next pass: the VM and its port were both deleted in OpenStack.
+    _set_conn(monkeypatch, _FakeConn(hypervisors=[_hv("compute1")]))
+    result = topology_sync.sync_topology(db)
+
+    assert result["swept_instances"] == 1
+    assert result["swept_ports"] == 1
+    assert store.instances == {}
+    assert store.ports == {}
+    assert store.instance_host_edges == {}
+    assert store.instance_port_edges == {}
+
+
+def test_instances_listing_failure_skips_only_workload_sweep(monkeypatch):
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    _set_conn(monkeypatch, _FakeConn(
+        hypervisors=[_hv("compute1")],
+        networks=[_network("net-1")],
+        instances=[_server("vm-1")],
+    ))
+    topology_sync.sync_topology(db)
+    assert "vm-1" in fake_driver.store.instances
+    assert "net-1" in fake_driver.store.networks
+
+    # Second pass: Nova servers is unreachable, but Neutron is fine and
+    # vm-1 is now gone.
+    _set_conn(monkeypatch, _FakeConn(
+        hypervisors=[_hv("compute1")],
+        networks=[_network("net-1")],
+        instances_raise=True,
+    ))
+    result = topology_sync.sync_topology(db)
+
+    assert result["workload_topology_ok"] is False
+    assert result["network_topology_ok"] is True
+    assert result["complete_picture"] is True
+    # Workload sweep did not run on a partial picture, so the
+    # now-unreported instance is left alone rather than deleted.
+    assert "vm-1" in fake_driver.store.instances
+    assert result["swept_instances"] == 0
