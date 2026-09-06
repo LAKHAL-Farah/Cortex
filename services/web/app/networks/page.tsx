@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import useSWR from "swr";
-import { Network as NetworkIcon, Grid2x2, Router as RouterIcon, Globe } from "lucide-react";
+import { Network as NetworkIcon, Grid2x2, Router as RouterIcon, Globe, Monitor, Plug } from "lucide-react";
 import type { TopologyGraph as TopologyGraphData } from "@/lib/types";
 import { slugForNetworkEntity } from "@/lib/entities";
 import NetworkCategoryCard from "@/components/NetworkCategoryCard";
@@ -50,6 +50,22 @@ const CATEGORIES = [
     description: "Public IPs, each tied to a network and (if associated) a router.",
     color: "var(--medium)",
     icon: Globe,
+  },
+  {
+    vertexLabel: "Instance" as const,
+    slug: slugForNetworkEntity("Instance"),
+    label: "Instances",
+    description: "VMs, with the hypervisor they run on and the ports attaching them to a network.",
+    color: "var(--chart-1)",
+    icon: Monitor,
+  },
+  {
+    vertexLabel: "Port" as const,
+    slug: slugForNetworkEntity("Port"),
+    label: "Ports",
+    description: "A VM's network attachment point on a subnet -- the wiring Horizon's network topology view shows.",
+    color: "var(--chart-6)",
+    icon: Plug,
   },
 ];
 

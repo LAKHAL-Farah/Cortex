@@ -178,6 +178,60 @@ def fetch_services() -> list[dict]:
         ]
 
 
+def fetch_network_topology(network_id: str) -> dict | None:
+    """One :Network's Horizon-style topology, purpose-shaped for the
+    per-network diagram (see NetworkTopologyDiagram.tsx): this network's
+    own properties, the :Router(s) gatewayed onto it, and each :Subnet
+    carved from it with the VM-facing :Port(s) that sit on that subnet --
+    each port's owning :Instance where one exists (None for a DHCP/
+    router-owned port -- see topology_sync.py's Phase 6 docstring on why
+    those get a Port vertex but no HAS_PORT edge) and, on that instance,
+    its hypervisor host where visible (None if this cloud gates
+    OS-EXT-SRV-ATTR:hypervisor_hostname behind an admin-only policy --
+    same docstring).
+
+    A purpose-built shape rather than a filtered view of fetch_graph()'s
+    flat list, same reasoning fetch_networks() above already applies one
+    level up: this is what one specific network's own diagram needs;
+    fetch_networks() is what the /networks list view needs. Returns None
+    if no :Network with that id exists, same 404-vs-empty-shell
+    convention as fetch_vertex_detail.
+
+    Uses Cypher map projections (`variable {.*, key: expr}`) rather than
+    this module's usual `properties(x)` + manual dict-building -- plain
+    openCypher, no APOC, same Neo4j-5-Community constraint as everywhere
+    else in this file, just not previously needed here since nothing else
+    nests four levels deep (network -> subnet -> port -> instance).
+    """
+    with driver.session() as session:
+        result = session.run(
+            """
+            MATCH (net:Network) WHERE net.id = $network_id
+            RETURN net {.*} AS network,
+                   [(r:Router)-[:CONNECTS]->(net) | r {.*}] AS gateway_routers,
+                   [(sub:Subnet)-[:CONNECTS]->(net) | sub {
+                       .*,
+                       ports: [(port:Port)-[:CONNECTS]->(sub) | port {
+                           .*,
+                           instance: head([(i:Instance)-[:HAS_PORT]->(port) | i {
+                               .*,
+                               hypervisor_hostname: head([(i)-[:RUNS_ON]->(n:Node) | n.id])
+                           }])
+                       }]
+                   }] AS subnets
+            """,
+            network_id=network_id,
+        )
+        record = result.single()
+        if record is None:
+            return None
+        return {
+            **_serialize(record["network"]),
+            "gateway_routers": _serialize(record["gateway_routers"]),
+            "subnets": _serialize(record["subnets"]),
+        }
+
+
 def fetch_networks() -> list[dict]:
     """Every :Network vertex with its structural neighbors nested inline
     (subnets carved from it, routers gatewayed onto it, floating IPs

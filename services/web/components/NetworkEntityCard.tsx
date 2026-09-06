@@ -1,5 +1,6 @@
 "use client";
 
+import { Waypoints } from "lucide-react";
 import type { NetworkEntityDisplayRow } from "@/lib/entities";
 import { NEUTRON_STATUS_COLOR, NEUTRON_STATUS_SOFT } from "@/lib/entities";
 import { LABEL_COLOR, vertexIcon } from "@/lib/topology";
@@ -26,7 +27,19 @@ function RelationChip({ label, name, vertexLabel }: { label: string; name: strin
   );
 }
 
-export default function NetworkEntityCard({ row, onOpen }: { row: NetworkEntityDisplayRow; onOpen: (id: string) => void }) {
+export default function NetworkEntityCard({
+  row,
+  onOpen,
+  onOpenDiagram,
+}: {
+  row: NetworkEntityDisplayRow;
+  onOpen: (id: string) => void;
+  /** Only ever passed for label === "Network" rows -- see
+   * NetworkEntityView.tsx. A diagram only makes sense scoped to one
+   * network (see graph_db.fetch_network_topology), not a subnet/router/
+   * floating IP/instance/port in isolation. */
+  onOpenDiagram?: (id: string) => void;
+}) {
   const color = LABEL_COLOR[row.label];
   const Icon = vertexIcon({ label: row.label, properties: {} });
   const statusColor = row.status ? NEUTRON_STATUS_COLOR[row.status] ?? "var(--text-muted)" : null;
@@ -34,7 +47,24 @@ export default function NetworkEntityCard({ row, onOpen }: { row: NetworkEntityD
 
   return (
     <Card interactive padding="p-0" className="relative overflow-hidden">
-      <button onClick={() => onOpen(row.id)} className="block w-full text-left">
+      {/* A plain <div> here, not <button>, specifically so the "View
+          diagram" trigger below can be a real, valid, independently
+          clickable <button> rather than an invalid button-inside-a-button
+          (or a non-button element faking click behavior via
+          stopPropagation, which is what nesting it inside an actual
+          <button> would have required). */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => onOpen(row.id)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpen(row.id);
+          }
+        }}
+        className="block w-full cursor-pointer text-left"
+      >
         <span className="absolute inset-y-0 left-0 w-[3px]" style={{ background: color }} />
         <div className="p-4 pl-5">
           <div className="flex items-start justify-between gap-3">
@@ -96,12 +126,27 @@ export default function NetworkEntityCard({ row, onOpen }: { row: NetworkEntityD
                 ))}
             </div>
           )}
-
-          <div className="mt-4 flex items-center justify-end border-t pt-3 text-xs text-text-faint" style={{ borderColor: "var(--border-soft)" }}>
-            {row.lastSyncedAt ? `synced ${formatRelative(row.lastSyncedAt)}` : "never synced"}
-          </div>
         </div>
-      </button>
+      </div>
+
+      <div className="flex items-center justify-between gap-3 border-t px-4 pb-4 pl-5 pt-3 text-xs text-text-faint" style={{ borderColor: "var(--border-soft)" }}>
+        {onOpenDiagram ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenDiagram(row.id);
+            }}
+            className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors hover:bg-[var(--canvas)]"
+            style={{ color: "var(--accent)" }}
+          >
+            <Waypoints className="h-3.5 w-3.5" strokeWidth={2} />
+            View diagram
+          </button>
+        ) : (
+          <span />
+        )}
+        <span>{row.lastSyncedAt ? `synced ${formatRelative(row.lastSyncedAt)}` : "never synced"}</span>
+      </div>
     </Card>
   );
 }

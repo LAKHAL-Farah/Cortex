@@ -51,6 +51,14 @@
   --chart-3: #2F9E68;
   --chart-4: #8B7FE0;
   --chart-5: #C98A1D;
+  /* chart-6: added for the topology graph's :Port vertices specifically
+     (see lib/topology.ts's LABEL_COLOR) -- the 5-color chart palette was
+     already fully claimed by Service/Network/Subnet/Router/FloatingIP
+     once :Instance/:Port vertices needed distinct colors too, and reusing
+     --accent or --text-muted for a vertex label would collide with what
+     those already mean elsewhere on the same graph (live SERVES traffic,
+     a dimmed/filtered vertex). */
+  --chart-6: #2B9E9E;
 
   --shadow: 0 1px 2px rgba(15,23,42,0.04);
   --shadow-hover: 0 4px 12px rgba(15,23,42,0.07);
@@ -92,6 +100,7 @@
   --chart-3: #3EB981;
   --chart-4: #A79BEF;
   --chart-5: #D9A536;
+  --chart-6: #3FC2C2;
 
   --shadow: 0 1px 2px rgba(0,0,0,0.24);
   --shadow-hover: 0 4px 14px rgba(0,0,0,0.32);

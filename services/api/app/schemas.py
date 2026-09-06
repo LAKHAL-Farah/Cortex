@@ -113,6 +113,22 @@ class TopologyNetworkOut(BaseModel):
     serving_agents: list[dict] = Field(default_factory=list)
 
 
+class TopologyNetworkDiagramOut(BaseModel):
+    """Response for GET /api/v1/topology/networks/{id}/diagram -- the
+    Horizon-style per-network shape (see graph_db.fetch_network_topology):
+    this network, its gateway router(s), and each subnet with its ports
+    (each port's `instance` dict nested inline, or null for a port with
+    no owning VM). Deliberately not reusing TopologyNetworkOut above:
+    that one is a flat list-view row (subnets as bare dicts, no ports);
+    this one is a diagram's worth of nesting, a different shape for a
+    different consumer.
+    """
+    model_config = ConfigDict(extra="allow")
+    id: str
+    gateway_routers: list[dict] = Field(default_factory=list)
+    subnets: list[dict] = Field(default_factory=list)
+
+
 class SyncType(str, Enum):
     openstack = "openstack"
     prometheus_health = "prometheus_health"

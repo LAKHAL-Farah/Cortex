@@ -219,15 +219,15 @@ export interface RcaSuggestion {
 //
 // Mirrors schemas.TopologyGraphOut/TopologyVertexDetailOut/TopologyHealthOut
 // on the API side. `properties` is left as a loose dict rather than typed
-// per-label (the graph has six vertex labels -- Node/Service/Network/
-// Subnet/Router/FloatingIP -- each with its own property shape; see
-// graph_db.py's module docstring) since the frontend only needs a handful
-// of well-known keys (role, state, hostname, ...) off of it, read
+// per-label (the graph has eight vertex labels -- Node/Service/Network/
+// Subnet/Router/FloatingIP/Instance/Port -- each with its own property
+// shape; see graph_db.py's module docstring) since the frontend only needs
+// a handful of well-known keys (role, state, hostname, ...) off of it, read
 // defensively via lib/topology.ts's helpers.
 
-export type TopologyVertexLabel = "Node" | "Service" | "Network" | "Subnet" | "Router" | "FloatingIP";
+export type TopologyVertexLabel = "Node" | "Service" | "Network" | "Subnet" | "Router" | "FloatingIP" | "Instance" | "Port";
 
-export type TopologyEdgeType = "RUNS_ON" | "SERVES" | "CONNECTS";
+export type TopologyEdgeType = "RUNS_ON" | "SERVES" | "CONNECTS" | "HAS_PORT";
 
 export interface TopologyVertex {
   id: string;
@@ -258,6 +258,50 @@ export interface TopologyVertexDetail {
   label: TopologyVertexLabel;
   properties: Record<string, unknown>;
   neighbors: TopologyNeighbor[];
+}
+
+// --- Per-network topology diagram (see graph_db.fetch_network_topology,
+// GET /api/v1/topology/networks/{id}/diagram) -- the Horizon-style shaped
+// read for NetworkTopologyDiagram.tsx. Deliberately typed with a handful of
+// named fields (rather than left as loose `dict`s the way TopologyVertex's
+// `properties` is) since this shape only ever comes from one purpose-built
+// endpoint with one fixed nesting, unlike a generic vertex's properties.
+
+export interface TopologyDiagramInstance {
+  id: string;
+  name?: string;
+  status?: string;
+  flavor_name?: string;
+  hypervisor_hostname?: string | null;
+  [key: string]: unknown;
+}
+
+export interface TopologyDiagramPort {
+  id: string;
+  name?: string;
+  status?: string;
+  admin_state_up?: boolean;
+  device_owner?: string;
+  fixed_ip_address?: string;
+  instance: TopologyDiagramInstance | null;
+  [key: string]: unknown;
+}
+
+export interface TopologyDiagramSubnet {
+  id: string;
+  name?: string;
+  cidr?: string;
+  ports: TopologyDiagramPort[];
+  [key: string]: unknown;
+}
+
+export interface TopologyNetworkDiagram {
+  id: string;
+  name?: string;
+  status?: string;
+  gateway_routers: Record<string, unknown>[];
+  subnets: TopologyDiagramSubnet[];
+  [key: string]: unknown;
 }
 
 export type TopologySyncType = "openstack" | "prometheus_health";

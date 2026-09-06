@@ -1,5 +1,6 @@
 "use client";
 
+import { Waypoints } from "lucide-react";
 import type { NetworkEntityDisplayRow } from "@/lib/entities";
 import { NEUTRON_STATUS_COLOR, NEUTRON_STATUS_SOFT } from "@/lib/entities";
 import { LABEL_COLOR, vertexIcon } from "@/lib/topology";
@@ -20,7 +21,17 @@ function relatedSummary(row: NetworkEntityDisplayRow): { label: string; text: st
   return items;
 }
 
-export default function NetworkEntityTable({ rows, onOpen }: { rows: NetworkEntityDisplayRow[]; onOpen: (id: string) => void }) {
+export default function NetworkEntityTable({
+  rows,
+  onOpen,
+  onOpenDiagram,
+}: {
+  rows: NetworkEntityDisplayRow[];
+  onOpen: (id: string) => void;
+  /** Only ever passed for the Networks list -- see NetworkEntityCard.tsx's
+   * matching prop for why this is scoped to Network rows specifically. */
+  onOpenDiagram?: (id: string) => void;
+}) {
   const showStatus = rows.some((r) => r.status);
 
   return (
@@ -44,10 +55,18 @@ export default function NetworkEntityTable({ rows, onOpen }: { rows: NetworkEnti
           const related = relatedSummary(row);
 
           return (
-            <button
+            <div
               key={row.id}
+              role="button"
+              tabIndex={0}
               onClick={() => onOpen(row.id)}
-              className="group grid w-full gap-4 border-b p-5 text-left transition-colors last:border-b-0 hover:bg-[var(--canvas)] sm:grid-cols-[2fr_2fr_1fr_1fr]"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onOpen(row.id);
+                }
+              }}
+              className="group grid w-full cursor-pointer gap-4 border-b p-5 text-left transition-colors last:border-b-0 hover:bg-[var(--canvas)] sm:grid-cols-[2fr_2fr_1fr_1fr]"
               style={{ borderColor: "var(--border-soft)" }}
             >
               <div className="flex items-center gap-3 min-w-0">
@@ -92,10 +111,24 @@ export default function NetworkEntityTable({ rows, onOpen }: { rows: NetworkEnti
                 </div>
               )}
 
-              <div className="flex items-center justify-end text-sm text-text-faint">
+              <div className="flex items-center justify-end gap-3 text-sm text-text-faint">
+                {onOpenDiagram && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenDiagram(row.id);
+                    }}
+                    aria-label={`View network diagram for ${row.title}`}
+                    title="View diagram"
+                    className="rounded-[var(--radius-control)] p-1.5 transition-colors hover:bg-[var(--surface)]"
+                    style={{ color: "var(--accent)" }}
+                  >
+                    <Waypoints className="h-3.5 w-3.5" strokeWidth={2} />
+                  </button>
+                )}
                 {row.lastSyncedAt ? new Date(row.lastSyncedAt).toLocaleString() : "—"}
               </div>
-            </button>
+            </div>
           );
         })}
       </div>

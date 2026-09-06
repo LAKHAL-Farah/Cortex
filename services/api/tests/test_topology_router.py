@@ -1,7 +1,7 @@
 """Tests for routers/topology.py (Phase 5 -- API).
 
-The graph endpoints (/graph, /nodes/{id}, /services, /networks) are read
-paths over graph_db.py's Neo4j queries; Neo4j is faked the same way
+The graph endpoints (/graph, /nodes/{id}, /services, /networks,
+/networks/{id}/diagram) are read paths over graph_db.py's Neo4j queries; Neo4j is faked the same way
 test_topology_sync.py/test_prometheus_health.py fake it -- a small
 in-memory result set per query shape, matched on a distinctive substring
 of the Cypher text, rather than a real Neo4j instance (there isn't one in
@@ -71,6 +71,32 @@ class _FakeSession:
             return _FakeResult([
                 {"service": {"id": "nova-compute@compute1-sim", "binary": "nova-compute", "openstack_state": "up"}, "node_id": "compute1-sim"},
             ])
+        if "MATCH (net:Network) WHERE net.id = $network_id" in query:
+            network_id = kwargs["network_id"]
+            if network_id != "net-1":
+                return _FakeResult([])
+            return _FakeResult([{
+                "network": {"id": "net-1", "name": "sandbox-net", "status": "ACTIVE"},
+                "gateway_routers": [{"id": "router-1", "name": "sandbox-router"}],
+                "subnets": [{
+                    "id": "sub-1",
+                    "cidr": "10.0.1.0/24",
+                    "ports": [
+                        {
+                            "id": "port-1",
+                            "status": "ACTIVE",
+                            "device_owner": "compute:nova",
+                            "instance": {"id": "vm-1", "name": "sandbox-vm-1", "status": "ACTIVE", "hypervisor_hostname": "compute1-sim"},
+                        },
+                        {
+                            "id": "port-2",
+                            "status": "DOWN",
+                            "device_owner": "network:dhcp",
+                            "instance": None,
+                        },
+                    ],
+                }],
+            }])
         if "MATCH (net:Network)" in query:
             return _FakeResult([
                 {
@@ -154,6 +180,36 @@ def test_list_networks_nests_subnets(monkeypatch):
     assert body[0]["id"] == "net-1"
     assert body[0]["subnets"] == [{"id": "sub-1", "cidr": "10.0.1.0/24"}]
     assert body[0]["gateway_routers"] == []
+
+
+# ------------------------------------------------------ /networks/{id}/diagram --
+
+def test_get_network_diagram_nests_subnets_with_ports_and_instances(monkeypatch):
+    _use_fake_graph(monkeypatch)
+
+    res = client.get("/api/v1/topology/networks/net-1/diagram")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["id"] == "net-1"
+    assert body["gateway_routers"] == [{"id": "router-1", "name": "sandbox-router"}]
+    assert len(body["subnets"]) == 1
+    ports = body["subnets"][0]["ports"]
+    assert len(ports) == 2
+    # A VM-owned port carries its owning instance (and, on that instance,
+    # the hypervisor it runs on) nested inline.
+    vm_port = next(p for p in ports if p["id"] == "port-1")
+    assert vm_port["instance"]["name"] == "sandbox-vm-1"
+    assert vm_port["instance"]["hypervisor_hostname"] == "compute1-sim"
+    # A DHCP-owned port has no owning instance -- null, not omitted.
+    dhcp_port = next(p for p in ports if p["id"] == "port-2")
+    assert dhcp_port["instance"] is None
+
+
+def test_get_network_diagram_404s_for_unknown_id(monkeypatch):
+    _use_fake_graph(monkeypatch)
+
+    res = client.get("/api/v1/topology/networks/no-such-network/diagram")
+    assert res.status_code == 404
 
 
 # ------------------------------------------------------------------- /health --

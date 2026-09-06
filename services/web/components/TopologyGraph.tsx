@@ -28,6 +28,7 @@ import {
   vertexGlyph,
   vertexIcon,
   vertexMatchesQuery,
+  vertexRadius,
   vertexStatusText,
   type VertexGlyph,
 } from "@/lib/topology";
@@ -213,6 +214,40 @@ function drawGlyph(ctx: CanvasRenderingContext2D, glyph: VertexGlyph, cx: number
       ctx.stroke();
       break;
     }
+    case "vm": {
+      // A little monitor -- screen + stand -- reads as "virtual machine"
+      // at a glance without being mistaken for Node's own "server" glyph
+      // (stacked rack units) or Service's "box" (package/shipped unit).
+      const halfW = s * 0.75;
+      const halfH = s * 0.5;
+      ctx.strokeRect(cx - halfW, cy - halfH - s * 0.1, halfW * 2, halfH * 1.5);
+      ctx.beginPath();
+      ctx.moveTo(cx, cy + halfH * 0.5);
+      ctx.lineTo(cx, cy + s * 0.75);
+      ctx.moveTo(cx - halfW * 0.5, cy + s * 0.75);
+      ctx.lineTo(cx + halfW * 0.5, cy + s * 0.75);
+      ctx.stroke();
+      break;
+    }
+    case "plug": {
+      // A plug body with two prongs -- distinct silhouette from every
+      // other glyph here, reads as "connection point" for a Port.
+      const halfW = s * 0.45;
+      ctx.beginPath();
+      ctx.moveTo(cx - halfW, cy - s * 0.1);
+      ctx.lineTo(cx - halfW, cy + s * 0.55);
+      ctx.quadraticCurveTo(cx - halfW, cy + s * 0.85, cx, cy + s * 0.85);
+      ctx.quadraticCurveTo(cx + halfW, cy + s * 0.85, cx + halfW, cy + s * 0.55);
+      ctx.lineTo(cx + halfW, cy - s * 0.1);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(cx - halfW * 0.55, cy - s * 0.1);
+      ctx.lineTo(cx - halfW * 0.55, cy - s * 0.8);
+      ctx.moveTo(cx + halfW * 0.55, cy - s * 0.1);
+      ctx.lineTo(cx + halfW * 0.55, cy - s * 0.8);
+      ctx.stroke();
+      break;
+    }
   }
 }
 
@@ -392,7 +427,11 @@ export default function TopologyGraph({
       const isSelected = node.id === selectedId;
       const isHovered = node.id === hoveredId;
       const isDimmed = dimIds !== null && !dimIds.has(node.id);
-      const r = node.label === "Node" || node.label === "Service" ? 7.5 : 6.5;
+      // Sized by vertex type (see lib/topology.ts's VERTEX_RADIUS), not a
+      // near-flat two-way split -- a hypervisor Node should visually
+      // anchor the graph, while a Port (the most numerous, most
+      // leaf-like vertex here) should recede.
+      const r = vertexRadius(node);
 
       ctx.save();
       ctx.globalAlpha = isDimmed ? 0.22 : 1;
@@ -505,6 +544,26 @@ export default function TopologyGraph({
   };
 
   const fitView = () => fgRef.current?.zoomToFit(400, 56);
+
+  // One-time force tuning, applied only when the ForceGraph2D instance
+  // first has data to lay out -- NOT re-run on every graphData change
+  // (filter toggles, SWR's 30s refetch), since that would undo the exact
+  // thing the pristineEdges/graphData comments above already went out of
+  // their way to avoid: the layout jumping/resettling every time a filter
+  // is toggled. Default d3-force charge/link-distance packs vertices
+  // tightly enough that paintLinkTag's edge-type label pills start
+  // overlapping wherever several edges converge (a Router's CONNECTS +
+  // SERVES edges, in particular) -- more repulsion and a longer link
+  // distance gives them breathing room without a from-scratch layout.
+  const didTuneForces = useRef(false);
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (!fg || didTuneForces.current || graphData.nodes.length === 0) return;
+    didTuneForces.current = true;
+    fg.d3Force("charge")?.strength(-160);
+    fg.d3Force("link")?.distance(70);
+    fg.d3ReheatSimulation();
+  }, [graphData]);
 
   const hoveredVertex = useMemo(
     () => (hoveredId ? graphData.nodes.find((n) => n.id === hoveredId) ?? null : null),
@@ -645,7 +704,14 @@ export default function TopologyGraph({
               nodeCanvasObject={paintNode}
               nodePointerAreaPaint={(node: GraphNode, color: string, ctx: CanvasRenderingContext2D) => {
                 ctx.fillStyle = color;
-                hexPath(ctx, node.x ?? 0, node.y ?? 0, 10);
+                // A few px larger than the painted shape for an easier
+                // click target, scaled off the same per-type radius
+                // paintNode uses -- a flat hit-area (this used to be a
+                // constant 10 regardless of type) got proportionally too
+                // generous once Port/FloatingIP started painting smaller
+                // than Node, to the point neighboring small vertices'
+                // hit-areas could overlap.
+                hexPath(ctx, node.x ?? 0, node.y ?? 0, vertexRadius(node) + 3);
                 ctx.fill();
               }}
               linkColor={linkColorFor}
@@ -724,6 +790,13 @@ export default function TopologyGraph({
               style={{ background: "repeating-linear-gradient(90deg, var(--chart-3) 0 3px, transparent 3px 5px)" }}
             />
             {EDGE_LABEL.CONNECTS}
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span
+              className="inline-block h-2.5 w-3.5"
+              style={{ background: "repeating-linear-gradient(90deg, var(--chart-6) 0 1px, transparent 1px 2px)" }}
+            />
+            {EDGE_LABEL.HAS_PORT}
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span
