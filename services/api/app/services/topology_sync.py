@@ -283,6 +283,7 @@ def _sync_networks_to_graph(session, networks: list[dict]) -> None:
             n.status = net.status,
             n.admin_state_up = net.admin_state_up,
             n.shared = net.shared,
+            n.router_external = net.router_external,
             n.project_id = net.project_id,
             n.last_synced_at = datetime()
         """,
@@ -521,7 +522,16 @@ def _sync_instance_hosts_to_graph(session, instances: list[dict]) -> None:
 
 def _sync_ports_to_graph(session, ports: list[dict]) -> None:
     """Upserts :Port vertices only -- no edges here, see
-    _sync_instance_ports_to_graph/_sync_port_subnets_to_graph."""
+    _sync_instance_ports_to_graph/_sync_port_subnets_to_graph.
+
+    `device_id` is stored here (even though _sync_instance_ports_to_graph
+    only turns it into a HAS_PORT edge for the "compute:"-owned case)
+    because graph_db.fetch_topology_map needs it for the *other* case
+    too: a "network:router_interface"-owned port's device_id is the
+    Router's id, and that's what lets the topology map place a router
+    between its external gateway network and the self-service network(s)
+    it actually interfaces with, the way Horizon's diagram does.
+    """
     session.run(
         """
         UNWIND $ports AS p
@@ -530,6 +540,7 @@ def _sync_ports_to_graph(session, ports: list[dict]) -> None:
             port.status = p.status,
             port.admin_state_up = p.admin_state_up,
             port.mac_address = p.mac_address,
+            port.device_id = p.device_id,
             port.device_owner = p.device_owner,
             port.fixed_ip_address = p.fixed_ip_address,
             port.last_synced_at = datetime()
@@ -935,6 +946,15 @@ def sync_topology(db: Session) -> dict:
             "status": getattr(net, "status", None),
             "admin_state_up": getattr(net, "is_admin_state_up", None),
             "shared": getattr(net, "is_shared", None),
+            # Neutron's own "provider network" flag (`router:external`) --
+            # a network VMs/routers can reach the outside world through
+            # directly, as opposed to a tenant's private "self-service"
+            # network that only becomes externally reachable via a
+            # Router's gateway. This is exactly the distinction Horizon's
+            # Network Topology view draws with its provider-vs-self-service
+            # lanes (see NetworkTopologyCanvas.tsx), so it's captured here
+            # rather than left for the frontend to guess at from shape.
+            "router_external": getattr(net, "is_router_external", None),
             "project_id": getattr(net, "project_id", None),
         }
         for net in networks

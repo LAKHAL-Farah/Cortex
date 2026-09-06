@@ -46,10 +46,11 @@ def _svc(host, binary, availability_zone="nova", status="enabled", state="up", i
     )
 
 
-def _network(id, name="net", status="ACTIVE", is_admin_state_up=True, is_shared=False, project_id="proj"):
+def _network(id, name="net", status="ACTIVE", is_admin_state_up=True, is_shared=False,
+             is_router_external=False, project_id="proj"):
     return types.SimpleNamespace(
         id=id, name=name, status=status, is_admin_state_up=is_admin_state_up,
-        is_shared=is_shared, project_id=project_id,
+        is_shared=is_shared, is_router_external=is_router_external, project_id=project_id,
     )
 
 
@@ -736,6 +737,61 @@ def test_networks_subnets_routers_floating_ips_synced_with_connects_edges(monkey
     # FloatingIP -[:CONNECTS]-> Network and -[:CONNECTS]-> Router
     assert store.fip_network_edges["fip-1"] == "net-1"
     assert store.fip_router_edges["fip-1"] == "router-1"
+
+
+def test_provider_network_router_external_flag_synced(monkeypatch):
+    """Neutron's `router:external` (openstacksdk: `is_router_external`)
+    is what tells a provider network (VMs/routers can reach the outside
+    world through it directly) apart from a self-service one (only
+    reachable via a router's gateway) -- see topology_sync.py's
+    graph_networks comment and NetworkTopologyCanvas.tsx's provider/
+    self-service lanes, which is the one thing this flag exists for.
+    """
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    _set_conn(monkeypatch, _FakeConn(networks=[
+        _network("net-provider", is_router_external=True),
+        _network("net-self-service", is_router_external=False),
+    ]))
+
+    topology_sync.sync_topology(db)
+
+    store = fake_driver.store
+    assert store.networks["net-provider"]["router_external"] is True
+    assert store.networks["net-self-service"]["router_external"] is False
+
+
+def test_router_interface_port_device_id_synced_without_has_port_edge(monkeypatch):
+    """A router-interface port (device_owner starting with
+    "network:router_interface") gets its `device_id` (the router's id)
+    stored on the :Port vertex, same as any other port -- see
+    _sync_ports_to_graph's docstring on why, unlike the "compute:"-owned
+    case, this is read back off the Port itself later
+    (graph_db.fetch_topology_map) rather than turned into an edge here.
+    """
+    db = _db()
+    fake_driver = _patch_graph(monkeypatch)
+    _patch_side_effects(monkeypatch)
+    net1 = _network("net-1")
+    router1 = _router("router-1")
+    subnet1 = _subnet("subnet-1", network_id="net-1")
+    interface_port = _port(
+        "port-iface", device_id="router-1", device_owner="network:router_interface",
+        fixed_ips=[{"subnet_id": "subnet-1", "ip_address": "10.0.0.1"}],
+    )
+    _set_conn(monkeypatch, _FakeConn(
+        networks=[net1], subnets=[subnet1], routers=[router1], ports=[interface_port],
+    ))
+
+    topology_sync.sync_topology(db)
+
+    store = fake_driver.store
+    assert store.ports["port-iface"]["device_id"] == "router-1"
+    # Never treated as a VM-facing port -- no HAS_PORT edge either way.
+    assert "port-iface" not in store.instance_port_edges
+    # Still CONNECTS to its subnet like any other port.
+    assert store.port_subnet_edges["port-iface"] == {"subnet-1"}
 
 
 def test_router_without_gateway_gets_no_connects_edge(monkeypatch):

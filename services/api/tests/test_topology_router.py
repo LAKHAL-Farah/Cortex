@@ -1,7 +1,8 @@
 """Tests for routers/topology.py (Phase 5 -- API).
 
 The graph endpoints (/graph, /nodes/{id}, /services, /networks,
-/networks/{id}/diagram) are read paths over graph_db.py's Neo4j queries; Neo4j is faked the same way
+/networks/topology-map, /networks/{id}/diagram) are read paths over
+graph_db.py's Neo4j queries; Neo4j is faked the same way
 test_topology_sync.py/test_prometheus_health.py fake it -- a small
 in-memory result set per query shape, matched on a distinctive substring
 of the Cypher text, rather than a real Neo4j instance (there isn't one in
@@ -10,16 +11,30 @@ CI -- see .github/workflows/ci.yml).
 /health is backed by Postgres only (the topology_sync_runs table), so
 those tests seed it directly via SessionLocal, same pattern as
 test_baselines_router.py.
+
+Every route in this module sits behind `topology.router`'s
+`dependencies=_auth_required` (see main.py), same as every other
+business router. Rather than creating a real account per test the way
+test_conversations_router.py does (that file needs a *real* user because
+conversations are scoped by owner; nothing here is), this module
+overrides `get_current_user` for the one dummy account these tests all
+share -- see `_use_fake_user` below.
 """
+import types
 import uuid
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from app import graph_db, models
+from app.auth import get_current_user
 from app.db import SessionLocal
 from app.main import app
 from app.routers import topology as topology_router
+
+app.dependency_overrides[get_current_user] = lambda: types.SimpleNamespace(
+    id="test-user", username="test-user", role="viewer", is_active=True
+)
 
 client = TestClient(app)
 
@@ -97,6 +112,32 @@ class _FakeSession:
                     ],
                 }],
             }])
+        # Distinctive substrings ("AS gateway_router_ids" / "AS
+        # gateway_network_id") checked ahead of the plain "MATCH
+        # (net:Network)" fallback below, since fetch_topology_map's own
+        # network query also contains that substring (a bare "MATCH
+        # (net:Network)" with no WHERE, same as fetch_networks' query) --
+        # first match wins, so the more specific check has to come first.
+        if "AS gateway_router_ids" in query:
+            return _FakeResult([
+                {
+                    "network": {"id": "net-1", "name": "sandbox-net", "status": "ACTIVE", "router_external": False},
+                    "gateway_router_ids": ["router-1"],
+                    "interface_router_ids": ["router-2", "router-2"],  # dup on purpose -- checks dedup
+                    "subnets": [{"id": "sub-1", "cidr": "10.0.1.0/24", "ports": []}],
+                },
+                {
+                    "network": {"id": "net-ext", "name": "sandbox-external-net", "status": "ACTIVE", "router_external": True},
+                    "gateway_router_ids": [],
+                    "interface_router_ids": [],
+                    "subnets": [],
+                },
+            ])
+        if "AS gateway_network_id" in query:
+            return _FakeResult([
+                {"router": {"id": "router-1", "name": "sandbox-router"}, "gateway_network_id": "net-ext"},
+                {"router": {"id": "router-2", "name": "sandbox-router-2"}, "gateway_network_id": None},
+            ])
         if "MATCH (net:Network)" in query:
             return _FakeResult([
                 {
@@ -180,6 +221,27 @@ def test_list_networks_nests_subnets(monkeypatch):
     assert body[0]["id"] == "net-1"
     assert body[0]["subnets"] == [{"id": "sub-1", "cidr": "10.0.1.0/24"}]
     assert body[0]["gateway_routers"] == []
+
+
+# -------------------------------------------------- /networks/topology-map --
+
+def test_topology_map_places_routers_between_gateway_and_interface_networks(monkeypatch):
+    _use_fake_graph(monkeypatch)
+
+    body = client.get("/api/v1/topology/networks/topology-map").json()
+
+    networks = {n["id"]: n for n in body["networks"]}
+    assert networks["net-1"]["router_external"] is False
+    assert networks["net-1"]["gateway_router_ids"] == ["router-1"]
+    # Deduped despite the fake's query returning "router-2" twice.
+    assert networks["net-1"]["interface_router_ids"] == ["router-2"]
+    assert networks["net-ext"]["router_external"] is True
+
+    routers = {r["id"]: r for r in body["routers"]}
+    assert routers["router-1"]["gateway_network_id"] == "net-ext"
+    # A router can have no external gateway at all (mid-provisioning, or
+    # deliberately gateway-less) -- comes back as null, not omitted.
+    assert routers["router-2"]["gateway_network_id"] is None
 
 
 # ------------------------------------------------------ /networks/{id}/diagram --

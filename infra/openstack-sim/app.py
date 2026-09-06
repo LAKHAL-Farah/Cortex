@@ -85,6 +85,13 @@ NETWORKS = [
         "status": "ACTIVE",
         "admin_state_up": True,
         "shared": False,
+        # Self-service (tenant-owned) network -- not externally reachable
+        # on its own, only via sandbox-router's gateway onto
+        # sandbox-external-net below. Mirrors real Neutron's
+        # `router:external` field (see topology_sync.py's
+        # `is_router_external` read); openstacksdk maps this exact key
+        # to that attribute.
+        "router:external": False,
         "subnets": ["8f3f0f4a-0000-0000-0000-000000000011"],
         "project_id": "sandbox-project",
     },
@@ -94,7 +101,25 @@ NETWORKS = [
         "status": "ACTIVE",
         "admin_state_up": True,
         "shared": False,
+        # Also self-service, but deliberately left un-routed (no router
+        # interface onto it below) -- an isolated storage/back-end network
+        # is a common real shape, and one with no gateway at all is a
+        # useful edge case for the network-topology view to render sanely.
+        "router:external": False,
         "subnets": ["8f3f0f4a-0000-0000-0000-000000000012"],
+        "project_id": "sandbox-project",
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000003",
+        "name": "sandbox-external-net",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        # Shared provider network every project's routers gateway onto --
+        # the "public"/"provider" trunk in Horizon's Network Topology view
+        # and in NetworkTopologyCanvas.tsx.
+        "shared": True,
+        "router:external": True,
+        "subnets": ["8f3f0f4a-0000-0000-0000-000000000013"],
         "project_id": "sandbox-project",
     },
 ]
@@ -116,6 +141,14 @@ SUBNETS = [
         "ip_version": 4,
         "gateway_ip": "10.0.2.1",
     },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000013",
+        "name": "sandbox-external-subnet",
+        "network_id": "8f3f0f4a-0000-0000-0000-000000000003",
+        "cidr": "203.0.113.0/24",
+        "ip_version": 4,
+        "gateway_ip": "203.0.113.1",
+    },
 ]
 
 ROUTERS = [
@@ -124,12 +157,18 @@ ROUTERS = [
         "name": "sandbox-router",
         "status": "ACTIVE",
         "admin_state_up": True,
-        # Gatewayed onto sandbox-net -- exercises topology_sync's
-        # Router-[:CONNECTS]->Network edge (via _gateway_network_id).
+        # Gatewayed onto sandbox-external-net (the provider side) --
+        # exercises topology_sync's Router-[:CONNECTS]->Network edge (via
+        # _gateway_network_id). Its other side, the router-interface port
+        # onto sandbox-net's subnet below (PORTS), is the self-service
+        # side -- together the two are what let
+        # graph_db.fetch_topology_map's interface_router_ids/
+        # gateway_router_ids place this one router between both networks
+        # on the topology canvas, same as Horizon draws it.
         "external_gateway_info": {
-            "network_id": "8f3f0f4a-0000-0000-0000-000000000001",
+            "network_id": "8f3f0f4a-0000-0000-0000-000000000003",
             "external_fixed_ips": [
-                {"subnet_id": "8f3f0f4a-0000-0000-0000-000000000011", "ip_address": "10.0.1.254"}
+                {"subnet_id": "8f3f0f4a-0000-0000-0000-000000000013", "ip_address": "203.0.113.254"}
             ],
             "enable_snat": True,
         },
@@ -143,7 +182,11 @@ FLOATING_IPS = [
         "floating_ip_address": "203.0.113.10",
         "fixed_ip_address": "10.0.1.21",
         "status": "ACTIVE",
-        "floating_network_id": "8f3f0f4a-0000-0000-0000-000000000001",
+        # Carved from the provider network, same as real Neutron always
+        # requires (a floating IP always comes from a router:external=True
+        # network) -- not from sandbox-net, which isn't externally routable
+        # on its own.
+        "floating_network_id": "8f3f0f4a-0000-0000-0000-000000000003",
         "router_id": "8f3f0f4a-0000-0000-0000-000000000021",
     },
 ]
@@ -232,6 +275,25 @@ PORTS = [
         "device_owner": "compute:nova",
         "network_id": NETWORKS[0]["id"],
         "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.103"}],
+        "tenant_id": "sandbox-project",
+    },
+    {
+        # sandbox-router's internal interface onto sandbox-net's subnet --
+        # device_owner starts with "network:router_interface" and
+        # device_id is the router's own id, exactly the shape
+        # graph_db.fetch_topology_map's interface_router_ids traversal
+        # looks for to find which router(s) sit "below" a self-service
+        # network. Sits at the subnet's own gateway_ip, same as real
+        # Neutron always places a router interface port.
+        "id": "8f3f0f4a-0000-0000-0000-000000000054",
+        "name": "sandbox-router-interface",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:54",
+        "device_id": ROUTERS[0]["id"],
+        "device_owner": "network:router_interface",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.1"}],
         "tenant_id": "sandbox-project",
     },
 ]

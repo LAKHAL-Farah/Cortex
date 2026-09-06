@@ -1,8 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
+import Link from "next/link";
 import useSWR from "swr";
-import { Network as NetworkIcon, Grid2x2, Router as RouterIcon, Globe, Monitor, Plug } from "lucide-react";
+import { Network as NetworkIcon, Grid2x2, Router as RouterIcon, Globe, Monitor, Plug, Waypoints } from "lucide-react";
 import type { TopologyGraph as TopologyGraphData } from "@/lib/types";
 import { slugForNetworkEntity } from "@/lib/entities";
 import NetworkCategoryCard from "@/components/NetworkCategoryCard";
@@ -98,6 +99,29 @@ export default function NetworksPage() {
         </div>
         <TopologyHealthBadge />
       </div>
+
+      <Link
+        href="/networks/topology-map"
+        className="panel panel-interactive flex items-center justify-between gap-3 p-4"
+      >
+        <div className="flex items-center gap-3">
+          <span
+            className="inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)]"
+            style={{ background: "var(--accent-soft)" }}
+          >
+            <Waypoints className="h-4.5 w-4.5" style={{ color: "var(--accent)" }} strokeWidth={2} />
+          </span>
+          <div>
+            <div className="text-sm font-semibold text-color-text">Network topology map</div>
+            <div className="text-xs text-text-faint">
+              A Horizon-style view of every network at once -- provider and self-service side by side.
+            </div>
+          </div>
+        </div>
+        <span className="flex-shrink-0 text-xs font-medium" style={{ color: "var(--accent)" }}>
+          Open →
+        </span>
+      </Link>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {CATEGORIES.map((c) => (

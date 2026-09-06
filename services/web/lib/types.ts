@@ -304,6 +304,49 @@ export interface TopologyNetworkDiagram {
   [key: string]: unknown;
 }
 
+// --- Whole-topology, Horizon-style network map (see
+// graph_db.fetch_topology_map, GET /api/v1/topology/networks/topology-map)
+// -- the multi-network canvas NetworkTopologyCanvas.tsx renders, as
+// opposed to TopologyNetworkDiagram above's one-network-at-a-time modal.
+// Reuses TopologyDiagramSubnet's port/instance nesting (same shape, same
+// endpoint family) rather than redeclaring it.
+
+export interface TopologyMapNetwork {
+  id: string;
+  name?: string;
+  status?: string;
+  // Neutron's own "provider network" flag (`router:external`, see
+  // topology_sync.py) -- true sorts this network into the provider lane,
+  // false/undefined into the self-service lane.
+  router_external?: boolean;
+  shared?: boolean;
+  // Router(s) this network is the *external gateway* for -- the
+  // provider-side link (drawn above the network's trunk).
+  gateway_router_ids: string[];
+  // Router(s) with an internal router-interface port onto one of this
+  // network's subnets -- the self-service-side link (drawn below a
+  // provider network's trunk, or in place of one for a network with no
+  // provider side at all).
+  interface_router_ids: string[];
+  subnets: TopologyDiagramSubnet[];
+  [key: string]: unknown;
+}
+
+export interface TopologyMapRouter {
+  id: string;
+  name?: string;
+  status?: string;
+  // The provider network this router's external gateway sits on, or null
+  // for a router with no gateway configured yet.
+  gateway_network_id: string | null;
+  [key: string]: unknown;
+}
+
+export interface TopologyMap {
+  networks: TopologyMapNetwork[];
+  routers: TopologyMapRouter[];
+}
+
 export type TopologySyncType = "openstack" | "prometheus_health";
 export type TopologySyncStatus = "ok" | "degraded" | "failed" | "unknown";
 

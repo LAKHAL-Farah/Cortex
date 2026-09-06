@@ -129,6 +129,22 @@ class TopologyNetworkDiagramOut(BaseModel):
     subnets: list[dict] = Field(default_factory=list)
 
 
+class TopologyMapOut(BaseModel):
+    """Response for GET /api/v1/topology/networks/topology-map -- the
+    whole-topology, Horizon-style network map NetworkTopologyCanvas.tsx
+    renders (see graph_db.fetch_topology_map): every network (each
+    carrying `router_external`, `gateway_router_ids`, and
+    `interface_router_ids` so the frontend can place it in the provider
+    or self-service lane and draw its router link) plus every router
+    standalone, so a router renders once and is shared between the
+    gateway network above it and the self-service network(s) below it
+    rather than once per edge.
+    """
+    model_config = ConfigDict(extra="allow")
+    networks: list[dict] = Field(default_factory=list)
+    routers: list[dict] = Field(default_factory=list)
+
+
 class SyncType(str, Enum):
     openstack = "openstack"
     prometheus_health = "prometheus_health"

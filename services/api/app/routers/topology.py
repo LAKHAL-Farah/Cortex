@@ -73,6 +73,23 @@ def list_topology_networks():
         raise _graph_unavailable(exc) from exc
 
 
+@router.get("/networks/topology-map", response_model=schemas.TopologyMapOut)
+def get_topology_network_map():
+    """The whole-topology, Horizon-style network map: every network
+    (with `router_external`/`gateway_router_ids`/`interface_router_ids`
+    for sorting it into the provider or self-service lane and drawing
+    its router link) plus every router standalone. Two path segments
+    ("/networks/topology-map"), so it can't collide with the
+    one-segment "/networks" list or the three-segment
+    "/networks/{network_id}/diagram" below regardless of registration
+    order -- see graph_db.fetch_topology_map.
+    """
+    try:
+        return graph_db.fetch_topology_map()
+    except (Neo4jError, ServiceUnavailable) as exc:
+        raise _graph_unavailable(exc) from exc
+
+
 @router.get("/networks/{network_id}/diagram", response_model=schemas.TopologyNetworkDiagramOut)
 def get_network_topology_diagram(network_id: str):
     """One network's Horizon-style topology diagram: its gateway
