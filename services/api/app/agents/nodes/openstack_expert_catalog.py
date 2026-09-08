@@ -605,6 +605,142 @@ CATALOG: list[SymptomEntry] = [
         ],
         "doc_ref": "docs/knowledge/service-detail/neutron.md",
     },
+    # ------------------------------------------------------------------
+    # Phase C (v0.10) additions -- network_agent's new entity-scoped path
+    # (nodes/network.py, network_health.py's instance/port-scoped reads)
+    # can now see a down Neutron port and correlate it with an instance
+    # stuck in ERROR, neither of which was readable data before Phase C.
+    # "port_down"/"instance_stuck_error" are synthetic sentinels
+    # `openstack_expert.py`'s `_evidence_from_network` sets, same idiom
+    # `node-unreachable`'s own "host_down" sentinel above already uses --
+    # not real Prometheus/anomaly_detector metric names, just this
+    # catalog's uniform way of letting a structured (non-agent, non-log)
+    # finding hit the matcher the same way everything else does.
+    # ------------------------------------------------------------------
+    {
+        "id": "port-down",
+        "title": "A Neutron port is DOWN or administratively disabled",
+        "category": "network",
+        "metric_names": ["port_down"],
+        "service_binaries": [],
+        "keywords": [
+            "port down", "port not bound", "port admin down", "port disabled",
+            "vm not reachable network", "no connectivity to instance", "binding failed",
+        ],
+        "what_it_means": (
+            "A Neutron port's `status` (DOWN/ACTIVE, Neutron's own operational read) and "
+            "`admin_state_up` (an explicit on/off switch, independent of status) are two separate "
+            "things that both have to be true for traffic to actually pass. `admin_state_up: "
+            "false` means someone (or some automation) explicitly disabled the port -- traffic "
+            "stops immediately, nothing else has to be wrong. A `status: DOWN` port with "
+            "`admin_state_up: true` instead means the port never actually bound to a host -- "
+            "neutron-openvswitch-agent on the port's compute host hasn't wired up the "
+            "corresponding OVS flow, commonly because that agent is down/unreachable, the "
+            "segment/VLAN it needs isn't available on that host, or scheduling raced ahead of the "
+            "agent registering. Either way, the owning instance can look perfectly healthy in Nova "
+            "(ACTIVE) while having zero network reachability -- this is exactly the gap between "
+            "'the VM is running' and 'the VM can talk to anything.'"
+        ),
+        "confirm_commands": [
+            {
+                "command": "openstack port show <port_id>",
+                "description": "status/admin_state_up plus binding:vif_type and binding:host_id -- binding:vif_type of 'binding_failed' or 'unbound' confirms this is a bind failure, not just an admin-disabled port.",
+                "read_only": True,
+            },
+            {
+                "command": "openstack port list --device-id <instance_id>",
+                "description": "Every port this instance owns and each one's current status -- confirms whether it's one port or all of them.",
+                "read_only": True,
+            },
+            {
+                "command": "openstack network agent list --agent-type open-vswitch",
+                "description": "Whether neutron-openvswitch-agent is even alive on the host this port is bound (or trying to bind) to -- a dead agent there is the single most common cause of a stuck bind.",
+                "read_only": True,
+            },
+            {
+                "command": "docker logs --tail 200 neutron_server",
+                "description": "Neutron API/server-side errors from the bind attempt itself -- a segment mismatch or a plugin-level rejection shows up here, not on the compute host.",
+                "read_only": True,
+            },
+        ],
+        "remediation_commands": [
+            {
+                "command": "openstack port set --enable <port_id>",
+                "description": "If admin_state_up is false and nothing else looks wrong, this alone restores traffic -- try this first, it's non-disruptive.",
+                "read_only": False,
+            },
+            {
+                "command": "docker restart neutron_openvswitch_agent  # on the port's binding host",
+                "description": "For a genuine bind failure, restarting the OVS agent on the target host re-triggers the bind attempt.",
+                "read_only": False,
+            },
+            {
+                "command": "openstack server remove fixed-ip <instance_id> <ip_address> && openstack server add fixed-ip <instance_id> <network>",
+                "description": "Last resort for a port stuck unbound even once the agent is confirmed healthy -- drops and recreates the port rather than repairing the stuck one.",
+                "read_only": False,
+            },
+        ],
+        "doc_ref": "docs/knowledge/service-detail/neutron.md",
+    },
+    {
+        "id": "instance-stuck-in-error",
+        "title": "Instance is in ERROR with its own port down -- a network-caused failure, not a compute one",
+        "category": "network",
+        "metric_names": ["instance_stuck_error"],
+        "service_binaries": [],
+        "keywords": [
+            "instance stuck in error", "vm stuck in error", "instance error no network",
+            "can't reach the internet", "instance can't reach internet", "why can't instance reach",
+        ],
+        "what_it_means": (
+            "Different from a generic Nova ERROR (see 'instance-error-state' for a build/resize/"
+            "migrate failure with no networking angle at all) -- this is the specific, common "
+            "combination where the instance's own port never bound (status DOWN or "
+            "admin_state_up false, see 'port-down') around the same time the instance itself "
+            "landed in ERROR. A failed port bind during spawn is one of the most common reasons "
+            "Nova gives up and marks the whole build ERROR, since a guest can't be considered "
+            "successfully launched without a working network attachment. The instance's own "
+            "`fault` field will usually say something network/port-related (a Neutron timeout, a "
+            "binding failure) rather than a libvirt/hypervisor error -- confirm that before "
+            "treating this as a compute-side problem and reaching for 'instance-error-state's "
+            "rebuild/delete remediation instead."
+        ),
+        "confirm_commands": [
+            {
+                "command": "openstack server show <instance_id>",
+                "description": "The `fault` field -- confirms the failure was network/port-related (a Neutron timeout, a binding failure) rather than a hypervisor/libvirt issue.",
+                "read_only": True,
+            },
+            {
+                "command": "openstack port list --device-id <instance_id>",
+                "description": "This instance's port(s) and their status -- a DOWN or admin_state_up:false port alongside the ERROR state confirms the correlation.",
+                "read_only": True,
+            },
+            {
+                "command": "openstack network agent list --agent-type open-vswitch",
+                "description": "Whether the OVS agent on this instance's hypervisor was down at the time -- the most common root cause behind a failed bind during spawn.",
+                "read_only": True,
+            },
+        ],
+        "remediation_commands": [
+            {
+                "command": "openstack port set --enable <port_id>  (only once the agent/binding issue itself is fixed)",
+                "description": "Restore the port first -- fixing the network side before touching the instance's own state avoids landing right back in ERROR.",
+                "read_only": False,
+            },
+            {
+                "command": "openstack server reset-state --active <instance_id> && openstack server reboot --hard <instance_id>",
+                "description": "Once the port is confirmed healthy, clear Nova's stuck state and hard-reboot to force a clean re-attach rather than trusting the original failed boot.",
+                "read_only": False,
+            },
+            {
+                "command": "openstack server rebuild <instance_id> <image>  (if reset+reboot doesn't recover it)",
+                "description": "For a build-time failure severe enough that the guest never came up cleanly at all, rebuild rather than keep nursing the original attempt.",
+                "read_only": False,
+            },
+        ],
+        "doc_ref": "docs/knowledge/service-detail/neutron.md",
+    },
     {
         "id": "node-unreachable",
         "title": "A whole node has stopped responding (Prometheus health cross-check)",

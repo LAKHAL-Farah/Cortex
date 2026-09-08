@@ -50,6 +50,14 @@ those entries existed since before this agent had any live trigger for
 them (openstack_expert_catalog.py ships with every service-agent entry
 up front), so this is purely a new `_evidence_from_*` extractor plus one
 more `should_trigger_after_*` gate, no new catalog content.
+
+v0.10 (Phase C) widens that same network_agent chaining source: its
+finding can now come from an entity-scoped read (a network/subnet/
+instance question, not a node one -- see nodes/network.py's own v0.10
+note) with no Neutron *agent* involved at all, so `_evidence_from_network`
+now also recognizes a down/disabled Neutron port and an instance stuck in
+ERROR alongside one, via the two new catalog entries (`port-down`,
+`instance-stuck-in-error`) this version adds.
 """
 import logging
 import re
@@ -216,22 +224,72 @@ def _evidence_from_monitoring(raw_data: dict) -> dict:
 
 def _evidence_from_network(raw_data: dict) -> dict:
     """network_agent (nodes/network.py) never produces free-text log
-    lines the way anomaly.py does -- its two checks are structured
-    readings (interface counters, Neutron agent/router/network/FIP
-    status), not a log stream to search for keywords. `down_agents`'
-    binaries feed `service_binaries` the same way anomaly's log-detected
-    binaries do; there's simply nothing to put in `log_lines` here, so
-    `_match_symptoms`' keyword-in-log-line scoring is a no-op for this
-    source rather than a gap.
+    lines the way anomaly.py does -- its checks are structured readings
+    (interface counters, Neutron agent/router/network/FIP/port/instance
+    status), not a log stream to search for keywords. There's simply
+    nothing to put in `log_lines` here, so `_match_symptoms`' keyword-in-
+    log-line scoring is a no-op for this source rather than a gap.
+
+    v0.10 (Phase C) branches on `raw_data["scope"]` (added alongside the
+    entity-scoped path, see nodes/network.py's module docstring; absent/
+    "node" on any pre-Phase-C raw_data, so this stays backward compatible
+    with a fixture or trace that predates the scope key):
+
+    - "node" (unchanged v0.9 behavior): `down_agents`' binaries feed
+      `service_binaries` the same way anomaly's log-detected binaries do.
+      New in Phase C: if there are no down *agents* but `_check_neutron`
+      found an instance on this node with its own port down
+      (`bad_instances`), that's exactly what the new `port-down`/
+      `instance-stuck-in-error` catalog entries exist for -- fed in via
+      the same synthetic-metric-name idiom `_evidence_from_monitoring`'s
+      `host_down` sentinel already uses, since a down port isn't a real
+      Prometheus/anomaly_detector metric any more than "the host itself
+      is down" is.
+    - "network" / "subnet" / "instance": no agent binaries at all (these
+      scopes never look at Neutron *agents*, see network_health.py) --
+      the same sentinel idiom carries `entity_signal`'s `down_ports`/
+      `down_instances` into the matcher instead.
     """
+    scope = raw_data.get("scope", "node")
+
+    if scope != "node":
+        entity_signal = raw_data.get("entity_signal") or {}
+        down_ports = entity_signal.get("down_ports") or []
+        down_instances = entity_signal.get("down_instances") or []
+        # An instance actually in ERROR with its own port down is the
+        # more specific symptom (instance-stuck-in-error's catalog entry
+        # is written for exactly this correlation) -- a bare down port
+        # with no ERROR instance attached to it is the more general
+        # port-down entry. Checked in this order so the tighter match
+        # wins when both are true.
+        if any((i or {}).get("status") == "ERROR" for i in down_instances):
+            metric_name = "instance_stuck_error"
+        elif down_ports:
+            metric_name = "port_down"
+        else:
+            metric_name = None
+        return {
+            "metric_name": metric_name,
+            "service_binaries": [],
+            "log_lines": [],
+            "evidence_line": entity_signal.get("detail", ""),
+            "hostname": None,
+        }
+
     neutron_signal = raw_data.get("neutron_signal") or {}
     metric_signal = raw_data.get("metric_signal") or {}
     down_agents = neutron_signal.get("down_agents") or []
+    bad_instances = neutron_signal.get("bad_instances") or []
     service_binaries = [a["binary"] for a in down_agents if a.get("binary")]
+
+    metric_name = None
+    if not service_binaries and bad_instances:
+        error_instances = [i for i in bad_instances if i.get("status") == "ERROR"]
+        metric_name = "instance_stuck_error" if error_instances else "port_down"
 
     evidence_sentences = [metric_signal.get("detail", ""), neutron_signal.get("detail", "")]
     return {
-        "metric_name": None,
+        "metric_name": metric_name,
         "service_binaries": service_binaries,
         "log_lines": [],
         "evidence_line": " ".join(s for s in evidence_sentences if s),
@@ -271,15 +329,26 @@ def should_trigger_after_monitoring(state: CortexState) -> bool:
 def should_trigger_after_network(state: CortexState) -> bool:
     """Whether network_agent's finding has anything for this agent to
     explain -- same shape as should_trigger_after_anomaly: fires whenever
-    either of network_agent's two checks found something (a nonzero
-    error/drop rate, or a Neutron agent/router/network/FIP not fully up),
-    and leaves it to `_match_symptoms` to decide whether that something is
-    specific enough to actually match a catalog entry (see `_run_chained`'s
-    "no positive match -> leave upstream diagnosis as the final answer").
+    network_agent's checks found something, and leaves it to
+    `_match_symptoms` to decide whether that something is specific enough
+    to actually match a catalog entry (see `_run_chained`'s "no positive
+    match -> leave upstream diagnosis as the final answer").
+
+    v0.10 (Phase C) branches on `raw_data["scope"]` the same way
+    `_evidence_from_network` does: "node" (default, pre-Phase-C shape)
+    fires on a nonzero error/drop rate or a Neutron agent/router/network/
+    FIP/instance-port issue; the entity-scoped kinds have no metric_signal
+    at all, so they fire on `entity_signal` alone.
     """
     if state.get("error") or not state.get("agent_result"):
         return False
     raw_data = state["agent_result"]["raw_data"]
+    scope = raw_data.get("scope", "node")
+
+    if scope != "node":
+        entity_signal = raw_data.get("entity_signal") or {}
+        return bool(entity_signal.get("has_signal") or entity_signal.get("degraded"))
+
     metric_signal = raw_data.get("metric_signal") or {}
     neutron_signal = raw_data.get("neutron_signal") or {}
     return bool(

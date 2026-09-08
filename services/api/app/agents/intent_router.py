@@ -36,6 +36,15 @@ node-level network-traffic anomalies (see nodes/network.py). Same
 the enum/prompt below, not a structural change to how routing itself
 works.
 
+v0.10 (Phase C) widens that same "network" branch's own description
+(not the enum -- still one "network" agent) to cover questions scoped to
+a Neutron/Nova entity instead of a physical node ("which VMs are on
+network X", "why can't instance Y reach the internet", "is anything down
+on subnet Z") -- nodes/network.py itself decides node-scoped vs
+entity-scoped once routed here (see that module's own v0.10 note), this
+prompt only needs to widen the surface examples so the classifier still
+recognizes the question as this agent's territory.
+
 v0.8 adds two things:
 
 - This call now runs on the fast tier (services/llm_client.py) -- routing
@@ -89,10 +98,12 @@ _CLARIFYING_QUESTION = (
 _SYSTEM_PROMPT = """You route a user's infrastructure question to exactly one specialist agent:
 
 - monitoring: current/live status right now -- CPU, RAM, disk, uptime, up/down, health.
-- network: network/connectivity health for a node -- router or floating-IP status, whether a \
-Neutron agent (neutron-l3-agent/neutron-dhcp-agent/neutron-openvswitch-agent) is up, or \
+- network: network/connectivity health -- for a physical node: router or floating-IP status, \
+whether a Neutron agent (neutron-l3-agent/neutron-dhcp-agent/neutron-openvswitch-agent) is up, or \
 node-level network interface errors/drops/throughput. E.g. "is the network okay on compute-02", \
-"any floating IP issues", "check router status", "is there packet loss on storage-09".
+"any floating IP issues", "check router status", "is there packet loss on storage-09". Also covers \
+the same kind of question scoped to a network/subnet/instance instead of a node: "which VMs are on \
+network X", "is anything down on subnet Z", "why can't instance Y reach the internet".
 - prediction: forecast / future-trend questions -- "will X run out of disk", "CPU trend for \
 the next week", "when will Y hit 90%".
 - rag: how-to / troubleshooting / explanatory questions -- "how do we fix X", "why does Y \
