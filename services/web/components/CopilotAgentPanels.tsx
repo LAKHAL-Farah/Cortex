@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -11,6 +11,7 @@ import {
   BookOpen,
   Check,
   CheckCircle2,
+  ChevronDown,
   Clock,
   Copy,
   Cpu,
@@ -22,6 +23,9 @@ import {
   Loader2,
   MemoryStick,
   Minus,
+  Network,
+  Route,
+  Router,
   ScrollText,
   ShieldAlert,
   ShieldCheck,
@@ -29,6 +33,7 @@ import {
   Terminal,
   TrendingDown,
   TrendingUp,
+  Waypoints,
   Wrench,
   XCircle,
 } from "lucide-react";
@@ -49,11 +54,15 @@ import type {
   AgentExpertData,
   AgentMonitoringData,
   AgentName,
+  AgentNetworkData,
   AgentPredictionData,
   AgentRagData,
   AgentRawData,
+  AgentTraceStep,
   ForecastPoint,
+  NeutronAgentStatus,
 } from "@/lib/types";
+import NetworkTopologyDiagram from "@/components/NetworkTopologyDiagram";
 import { formatRelativeTime } from "@/lib/logs";
 import { metricLabel, SEVERITY_COLOR, SEVERITY_LABEL, SEVERITY_SOFT } from "@/lib/anomalies";
 
@@ -103,6 +112,13 @@ export const AGENT_META: Record<
     color: "var(--accent)",
     soft: "var(--accent-soft)",
   },
+  network: {
+    label: "Network agent",
+    short: "Traffic & Neutron health",
+    icon: Network,
+    color: "var(--chart-6)",
+    soft: "rgba(43,158,158,0.12)",
+  },
 };
 
 const DEFAULT_META = {
@@ -137,12 +153,19 @@ export function ReasoningTrace({
   active,
   agentUsed,
   elapsedMs,
+  steps,
 }: {
   active: boolean;
   agentUsed?: string;
   elapsedMs?: number;
+  // v0.11: the real per-node pipeline for this turn (see AgentTraceTimeline
+  // above). When present, the collapsed one-liner below becomes a toggle
+  // that expands into it -- "routed to the network agent" stops being the
+  // whole story and becomes the summary of a real, inspectable sequence.
+  steps?: AgentTraceStep[];
 }) {
   const [step, setStep] = useState(0);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     if (!active) return;
@@ -172,19 +195,201 @@ export function ReasoningTrace({
   if (!agentUsed) return null;
   const meta = agentMeta(agentUsed);
   const Icon = meta.icon;
+  const hasRealSteps = !!steps && steps.length > 0;
+  // The last non-structural step before compose is what actually produced
+  // the answer -- if that's a different agent than target_agent (i.e. it
+  // got chained, see openstack_expert.py), say so instead of only naming
+  // the agent the router originally picked.
+  const chainedInto = hasRealSteps
+    ? steps!.find((s) => s.node === "openstack_expert" && s.detail?.chained_from)
+    : undefined;
+
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.2 }}
-      className="reasoning-trace reasoning-trace--done"
-    >
-      <Icon className="h-3 w-3 shrink-0" style={{ color: meta.color }} strokeWidth={2} />
-      <span>
-        Routed to the <span style={{ color: meta.color, fontWeight: 600 }}>{meta.label.toLowerCase()}</span>
-        {typeof elapsedMs === "number" && elapsedMs > 0 ? ` · ${(elapsedMs / 1000).toFixed(1)}s` : ""}
-      </span>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.2 }}>
+      <button
+        type="button"
+        onClick={() => hasRealSteps && setExpanded((e) => !e)}
+        className="reasoning-trace reasoning-trace--done"
+        style={{ cursor: hasRealSteps ? "pointer" : "default", background: "none", border: "none", padding: 0 }}
+        aria-expanded={expanded}
+      >
+        <Icon className="h-3 w-3 shrink-0" style={{ color: meta.color }} strokeWidth={2} />
+        <span>
+          {chainedInto ? (
+            <>
+              <span style={{ color: agentMeta(chainedInto.detail.chained_from).color, fontWeight: 600 }}>
+                {agentMeta(chainedInto.detail.chained_from).label}
+              </span>{" "}
+              found something worth walking through, so it was handed to the{" "}
+              <span style={{ color: meta.color, fontWeight: 600 }}>{meta.label.toLowerCase()}</span>
+            </>
+          ) : (
+            <>
+              Routed to the <span style={{ color: meta.color, fontWeight: 600 }}>{meta.label.toLowerCase()}</span>
+            </>
+          )}
+          {typeof elapsedMs === "number" && elapsedMs > 0 ? ` · ${(elapsedMs / 1000).toFixed(1)}s` : ""}
+        </span>
+        {hasRealSteps && (
+          <ChevronDown
+            className="h-3 w-3 shrink-0 transition-transform"
+            style={{ color: "var(--text-muted)", transform: expanded ? "rotate(180deg)" : "none" }}
+            strokeWidth={2}
+          />
+        )}
+      </button>
+      {hasRealSteps && expanded && (
+        <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} transition={{ duration: 0.15 }}>
+          <AgentTraceTimeline steps={steps} />
+        </motion.div>
+      )}
     </motion.div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Agent trace timeline -- the *real* router -> agent [-> chained agent] ->
+// critic -> compose pipeline for one turn (routers/agents.py now inlines
+// agents/trace.py's step list on AgentOrchestrateResponse, see lib/types.ts's
+// AgentTraceStep). This is what answers "did it actually call the network
+// before handing off to the expert agent, or is that just what the
+// collapsed one-liner claims" -- every step here is something a node in
+// services/api/app/agents/graph.py genuinely ran, with the same summary
+// text compose.py built the final answer from, not a re-narrated guess.
+// ---------------------------------------------------------------------------
+
+const STRUCTURAL_STEP_META: Record<string, { label: string; icon: typeof Activity; color: string; soft: string }> = {
+  router: { label: "Router", icon: Route, color: "var(--text-dim)", soft: "var(--canvas)" },
+  critic: { label: "Critic", icon: ShieldCheck, color: "var(--text-dim)", soft: "var(--canvas)" },
+  compose: { label: "Compose", icon: Sparkles, color: "var(--accent)", soft: "var(--accent-soft)" },
+};
+
+function traceStepMeta(node: string) {
+  if (node in STRUCTURAL_STEP_META) return STRUCTURAL_STEP_META[node];
+  const meta = agentMeta(node);
+  return { label: meta.label, icon: meta.icon, color: meta.color, soft: meta.soft };
+}
+
+/** node ids are the graph's internal names (e.g. "anomaly_arbitrate" for
+ * what the trace still records as "anomaly", see graph.py's v0.8 note) --
+ * this only has to cover the handful that don't already match an
+ * AGENT_META/STRUCTURAL_STEP_META key verbatim. */
+function traceStepDisplayName(node: string): string {
+  return traceStepMeta(node).label;
+}
+
+function criticVerdictLabel(detail: AgentTraceStep["detail"]) {
+  const v = detail.critic_verdict;
+  if (!v) return null;
+  return typeof v === "string" ? v : v.status;
+}
+
+/** The one or two lines shown when a step is expanded -- always built from
+ * fields the backend actually sent (detail), never invented client-side. */
+function TraceStepDetail({ step }: { step: AgentTraceStep }) {
+  const { node, detail } = step;
+
+  if (node === "router") {
+    return (
+      <span>
+        Classified this as an{" "}
+        <span style={{ color: "var(--text)", fontWeight: 600 }}>{detail.intent ?? "unknown"}</span> question and
+        routed it to{" "}
+        <span style={{ color: "var(--text)", fontWeight: 600 }}>{detail.target_agent ?? "—"}</span>.
+      </span>
+    );
+  }
+
+  if (node === "critic") {
+    const verdict = criticVerdictLabel(detail);
+    if (!verdict) return <span>No claims to check (a clarify/error turn never reaches this step&apos;s real work).</span>;
+    return (
+      <span>
+        Evidence-grounding check:{" "}
+        <span style={{ color: verdict === "flagged" ? "var(--warn)" : "var(--ok)", fontWeight: 600 }}>
+          {verdict}
+        </span>
+        {verdict === "flagged" ? " — at least one claim in the answer wasn't traceable to the evidence gathered for it." : "."}
+      </span>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      {detail.chained_from && (
+        <span className="italic" style={{ color: "var(--text-muted)" }}>
+          Triggered by the {agentMeta(detail.chained_from).label.toLowerCase()}
+        &apos;s finding, one step up.
+        </span>
+      )}
+      {detail.summary && <span>{detail.summary}</span>}
+      {typeof detail.confidence === "number" && (
+        <span style={{ color: "var(--text-muted)" }}>Confidence: {(detail.confidence * 100).toFixed(0)}%</span>
+      )}
+      {detail.error && <span style={{ color: "var(--crit)" }}>Error: {detail.error}</span>}
+    </div>
+  );
+}
+
+export function AgentTraceTimeline({ steps }: { steps?: AgentTraceStep[] }) {
+  const [openIndex, setOpenIndex] = useState<number | null>(null);
+  if (!steps || steps.length === 0) return null;
+
+  return (
+    <div className="agent-trace-timeline">
+      {steps.map((step, i) => {
+        const meta = traceStepMeta(step.node);
+        const Icon = meta.icon;
+        const failed = step.status === "error";
+        const hasDetail = Object.keys(step.detail || {}).length > 0;
+        const isOpen = openIndex === i;
+        return (
+          <div key={`${step.node}-${i}`} className="agent-trace-timeline__row">
+            {i > 0 && <div className="agent-trace-timeline__connector" aria-hidden />}
+            <button
+              type="button"
+              onClick={() => hasDetail && setOpenIndex(isOpen ? null : i)}
+              className="agent-trace-timeline__step"
+              aria-expanded={isOpen}
+              disabled={!hasDetail}
+              style={{ cursor: hasDetail ? "pointer" : "default" }}
+            >
+              <span
+                className="agent-trace-timeline__icon"
+                style={{ background: failed ? "var(--crit-soft)" : meta.soft }}
+              >
+                {failed ? (
+                  <XCircle className="h-3 w-3" style={{ color: "var(--crit)" }} strokeWidth={2} />
+                ) : (
+                  <Icon className="h-3 w-3" style={{ color: meta.color }} strokeWidth={2} />
+                )}
+              </span>
+              <span className="agent-trace-timeline__label" style={{ color: failed ? "var(--crit)" : "var(--text-dim)" }}>
+                {traceStepDisplayName(step.node)}
+              </span>
+              <span className="agent-trace-timeline__duration">{Math.round(step.duration_ms)}ms</span>
+              {hasDetail && (
+                <ChevronDown
+                  className="h-3 w-3 shrink-0 transition-transform"
+                  style={{ color: "var(--text-muted)", transform: isOpen ? "rotate(180deg)" : "none" }}
+                  strokeWidth={2}
+                />
+              )}
+            </button>
+            {isOpen && hasDetail && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                transition={{ duration: 0.15 }}
+                className="agent-trace-timeline__detail"
+              >
+                <TraceStepDetail step={step} />
+              </motion.div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -266,7 +471,7 @@ function StatBar({ label, value, icon: Icon }: { label: string; value: number; i
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: string | number }) {
+function MiniStat({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="agent-mini-stat">
       <div className="agent-mini-stat__label">{label}</div>
@@ -328,6 +533,247 @@ function MonitoringPanel({ data }: { data: AgentMonitoringData }) {
       </div>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Network agent panel -- node-level interface counters + Neutron control-
+// plane health (scope: "node", the common case -- see nodes/network.py),
+// or a single Neutron entity's reading (scope: "network"/"subnet"/
+// "instance", Phase C). Mirrors MonitoringPanel's stat-tile layout for the
+// node-scoped case; the entity-scoped case is a simpler reading card, plus
+// a "View topology" button for scope === "network" that opens the same
+// real topology diagram the /networks page uses (components/
+// NetworkTopologyDiagram.tsx, backed by GET /api/topology/networks/{id}/
+// diagram) rather than a client-drawn approximation.
+// ---------------------------------------------------------------------------
+
+function rateTone(perSec: number) {
+  if (perSec > 1) return "var(--crit)";
+  if (perSec > 0) return "var(--warn)";
+  return "var(--ok)";
+}
+
+function formatRate(bytesPerSec: number) {
+  if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(2)} MB/s`;
+  if (bytesPerSec >= 1024) return `${(bytesPerSec / 1024).toFixed(2)} KB/s`;
+  return `${bytesPerSec.toFixed(0)} B/s`;
+}
+
+/** One node in the little host -> agent -> gateway status chain --
+ * deliberately not a full topology render (we only have this one host's
+ * Neutron reading, not the whole network graph -- that's what the "View
+ * topology" button on the network-scoped card is for instead). */
+function FlowNode({
+  icon: Icon,
+  label,
+  sublabel,
+  ok,
+  unknown,
+}: {
+  icon: typeof Cpu;
+  label: string;
+  sublabel?: string;
+  ok: boolean;
+  unknown?: boolean;
+}) {
+  const color = unknown ? "var(--text-muted)" : ok ? "var(--chart-6)" : "var(--crit)";
+  const soft = unknown ? "var(--canvas)" : ok ? "rgba(43,158,158,0.12)" : "var(--crit-soft)";
+  return (
+    <div
+      className="flex min-w-[104px] flex-col items-center gap-1 rounded-[var(--radius-control)] px-2.5 py-2 text-center"
+      style={{ background: soft, border: `1px solid ${unknown ? "var(--border-soft)" : "transparent"}` }}
+    >
+      <Icon className="h-4 w-4" style={{ color }} strokeWidth={2} />
+      <span className="text-[11px] font-semibold leading-tight text-color-text">{label}</span>
+      {sublabel && (
+        <span className="text-[10px] leading-tight" style={{ color }}>
+          {sublabel}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function FlowConnector({ ok }: { ok: boolean }) {
+  return (
+    <div className="flex w-6 shrink-0 items-center justify-center sm:w-8">
+      <div className="h-px w-full" style={{ background: ok ? "var(--chart-6)" : "var(--crit)", opacity: 0.5 }} />
+    </div>
+  );
+}
+
+function NeutronAgentChip({ agent }: { agent: NeutronAgentStatus }) {
+  const ok = agent.alive && agent.admin_state_up;
+  return (
+    <span
+      className="agent-pill"
+      style={{ color: ok ? "var(--chart-6)" : "var(--crit)", background: ok ? "rgba(43,158,158,0.1)" : "var(--crit-soft)" }}
+      title={agent.host}
+    >
+      {ok ? <CheckCircle2 className="h-3 w-3" strokeWidth={2} /> : <XCircle className="h-3 w-3" strokeWidth={2} />}
+      {agent.binary}
+    </span>
+  );
+}
+
+function NetworkProblemList({ title, items }: { title: string; items: string[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div
+      className="flex items-start gap-2 rounded-[var(--radius-control)] px-2.5 py-2 text-[12px] leading-relaxed"
+      style={{ background: "var(--crit-soft)", color: "var(--text-dim)" }}
+    >
+      <AlertTriangle className="mt-[1px] h-3.5 w-3.5 shrink-0" style={{ color: "var(--crit)" }} strokeWidth={2} />
+      <span>
+        <span className="font-semibold" style={{ color: "var(--crit)" }}>
+          {title}:
+        </span>{" "}
+        {items.join(", ")}
+      </span>
+    </div>
+  );
+}
+
+function NetworkNodeScopePanel({ data }: { data: AgentNetworkData }) {
+  const metric = data.metric_signal;
+  const neutron = data.neutron_signal;
+  const metricsData = metric?.data;
+  const agents = neutron?.data?.agents ?? [];
+  const anyAgentDown = (neutron?.down_agents?.length ?? 0) > 0;
+  const anyRouterBad = (neutron?.bad_routers?.length ?? 0) > 0;
+  const hasRouters = (neutron?.data?.routers?.length ?? 0) > 0;
+  const errorRate = metricsData?.network_errors_per_sec ?? 0;
+  const dropRate = metricsData?.network_drops_per_sec ?? 0;
+
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--chart-6) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <Network className="h-3.5 w-3.5" style={{ color: "var(--chart-6)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">{data.hostname}</span>
+          <span className="text-[11px] text-text-muted">{data.role}</span>
+        </div>
+        {neutron?.degraded && (
+          <span className="agent-pill" style={{ color: "var(--warn)", background: "var(--warn-soft)" }}>
+            <AlertTriangle className="h-3 w-3" strokeWidth={2} />
+            Neutron unreachable
+          </span>
+        )}
+      </div>
+
+      {/* host -> OVS agent -> gateway router status chain */}
+      <div className="flex items-center justify-center overflow-x-auto py-1">
+        <FlowNode icon={Cpu} label={data.hostname ?? "host"} sublabel="this node" ok unknown />
+        <FlowConnector ok={!anyAgentDown} />
+        <FlowNode
+          icon={Router}
+          label="Neutron agent(s)"
+          sublabel={agents.length ? `${agents.length} on host` : "none registered"}
+          ok={!anyAgentDown}
+          unknown={agents.length === 0}
+        />
+        {hasRouters && (
+          <>
+            <FlowConnector ok={!anyRouterBad} />
+            <FlowNode icon={Network} label="Router" sublabel={anyRouterBad ? "degraded" : "active"} ok={!anyRouterBad} />
+          </>
+        )}
+      </div>
+
+      <div className="agent-mini-stat-grid">
+        <MiniStat label="RX throughput" value={metricsData ? formatRate(metricsData.network_rx_bytes) : "—"} />
+        <MiniStat label="TX throughput" value={metricsData ? formatRate(metricsData.network_tx_bytes) : "—"} />
+        <MiniStat
+          label="Errors/sec"
+          value={<span style={{ color: rateTone(errorRate) }}>{errorRate.toFixed(2)}</span>}
+        />
+        <MiniStat
+          label="Dropped/sec"
+          value={<span style={{ color: rateTone(dropRate) }}>{dropRate.toFixed(2)}</span>}
+        />
+      </div>
+
+      {agents.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {agents.map((a) => (
+            <NeutronAgentChip key={a.id} agent={a} />
+          ))}
+        </div>
+      )}
+
+      <NetworkProblemList
+        title="Down/disabled agents"
+        items={(neutron?.down_agents ?? []).map((a) => a.binary)}
+      />
+      <NetworkProblemList
+        title="Routers not fully up"
+        items={(neutron?.bad_routers ?? []).map((r) => r.name || r.id)}
+      />
+      <NetworkProblemList
+        title="Instances with a down port"
+        items={(neutron?.bad_instances ?? []).map((i) => i.name || i.id)}
+      />
+    </div>
+  );
+}
+
+function NetworkEntityScopePanel({ data }: { data: AgentNetworkData }) {
+  const entity = data.entity;
+  const signal = data.entity_signal;
+  const [showTopology, setShowTopology] = useState(false);
+  const downInstances = signal?.down_instances ?? [];
+  const kindLabel = entity?.kind ? entity.kind[0].toUpperCase() + entity.kind.slice(1) : "Entity";
+
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--chart-6) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <Network className="h-3.5 w-3.5" style={{ color: "var(--chart-6)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">{entity?.name ?? entity?.id}</span>
+          {entity?.cidr && <span className="text-[11px] text-text-muted">{entity.cidr}</span>}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="agent-pill" style={{ color: "var(--chart-6)", background: "rgba(43,158,158,0.1)" }}>
+            {kindLabel}
+          </span>
+          {signal?.degraded && (
+            <span className="agent-pill" style={{ color: "var(--warn)", background: "var(--warn-soft)" }}>
+              <AlertTriangle className="h-3 w-3" strokeWidth={2} />
+              partial data
+            </span>
+          )}
+        </div>
+      </div>
+
+      {signal?.detail && <p className="text-[12.5px] leading-relaxed text-text-dim">{signal.detail}</p>}
+
+      <NetworkProblemList
+        title="Instances with a down port"
+        items={downInstances.map((i) => i.name || i.id)}
+      />
+
+      {entity?.kind === "network" && entity.id && (
+        <button
+          type="button"
+          onClick={() => setShowTopology(true)}
+          className="agent-pill w-fit"
+          style={{ color: "var(--chart-6)", background: "rgba(43,158,158,0.1)", cursor: "pointer" }}
+        >
+          <Waypoints className="h-3 w-3" strokeWidth={2} />
+          View full topology
+        </button>
+      )}
+
+      {showTopology && entity?.id && (
+        <NetworkTopologyDiagram networkId={entity.id} onClose={() => setShowTopology(false)} />
+      )}
+    </div>
+  );
+}
+
+function NetworkPanel({ data }: { data: AgentNetworkData }) {
+  if (data.scope === "node") return <NetworkNodeScopePanel data={data} />;
+  return <NetworkEntityScopePanel data={data} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -948,6 +1394,37 @@ function AgentPanelSkeleton({ agentUsed }: { agentUsed?: string }) {
       </div>
     );
   }
+  if (agentUsed === "network") {
+    return (
+      <div
+        className="agent-panel"
+        style={{ borderColor: "color-mix(in srgb, var(--chart-6) 16%, var(--border))" }}
+      >
+        <div className="flex items-center justify-between">
+          <SkeletonBar width="34%" />
+          <SkeletonBar width="16%" />
+        </div>
+        <div className="flex items-center justify-center gap-2 py-1">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="h-[58px] w-[90px] animate-pulse rounded-[var(--radius-control)]"
+              style={{ background: "var(--canvas)", border: "1px solid var(--border-soft)" }}
+            />
+          ))}
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {[0, 1].map((i) => (
+            <div
+              key={i}
+              className="h-[40px] animate-pulse rounded-[var(--radius-control)]"
+              style={{ background: "var(--canvas)", border: "1px solid var(--border-soft)" }}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
   if (agentUsed === "anomaly") {
     return (
       <div
@@ -1020,6 +1497,7 @@ export function AgentAnswerPanel({
     <div className="min-w-0">
       <Markdown text={answer} />
       {agentUsed === "monitoring" && rawData && <MonitoringPanel data={rawData as AgentMonitoringData} />}
+      {agentUsed === "network" && rawData && <NetworkPanel data={rawData as AgentNetworkData} />}
       {agentUsed === "prediction" && rawData && <PredictionPanel data={rawData as AgentPredictionData} />}
       {agentUsed === "rag" && rawData && <RagPanel data={rawData as AgentRagData} />}
       {agentUsed === "anomaly" && rawData && (
@@ -1064,6 +1542,7 @@ export function AnimatedAgentAnswer({
       {showPanel && (
         <motion.div initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
           {agentUsed === "monitoring" && <MonitoringPanel data={rawData as AgentMonitoringData} />}
+          {agentUsed === "network" && <NetworkPanel data={rawData as AgentNetworkData} />}
           {agentUsed === "prediction" && <PredictionPanel data={rawData as AgentPredictionData} />}
           {agentUsed === "rag" && <RagPanel data={rawData as AgentRagData} />}
           {agentUsed === "anomaly" && <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />}

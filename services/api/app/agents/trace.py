@@ -33,12 +33,40 @@ class TraceEvent(TypedDict):
     detail: dict  # small, JSON-safe -- e.g. {"target_agent": "anomaly"}
 
 
+def _last_agent_node(existing_events: list, before: str) -> Optional[str]:
+    """Which agent node (if any) ran immediately before `before` in this
+    same turn -- used to answer "was this a direct routed question, or did
+    it get here because an earlier agent's finding triggered it" for
+    openstack_expert, the one node reachable both ways (see graph.py's
+    docstring on v0.6's chaining). Walks backwards over the events already
+    recorded on *this* state (trace_events accumulates in call order), so
+    it needs no extra plumbing through the graph -- router/critic/compose
+    are structural, not agents, so they're skipped rather than reported."""
+    STRUCTURAL = {"router", "critic", "compose"}
+    for event in reversed(existing_events):
+        if event["node"] == before:
+            continue
+        if event["node"] not in STRUCTURAL:
+            return event["node"]
+    return None
+
+
 def _safe_detail(state: dict, node: str) -> dict:
     """A handful of state fields worth having at a glance in the trace
     without dumping the whole (potentially large) state dict -- raw_data
     from an AgentResult can carry full metric series or forecast points,
     which belongs in the DB row's own payload if needed, not repeated
-    into every step's detail blob."""
+    into every step's detail blob.
+
+    v0.11 (agentic-ai-layer UI) adds two fields aimed squarely at "what did
+    it actually find, and why did the next step happen": `summary`, every
+    AgentResult's own plain-language narration (see state.py's AgentResult
+    -- the same text the critic grounds and compose surfaces, so this is
+    never a second, diverging description of what happened) and, for
+    openstack_expert specifically, `chained_from` -- which upstream agent's
+    finding (if any) triggered this walkthrough, so the UI can render
+    "network agent found X -> chained into openstack_expert" as one visible
+    line instead of two unrelated-looking steps."""
     detail: dict = {}
     if node == "router":
         detail["intent"] = state.get("intent")
@@ -49,6 +77,9 @@ def _safe_detail(state: dict, node: str) -> dict:
         result = state.get("agent_result")
         if result:
             detail["confidence"] = result.get("confidence")
+            detail["summary"] = result.get("summary")
+        if node == "openstack_expert":
+            detail["chained_from"] = _last_agent_node(state.get("trace_events") or [], before=node)
     if state.get("error"):
         detail["error"] = state["error"]
     return detail

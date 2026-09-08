@@ -338,6 +338,14 @@ class AgentKnownNode(TypedDict):
     instance: str
 
 
+class AgentTraceStep(BaseModel):
+    node: str
+    status: str
+    duration_ms: float
+    timestamp: str
+    detail: dict
+
+
 class AgentOrchestrateResponse(BaseModel):
     answer: str
     agent_used: str
@@ -361,14 +369,14 @@ class AgentOrchestrateResponse(BaseModel):
     # the critic node found at least one claim in `answer` it couldn't
     # ground in the evidence gathered for it (see agents/nodes/critic.py).
     critic_verdict: str | None = None
-
-
-class AgentTraceStep(BaseModel):
-    node: str
-    status: str
-    duration_ms: float
-    timestamp: str
-    detail: dict
+    # v0.11 (agentic-ai-layer UI): the same step-by-step list GET
+    # /trace/{trace_id} exposes, inlined here so the UI that just triggered
+    # this turn can render the *real* router -> agent [-> chained agent] ->
+    # critic -> compose pipeline live, instead of only a generic "thinking"
+    # shimmer followed by one collapsed "routed to X" line. A caller that
+    # only wants the answer can keep ignoring this field; nothing about the
+    # existing contract above changes.
+    steps: list[AgentTraceStep] = []
 
 
 class AgentTraceResponse(BaseModel):

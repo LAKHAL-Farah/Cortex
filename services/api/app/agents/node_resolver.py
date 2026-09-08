@@ -3,10 +3,16 @@ to. Shared by every agent that needs a node before it can do anything else
 (monitoring, prediction) so the matching logic -- and its quality -- lives
 in exactly one place.
 
-Two-tier, cheapest-first:
+Three tiers, cheapest-first:
 1. An exact/substring pass: handles the common case (the hostname spelled
    out verbatim, or with a space instead of a hyphen) without ever calling
-   an LLM. Free, deterministic, and unambiguous when it hits.
+   an LLM. Free, deterministic, and unambiguous when it hits. Folded into
+   this same tier: a "dropped suffix" stem match -- "compute2" resolving
+   to "compute2-sim", "controller" resolving to "controller-01" -- since
+   that's just as free and deterministic as the literal check, and common
+   enough (a user thinking of a node by its name, not its environment/role
+   suffix) that it shouldn't have to wait on an LLM call at all, let alone
+   one that isn't configured (see node_resolver._stem_match).
 2. If that doesn't land on exactly one node, an LLM pass takes over: given
    the literal list of known hostnames, it's asked which one (if any) the
    question is about. This is what actually handles a *partial* mention
@@ -82,6 +88,42 @@ def _exact_match(query: str, known_nodes: list[KnownNode]) -> KnownNode | None:
     unique_matches = _dedupe(matches)
     if len(unique_matches) == 1:
         return unique_matches[0]
+    if len(unique_matches) > 1:
+        # Two+ known hostnames both literally appear in the question --
+        # genuinely ambiguous (e.g. both "compute-01" and "compute-011"
+        # substring-match a query mentioning the latter). Don't guess; let
+        # the LLM tier take a real shot at disambiguating from context, or
+        # fail through to "I couldn't tell which node" same as always.
+        return None
+
+    return _stem_match(tokens, known_nodes)
+
+
+def _stem_match(tokens: set[str], known_nodes: list[KnownNode]) -> KnownNode | None:
+    """Handles the very common case of a hostname's environment/role
+    suffix being dropped entirely -- "compute2" for "compute2-sim",
+    "controller" for "controller-01" -- without needing the LLM tier at
+    all, so this keeps working even when no NVIDIA_API_KEY is configured
+    (the default for a fresh openstack-sim checkout, see llm_client.py).
+
+    Deliberately NOT a bare hostname.startswith(token) check: that would
+    let "compute" alone match both "compute1-sim" and "compute2-sim",
+    which is genuinely ambiguous, not a suffix the user dropped. A match
+    only counts here when the token is the *whole* hostname with its
+    trailing hyphen-suffix removed (hostname.rsplit("-", 1)[0]), or the
+    hostname starts with "{token}-" -- either way, the token has to be a
+    complete naming segment, not an arbitrary substring.
+    """
+    def _is_stem_of(token: str, hostname: str) -> bool:
+        return hostname.rsplit("-", 1)[0] == token or hostname.startswith(f"{token}-")
+
+    matches = [node for node in known_nodes if any(_is_stem_of(t, node["hostname"]) for t in tokens)]
+    unique_matches = _dedupe(matches)
+    if len(unique_matches) == 1:
+        return unique_matches[0]
+    # 0 or 2+ stem matches -- either nothing to go on, or genuinely
+    # ambiguous (e.g. "compute2" matching both "compute2-sim" and
+    # "compute2-backup"); either way, not this tier's call to make.
     return None
 
 

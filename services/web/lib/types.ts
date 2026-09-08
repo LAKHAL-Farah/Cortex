@@ -432,7 +432,7 @@ export interface ChatSource {
 // actually return, used by components/CopilotAgentPanels.tsx to pick a
 // renderer.
 
-export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly" | "openstack_expert";
+export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly" | "openstack_expert" | "network";
 
 // Same live-status shape as LiveMetrics above, just named for clarity at
 // the copilot call site.
@@ -562,8 +562,87 @@ export interface AgentExpertData {
   // Present only in chained mode (see openstack_expert.py::_run_chained) --
   // which upstream agent's finding this walkthrough is explaining, and that
   // agent's own original summary, kept rather than discarded.
-  diagnosed_by?: "anomaly" | "monitoring" | null;
+  diagnosed_by?: "anomaly" | "monitoring" | "network" | null;
   upstream_summary?: string;
+}
+
+// Network agent (v0.9/v0.10, services/api/app/agents/nodes/network.py) --
+// mirrors _run_node_scope/_run_entity_scope's raw_data exactly. `scope`
+// picks which shape is present: "node" (a physical host -- the common
+// case, node_exporter interface counters + Neutron control-plane) vs.
+// "network"/"subnet"/"instance" (a Neutron/Nova entity with no node_exporter
+// counters at all, see network.py's module docstring on Phase C).
+export interface AgentNetworkMetrics {
+  node: string;
+  role: string;
+  instance: string;
+  network_rx_bytes: number;
+  network_tx_bytes: number;
+  network_errors_per_sec: number;
+  network_drops_per_sec: number;
+  status: string;
+}
+
+export interface AgentNetworkSignal {
+  has_signal: boolean;
+  degraded?: boolean;
+  detail: string;
+  data?: unknown;
+}
+
+export interface NeutronAgentStatus {
+  id: string;
+  binary: string;
+  agent_type: string;
+  host: string;
+  alive: boolean;
+  admin_state_up: boolean;
+}
+
+export interface NeutronRouterStatus {
+  id: string;
+  name: string;
+  status: string;
+  admin_state_up: boolean;
+}
+
+export interface NeutronInstanceStatus {
+  id: string;
+  name: string;
+  status: string;
+  hypervisor_hostname?: string;
+  has_down_port: boolean;
+}
+
+export interface AgentNetworkNeutronSignal extends AgentNetworkSignal {
+  data?: {
+    hostname: string;
+    agents: NeutronAgentStatus[];
+    routers: NeutronRouterStatus[];
+    networks: unknown[];
+    floating_ips: unknown[];
+    instances: NeutronInstanceStatus[];
+  };
+  down_agents?: NeutronAgentStatus[];
+  bad_routers?: NeutronRouterStatus[];
+  bad_networks?: unknown[];
+  bad_fips?: unknown[];
+  bad_instances?: NeutronInstanceStatus[];
+}
+
+export interface AgentNetworkData {
+  scope: "node" | "network" | "subnet" | "instance";
+  // scope === "node"
+  hostname?: string;
+  role?: string;
+  metric_signal?: AgentNetworkSignal & { data?: AgentNetworkMetrics | null };
+  neutron_signal?: AgentNetworkNeutronSignal;
+  // scope !== "node" (Phase C, entity-scoped)
+  entity?: { kind: "network" | "subnet" | "instance"; id: string; name: string; cidr?: string | null };
+  entity_signal?: AgentNetworkSignal & {
+    down_ports?: unknown[];
+    down_instances?: NeutronInstanceStatus[];
+  };
 }
 
 export type AgentRawData =
@@ -572,12 +651,47 @@ export type AgentRawData =
   | AgentRagData
   | AgentAnomalyData
   | AgentExpertData
+  | AgentNetworkData
   | Record<string, unknown>;
+
+// v0.7 (adr-0009) trace step -- one per node the graph actually visited
+// this turn, in execution order. `detail` is the same small, JSON-safe
+// blob agents/trace.py's _safe_detail builds server-side: intent/
+// target_agent on "router", critic_verdict on "critic", and otherwise
+// confidence + summary (AgentResult's own plain-language narration, not a
+// second description invented client-side) plus, only on
+// "openstack_expert", chained_from -- which upstream agent's finding (if
+// any) triggered this walkthrough, so the UI can render "network agent
+// found X -> chained into openstack_expert" as one connected story
+// instead of two unrelated-looking steps.
+export interface AgentTraceStep {
+  node: string;
+  status: "ok" | "error" | "skipped" | string;
+  duration_ms: number;
+  timestamp: string;
+  detail: {
+    intent?: string | null;
+    target_agent?: string | null;
+    critic_verdict?: { status: string; [key: string]: unknown } | string | null;
+    confidence?: number | null;
+    summary?: string | null;
+    chained_from?: AgentName | string | null;
+    error?: string | null;
+    [key: string]: unknown;
+  };
+}
 
 export interface AgentOrchestrateResponse {
   answer: string;
   agent_used: AgentName | string;
   raw_data: AgentRawData | null;
   confidence: number | null;
+  degraded?: boolean;
+  trace_id?: string;
+  critic_verdict?: string | null;
+  // v0.11 (agentic-ai-layer UI): the real router -> agent [-> chained
+  // agent] -> critic -> compose pipeline for this turn, inlined so the UI
+  // that just triggered it can render it live -- see AgentTraceStep above.
+  steps?: AgentTraceStep[];
 }
 

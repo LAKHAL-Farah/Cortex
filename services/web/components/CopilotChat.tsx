@@ -10,7 +10,7 @@ import {
   Trash2,
   TriangleAlert,
 } from "lucide-react";
-import type { AgentOrchestrateResponse } from "@/lib/types";
+import type { AgentOrchestrateResponse, AgentTraceStep } from "@/lib/types";
 import { AnimatedAgentAnswer, agentMeta, ReasoningTrace } from "@/components/CopilotAgentPanels";
 import {
   type Conversation,
@@ -31,6 +31,11 @@ interface DisplayMessage extends StoredMessage {
   animated?: boolean; // client-side only -- true once this turn has already
   // played its typewriter/skeleton reveal, so switching conversations and
   // back doesn't replay it. History loaded from the server starts true.
+  steps?: AgentTraceStep[]; // client-side only -- the real per-node pipeline
+  // for this turn (see AgentOrchestrateResponse.steps / AgentTraceTimeline).
+  // Not persisted to conversation history yet (only trace_id is durable,
+  // via GET /api/v1/agents/trace/{trace_id}), so a reloaded past turn shows
+  // the plain collapsed line rather than a replayable timeline.
 }
 
 // One example per specialist agent (see services/api/app/agents/) so first-
@@ -200,7 +205,7 @@ export default function CopilotChat() {
   }
 
   async function persist(id: string, nextMessages: DisplayMessage[]) {
-    const clean: StoredMessage[] = nextMessages.map(({ pending, startedAt, elapsedMs, animated, ...m }) => m);
+    const clean: StoredMessage[] = nextMessages.map(({ pending, startedAt, elapsedMs, animated, steps, ...m }) => m);
     const firstUser = clean.find((m) => m.role === "user")?.content;
     const existingTitle = conversations.find((c) => c.id === id)?.title;
     const title = existingTitle && existingTitle !== "New conversation" ? existingTitle : titleFromMessage(firstUser ?? "New conversation");
@@ -307,6 +312,7 @@ export default function CopilotChat() {
         agent_used: data.agent_used,
         raw_data: data.raw_data ?? null,
         confidence: data.confidence ?? null,
+        steps: data.steps ?? undefined,
         elapsedMs,
         pending: false,
       }));
@@ -473,7 +479,7 @@ export default function CopilotChat() {
                         )}
                       </div>
                       <div className="min-w-0 flex-1">
-                        <ReasoningTrace active={!!m.pending} agentUsed={m.agent_used} elapsedMs={m.elapsedMs} />
+                        <ReasoningTrace active={!!m.pending} agentUsed={m.agent_used} elapsedMs={m.elapsedMs} steps={m.steps} />
                         {m.content ? (
                           m.errored ? (
                             <div className="text-[13.5px] leading-relaxed" style={{ color: "var(--crit)" }}>

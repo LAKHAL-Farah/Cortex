@@ -114,6 +114,11 @@ def orchestrate(
         degraded=degraded,
         trace_id=trace_id,
         critic_verdict=critic_verdict["status"] if critic_verdict else None,
+        # v0.11: same list just persisted to models.AgentTrace above, handed
+        # back inline so the caller that triggered this turn doesn't need a
+        # second round-trip to GET /trace/{trace_id} just to show the real
+        # router -> agent [-> chained agent] -> critic -> compose pipeline.
+        steps=result.get("trace_events") or [],
     )
 
 
