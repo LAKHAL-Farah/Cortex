@@ -116,6 +116,28 @@ def get_network_tx():
     return to_dict(query(promql))
 
 
+# node_exporter's own error/drop counters -- new for the Network Agent
+# (agents/nodes/network.py, v0.9), not previously queried anywhere. Unlike
+# rx/tx throughput (which is "however much traffic there happens to be"),
+# a healthy interface's error/drop rate should sit at ~0, so these are
+# meaningful on their own without needing a percent-of-something framing.
+
+def get_network_errors():
+    promql = (
+        'sum by(instance) (rate(node_network_receive_errs_total{device!="lo"}[5m]) '
+        '+ rate(node_network_transmit_errs_total{device!="lo"}[5m]))'
+    )
+    return to_dict(query(promql))
+
+
+def get_network_drops():
+    promql = (
+        'sum by(instance) (rate(node_network_receive_drop_total{device!="lo"}[5m]) '
+        '+ rate(node_network_transmit_drop_total{device!="lo"}[5m]))'
+    )
+    return to_dict(query(promql))
+
+
 # ---------- Load average ----------
 
 def get_load1():
@@ -225,6 +247,49 @@ def collect_metrics():
     return nodes
 
 
+# ---------- Network-focused aggregation (used by the Network Agent) ----------
+
+def collect_network_metrics():
+    """Same aggregation idea as collect_metrics() above, but scoped to just
+    the network-health-specific counters agents/nodes/network.py needs
+    (throughput plus, new here, error/drop rates) -- deliberately not
+    folded into collect_metrics() itself, since every other caller of that
+    function (monitoring/prediction/anomaly) has no use for error/drop
+    rates and carrying them there would just be dead weight for them.
+    """
+    net_rx = get_network_rx()
+    net_tx = get_network_tx()
+    net_errors = get_network_errors()
+    net_drops = get_network_drops()
+    status = get_status()
+
+    meta_source = query('up{job="node_exporter"}')
+    meta = {
+        item["metric"]["instance"]: {
+            "node": item["metric"].get("node", item["metric"]["instance"]),
+            "role": item["metric"].get("role", "unknown"),
+        }
+        for item in meta_source
+    }
+
+    all_instances = set(net_rx) | set(net_tx) | set(status)
+
+    nodes = []
+    for instance in all_instances:
+        nodes.append({
+            "node": meta.get(instance, {}).get("node", instance),
+            "role": meta.get(instance, {}).get("role", "unknown"),
+            "instance": instance,
+
+            "network_rx_bytes": net_rx.get(instance, 0.0),
+            "network_tx_bytes": net_tx.get(instance, 0.0),
+            "network_errors_per_sec": net_errors.get(instance, 0.0),
+            "network_drops_per_sec": net_drops.get(instance, 0.0),
+
+            "status": "up" if status.get(instance, 0) == 1 else "down",
+        })
+
+    return nodes
 
 
 def _step_for_range(minutes: int) -> str:

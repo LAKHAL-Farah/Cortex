@@ -51,6 +51,14 @@
   --chart-3: #2F9E68;
   --chart-4: #8B7FE0;
   --chart-5: #C98A1D;
+  /* chart-6: added for the topology graph's :Port vertices specifically
+     (see lib/topology.ts's LABEL_COLOR) -- the 5-color chart palette was
+     already fully claimed by Service/Network/Subnet/Router/FloatingIP
+     once :Instance/:Port vertices needed distinct colors too, and reusing
+     --accent or --text-muted for a vertex label would collide with what
+     those already mean elsewhere on the same graph (live SERVES traffic,
+     a dimmed/filtered vertex). */
+  --chart-6: #2B9E9E;
 
   --shadow: 0 1px 2px rgba(15,23,42,0.04);
   --shadow-hover: 0 4px 12px rgba(15,23,42,0.07);
@@ -92,6 +100,7 @@
   --chart-3: #3EB981;
   --chart-4: #A79BEF;
   --chart-5: #D9A536;
+  --chart-6: #3FC2C2;
 
   --shadow: 0 1px 2px rgba(0,0,0,0.24);
   --shadow-hover: 0 4px 14px rgba(0,0,0,0.32);
@@ -397,14 +406,16 @@ select {
   border-radius: var(--radius-control);
   border: 1px solid var(--border-soft);
   background: var(--canvas);
-  overflow-x: auto;
 }
 .md-content pre code {
+  display: block;
   background: none;
   border: none;
   padding: 0;
   font-size: 0.82em;
   line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .md-content table {
   width: 100%;
@@ -426,4 +437,258 @@ select {
   border: none;
   border-top: 1px solid var(--border-soft);
   margin: 0.9em 0;
+}
+
+/* -- Copilot agent panels (components/CopilotAgentPanels.tsx) ------------ */
+
+.reasoning-trace {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  margin-bottom: 0.4em;
+  font-size: 12px;
+  color: var(--text-faint);
+  min-height: 1.2em;
+}
+.reasoning-trace--done { color: var(--text-faint); }
+
+.agent-trace-timeline {
+  display: flex;
+  flex-direction: column;
+  margin-top: 0.35em;
+  margin-bottom: 0.4em;
+  padding: 0.4em 0.1em 0.1em 0.1em;
+  border-radius: var(--radius-control);
+  background: var(--canvas);
+  border: 1px solid var(--border-soft);
+}
+.agent-trace-timeline__row {
+  display: flex;
+  flex-direction: column;
+  padding: 0 0.6em;
+}
+.agent-trace-timeline__connector {
+  width: 1px;
+  height: 8px;
+  margin-left: 0.7em;
+  background: var(--border-soft);
+}
+.agent-trace-timeline__step {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.3em 0;
+  font-size: 12px;
+  width: 100%;
+  text-align: left;
+}
+.agent-trace-timeline__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.agent-trace-timeline__label {
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.agent-trace-timeline__duration {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  margin-right: auto;
+}
+.agent-trace-timeline__detail {
+  margin: 0 0 0.55em 1.75em;
+  padding: 0.5em 0.7em;
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  overflow: hidden;
+}
+
+.agent-panel {
+  margin-top: 0.75em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65em;
+  padding: 0.85em 0.95em;
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+.agent-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+}
+
+.agent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  padding: 0.15em 0.55em;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.agent-stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+  padding: 0.5em 0.6em;
+  border-radius: var(--radius-control);
+  background: var(--canvas);
+  border: 1px solid var(--border-soft);
+}
+.agent-stat-tile__head {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.agent-stat-tile__bar {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+.agent-stat-tile__bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.agent-mini-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5em 0.9em;
+}
+.agent-mini-stat__label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+.agent-mini-stat__value {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-forecast-headline {
+  display: flex;
+  align-items: center;
+  gap: 0.9em;
+}
+.agent-forecast-headline__value {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Anomaly panel -- one card per sub-orchestration step (metric-check,
+   log-check), see components/CopilotAgentPanels.tsx's AnomalyPanel. */
+.agent-anomaly-subcard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55em;
+  padding: 0.65em 0.75em;
+  border-radius: var(--radius-control);
+  background: var(--canvas);
+  border: 1px solid var(--border-soft);
+}
+.agent-anomaly-subcard__head {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.agent-anomaly-log-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55em;
+  padding: 0.3em 0;
+  border-top: 1px solid var(--border-soft);
+  font-size: 11.5px;
+}
+.agent-anomaly-log-row:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+/* OpenStack Expert panel -- one row per command (confirm/remediate), see
+   components/CopilotAgentPanels.tsx's CommandRow. */
+.agent-command-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+}
+.agent-command-row__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6em;
+}
+.agent-command-row__desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.agent-command-row__code {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5em;
+  padding: 0.5em 0.6em;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+.agent-command-row__code code {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.agent-command-row__copy {
+  display: flex;
+  height: 24px;
+  width: 24px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  border-radius: 6px;
+  color: var(--text-faint);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.agent-command-row__copy:hover {
+  background: var(--border-soft);
+  color: var(--text);
+}
+.agent-anomaly-log-row__line {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text-dim);
 }

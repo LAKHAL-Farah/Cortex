@@ -8,6 +8,46 @@ from sqlalchemy import Column, Float, UniqueConstraint, Text, JSON
 from .db import Base
 
 
+class User(Base):
+    """A real Cortex account (see app/auth.py) -- username + bcrypt password
+    hash, a coarse role, and the bits needed to run an admin-invites-users
+    flow instead of open self-signup:
+
+    - `is_active`: soft-disable switch. Admins flip this off instead of
+      deleting the row, so a deactivated user's audit trail/ownership of
+      past data doesn't disappear, and re-enabling doesn't need a new id.
+    - `must_change_password`: set whenever an admin sets/resets someone's
+      password (including the bootstrap admin account, see main.py's
+      startup seeding) so a shared/temporary password can't silently
+      become a long-lived credential -- the frontend forces a password
+      change before letting that session do anything else.
+
+    role is a plain string CHECK rather than a permissions table -- Cortex
+    only needs two tiers right now (operators who can act on the platform,
+    and admins who can additionally manage nodes/knowledge-base ingestion
+    and other accounts). If that grows past "admin can do everything viewer
+    can, plus X", revisit with real per-permission rows instead of adding
+    more roles here.
+    """
+    __tablename__ = "users"
+
+    __table_args__ = (
+        CheckConstraint("role IN ('admin','viewer')", name="ck_users_role_allowed"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="viewer")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Node(Base):
     __tablename__ = "nodes"
 
@@ -240,18 +280,20 @@ class QuotaAlert(Base):
 class Conversation(Base):
     """One Copilot chat thread (adr-0005's knowledge chat is stateless per
     request -- this is what turns that into something a user can leave and
-    come back to). Scoped by `client_id`, an anonymous per-browser UUID the
-    frontend generates and sends as X-Client-Id (see security.get_client_id)
-    rather than a real account -- there's no login system in Cortex yet, so
-    this is the same "shared secret" trust model the rest of the API already
-    uses for X-API-Key, just one level more granular. Copying that client_id
-    into another browser's storage is how a user "syncs" their history
-    across devices without Cortex needing real auth.
+    come back to). Scoped by `user_id`, the logged-in account (app/auth.py)
+    that started the thread -- history now follows the account rather than
+    a per-browser id, so it shows up the same way on any device that account
+    logs into. (This replaced an earlier client_id/X-Client-Id scheme from
+    before Cortex had real accounts; see migration b1c2d3e4f5a6's successor
+    for the cutover, which drops any conversations that predate it since an
+    anonymous browser id can't be attributed to a user after the fact.)
     """
     __tablename__ = "conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    client_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="New conversation")
     # Mirrors ChatQuery.category (adr-0005) -- which docs/knowledge/ slice
     # this thread's questions were scoped to, so resuming a conversation
@@ -289,6 +331,17 @@ class ConversationMessage(Base):
     # SSE stream's `sources` event already carries. Null for user turns.
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
     errored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Which specialist agent produced this turn (monitoring/prediction/rag,
+    # see app/agents/) and the raw payload it returned (LiveMetrics, a
+    # forecast series, or RAG sources -- see AgentOrchestrateResponse). Both
+    # null for user turns and for any assistant turn that predates the
+    # agent orchestrator UI. The frontend uses agent_used to pick which
+    # panel to render a saved turn with on reload (components/
+    # CopilotAgentPanels.tsx), so this is persisted alongside content
+    # instead of being re-derived, which the orchestrator has no way to do
+    # after the fact.
+    agent_used: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    raw_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -331,4 +384,87 @@ class TopologySyncRun(Base):
             "status IN ('ok','degraded','failed')",
             name="ck_topology_sync_runs_status_allowed",
         ),
+    )
+
+
+class AgentTrace(Base):
+    """One row per POST /api/v1/agents/orchestrate turn (v0.7, adr-0009).
+    `id` *is* the trace_id minted by routers/agents.py before the graph
+    runs (not a separately-generated primary key) -- that's what makes
+    GET /api/v1/agents/trace/{trace_id} a direct lookup by primary key
+    instead of a secondary index.
+
+    `steps` is the full ordered `trace.TraceEvent` list the graph
+    accumulated in `state["trace_events"]` (see agents/trace.py) --
+    router decision, which agent(s) ran, the critic's verdict, any
+    failures, all in the order they actually happened. This table is
+    intentionally the "lightweight custom trace store in Postgres" option
+    v0.7's brief calls out as an alternative to a vendor tracing product
+    (LangSmith): one append-only row per turn, no separate
+    spans/services schema, since a single-agent-per-turn graph doesn't yet
+    need one.
+
+    Append-only, like AnomalyEvent/TopologySyncRun -- a trace is a record
+    of what happened, never updated after the turn completes.
+    """
+
+    __tablename__ = "agent_traces"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_query: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_agent: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # "pass" | "flagged" | null (a hard-error/clarify turn the critic
+    # never actually graded) -- pulled out of critic_verdict into its own
+    # indexed column so "how often does the critic flag something" is a
+    # COUNT(*) ... WHERE, not a JSON-path query, for the 6.3 dashboard.
+    critic_verdict_status: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    steps: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    final_answer: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class AgentSessionMemory(Base):
+    """v0.8 -- one compact "resolved entities" record per Copilot
+    conversation (agents/state.py's `session_memory`/`resolved_entities`;
+    see routers/agents.py). Deliberately one row per conversation, not one
+    row per turn: this is the alternative to re-sending (or re-reading)
+    the full raw conversation transcript into the router/agents on every
+    turn, so its shape is "the compact set of things a follow-up question
+    might need" (last resolved node, last metric, last agent) rather than
+    a growing history -- each turn overwrites this row with whatever it
+    resolved, it doesn't append to it.
+
+    `conversation_id` is unique (one memory record per conversation) and
+    a real FK into `conversations` -- if the conversation is deleted, its
+    session memory should go with it, same CASCADE as
+    `conversation_messages`. Nullable would let this track "an
+    orchestrate call with no conversation_id at all" (a direct/API caller
+    that never created a Conversation), but a session-less caller has no
+    conversation to persist memory *for* in the first place, so
+    routers/agents.py simply skips the load/persist step entirely rather
+    than writing rows with a null key here.
+    """
+
+    __tablename__ = "agent_session_memory"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    # {"last_node": {...KnownNode}, "last_metric": "cpu_percent",
+    # "last_agent": "monitoring"} -- see agents/state.py's module
+    # docstring for what each key means and who writes it.
+    resolved_entities: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

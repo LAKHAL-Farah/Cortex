@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from .. import schemas
-from ..security import require_api_key
+from ..auth import require_admin
 from ..services.knowledge import chat as knowledge_chat
 from ..services.knowledge import qdrant_store
 from ..services.knowledge.embeddings import EmbeddingError, embed_query
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/v1/knowledge", tags=["knowledge"])
 
 
 @router.post("/ingest", response_model=schemas.KnowledgeIngestResult,
-             dependencies=[Depends(require_api_key)])
+             dependencies=[Depends(require_admin)])
 def ingest_knowledge():
     """Runs the on-demand embeddings pipeline: scrapes every .md file under
     docs/knowledge/ (including service-detail/), embeds each chunk, and
@@ -47,7 +47,7 @@ def knowledge_status():
 
 
 @router.post("/search", response_model=schemas.KnowledgeSearchResponse,
-             dependencies=[Depends(require_api_key)])
+             dependencies=[Depends(require_admin)])
 def search_knowledge(payload: schemas.KnowledgeSearchQuery):
     """Semantic search over the ingested knowledge base -- mainly for
     verifying retrieval quality after an ingest, and for any future
@@ -105,7 +105,7 @@ def _chat_event_stream(message: str, history, chunks):
     yield _sse_event("done", {})
 
 
-@router.post("/chat", dependencies=[Depends(require_api_key)])
+@router.post("/chat")
 def chat_knowledge(payload: schemas.ChatQuery):
     """Grounded Q&A over docs/knowledge/ (adr-0005): retrieves the same way
     as /search, then streams an NVIDIA NIM-generated answer (via LangChain's

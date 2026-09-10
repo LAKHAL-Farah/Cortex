@@ -1,5 +1,9 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
+# Username/password auth (app/auth.py): bcrypt for password hashing, PyJWT
+# for signing/verifying the session tokens issued by POST /api/v1/auth/login.
+bcrypt==4.2.0
+PyJWT==2.9.0
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.9
 alembic==1.13.2
@@ -23,3 +27,7 @@ sentence-transformers==3.3.1
 # ChatNVIDIA calls the hosted NVIDIA NIM endpoint, no model weights baked
 # into the image (unlike the embedding model).
 langchain-nvidia-ai-endpoints==1.4.3
+# Agent orchestrator graph (router -> monitoring -> compose, see app/agents/).
+# Pulls a compatible langchain-core transitively (already constrained to
+# <2.0.0,>=1.4.7 by langchain-nvidia-ai-endpoints above).
+langgraph==1.2.11

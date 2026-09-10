@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 from ipaddress import ip_address, ip_network
+from typing import TypedDict
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from ipaddress import ip_address, ip_network
 
@@ -110,6 +111,38 @@ class TopologyNetworkOut(BaseModel):
     gateway_routers: list[dict] = Field(default_factory=list)
     floating_ips: list[dict] = Field(default_factory=list)
     serving_agents: list[dict] = Field(default_factory=list)
+
+
+class TopologyNetworkDiagramOut(BaseModel):
+    """Response for GET /api/v1/topology/networks/{id}/diagram -- the
+    Horizon-style per-network shape (see graph_db.fetch_network_topology):
+    this network, its gateway router(s), and each subnet with its ports
+    (each port's `instance` dict nested inline, or null for a port with
+    no owning VM). Deliberately not reusing TopologyNetworkOut above:
+    that one is a flat list-view row (subnets as bare dicts, no ports);
+    this one is a diagram's worth of nesting, a different shape for a
+    different consumer.
+    """
+    model_config = ConfigDict(extra="allow")
+    id: str
+    gateway_routers: list[dict] = Field(default_factory=list)
+    subnets: list[dict] = Field(default_factory=list)
+
+
+class TopologyMapOut(BaseModel):
+    """Response for GET /api/v1/topology/networks/topology-map -- the
+    whole-topology, Horizon-style network map NetworkTopologyCanvas.tsx
+    renders (see graph_db.fetch_topology_map): every network (each
+    carrying `router_external`, `gateway_router_ids`, and
+    `interface_router_ids` so the frontend can place it in the provider
+    or self-service lane and draw its router link) plus every router
+    standalone, so a router renders once and is shared between the
+    gateway network above it and the self-service network(s) below it
+    rather than once per edge.
+    """
+    model_config = ConfigDict(extra="allow")
+    networks: list[dict] = Field(default_factory=list)
+    routers: list[dict] = Field(default_factory=list)
 
 
 class SyncType(str, Enum):
@@ -222,10 +255,10 @@ class ChatSource(BaseModel):
 
 # --------------------------------------------------------------------------
 # Copilot conversation history -- server-side persistence of Copilot threads,
-# scoped by the anonymous X-Client-Id header (see app.security.get_client_id)
-# rather than a real account, since Cortex has no login system yet. Reuses
-# ChatRole/ChatSource above since a stored message is just a chat turn plus
-# the bookkeeping (errored, position) needed to replay a transcript.
+# scoped by the logged-in account (see routers/conversations.py, which reads
+# user_id off Depends(get_current_user)). Reuses ChatRole/ChatSource above
+# since a stored message is just a chat turn plus the bookkeeping (errored,
+# position) needed to replay a transcript.
 # --------------------------------------------------------------------------
 
 class ConversationMessageIn(BaseModel):
@@ -233,6 +266,12 @@ class ConversationMessageIn(BaseModel):
     content: str = Field(min_length=1)
     sources: list[ChatSource] | None = None
     errored: bool = False
+    # See models.ConversationMessage.agent_used/raw_data -- which agent
+    # (monitoring/prediction/rag) produced this turn and its raw payload,
+    # so a reloaded conversation can re-render the same agent-specific
+    # panel instead of falling back to plain markdown.
+    agent_used: str | None = None
+    raw_data: dict | None = None
 
 
 class ConversationMessageOut(ConversationMessageIn):
@@ -271,5 +310,153 @@ class ConversationOut(ConversationSummaryOut):
     messages: list[ConversationMessageOut]
 
 
+# --------------------------------------------------------------------------
+# Agent orchestrator (v0.1 "prove the loop") -- POST /api/v1/agents/orchestrate
+# runs the LangGraph router->monitoring->compose graph (see app/agents/) and
+# returns a single JSON answer. Unlike knowledge.chat's ChatQuery/ChatSource
+# above, this is intentionally not streaming yet: v0.1 is proving the graph
+# mechanism runs end to end, not the UX around it.
+# --------------------------------------------------------------------------
+
+class AgentOrchestrateQuery(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    # v0.8: which Copilot conversation (see Conversation/conversations
+    # router) this turn belongs to, if any -- optional and purely additive,
+    # so a direct/API caller with no conversation concept at all keeps
+    # working exactly as before. When present, routers/agents.py loads
+    # that conversation's session memory (models.AgentSessionMemory)
+    # before running the graph and persists whatever this turn resolved
+    # back onto it afterward -- see agents/state.py's module docstring for
+    # why this is a compact resolved-entities record rather than replaying
+    # the conversation's full transcript into the router on every turn.
+    conversation_id: uuid.UUID | None = None
 
 
+class AgentKnownNode(TypedDict):
+    hostname: str
+    role: str
+    instance: str
+
+
+class AgentTraceStep(BaseModel):
+    node: str
+    status: str
+    duration_ms: float
+    timestamp: str
+    detail: dict
+
+
+class AgentOrchestrateResponse(BaseModel):
+    answer: str
+    agent_used: str
+    raw_data: dict | None = None
+    # Every agent already sets AgentResult.confidence (see agents/state.py) --
+    # this was computed and then silently dropped until the anomaly agent's
+    # merged-evidence score (nodes/anomaly.py) made "nothing surfaces this"
+    # worth fixing for every agent, not just that one.
+    confidence: float | None = None
+    # v0.5 (adr-0007): true when `answer` already carries a resilience.py
+    # degraded-answer note because some sub-call failed post-retry (see
+    # agents/compose.py) -- lets the frontend style/flag a degraded answer
+    # without re-parsing the note text out of `answer` itself.
+    degraded: bool = False
+    # v0.7 (adr-0009): the id of the models.AgentTrace row this turn was
+    # persisted under -- GET /api/v1/agents/trace/{trace_id} turns "why
+    # did it say that" into a lookup instead of an investigation.
+    trace_id: str
+    # Present whenever an agent actually ran (absent for a clarify/error
+    # turn, same condition agent_result is None under) -- "flagged" means
+    # the critic node found at least one claim in `answer` it couldn't
+    # ground in the evidence gathered for it (see agents/nodes/critic.py).
+    critic_verdict: str | None = None
+    # v0.11 (agentic-ai-layer UI): the same step-by-step list GET
+    # /trace/{trace_id} exposes, inlined here so the UI that just triggered
+    # this turn can render the *real* router -> agent [-> chained agent] ->
+    # critic -> compose pipeline live, instead of only a generic "thinking"
+    # shimmer followed by one collapsed "routed to X" line. A caller that
+    # only wants the answer can keep ignoring this field; nothing about the
+    # existing contract above changes.
+    steps: list[AgentTraceStep] = []
+
+
+class AgentTraceResponse(BaseModel):
+    trace_id: str
+    user_query: str
+    intent: str | None
+    target_agent: str | None
+    critic_verdict_status: str | None
+    degraded: bool
+    steps: list[AgentTraceStep]
+    final_answer: str
+    duration_ms: float
+    created_at: str
+
+
+class AgentStatsResponse(BaseModel):
+    since: str
+    total_invocations: int
+    # v0.8: which model tier the router itself runs on (see
+    # services/llm_client.py) -- each `by_agent` entry also carries its
+    # own `model_tier`, so together these answer "is the fast tier
+    # actually carrying the router plus the high-volume agents" straight
+    # from this dashboard.
+    router_tier: str
+    by_agent: list[dict]
+    degraded_rate: float
+    critic_flagged_rate: float
+
+
+
+
+
+# --------------------------------------------------------------------------
+# Auth (app/auth.py, routers/auth.py) -- username/password accounts.
+
+class UserRole(str, Enum):
+    admin = "admin"
+    viewer = "viewer"
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    username: str
+    role: UserRole
+    is_active: bool
+    must_change_password: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=256)
+    role: UserRole = UserRole.viewer
+
+
+class UserUpdate(BaseModel):
+    """Admin-only edits to another account. All fields optional -- only the
+    ones the admin actually set in the request body are applied (see
+    routers/auth.py::update_user)."""
+    role: UserRole | None = None
+    is_active: bool | None = None
+    # Setting a new password here always also sets must_change_password=True
+    # on the target account -- an admin-set password is a temporary one by
+    # definition (see models.User's docstring).
+    new_password: str | None = Field(default=None, min_length=8, max_length=256)

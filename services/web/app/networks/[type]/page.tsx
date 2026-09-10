@@ -28,6 +28,16 @@ const TITLES: Record<string, { title: string; description: string; placeholder: 
     description: "Public IPs, each tied to a network and, if associated, a router.",
     placeholder: "Search floating IPs by address…",
   },
+  instances: {
+    title: "Instances",
+    description: "VMs, with the hypervisor they run on and the ports attaching them to a network.",
+    placeholder: "Search instances by name…",
+  },
+  ports: {
+    title: "Ports",
+    description: "A VM's network attachment point on a subnet.",
+    placeholder: "Search ports by name or IP…",
+  },
 };
 
 export default function NetworkEntityPage() {

@@ -1,5 +1,5 @@
 """Phase 5 of the topology-graph feature: read-only HTTP surface over the
-graph topology_sync.py (Phases 2/3) and prometheus_health.py (Phase 4)
+graph topology_sync.py (Phases 2/3/6) and prometheus_health.py (Phase 4)
 build in Neo4j, plus a sync-health endpoint backed by the new
 `topology_sync_runs` Postgres table (see models.TopologySyncRun).
 
@@ -71,6 +71,39 @@ def list_topology_networks():
         return graph_db.fetch_networks()
     except (Neo4jError, ServiceUnavailable) as exc:
         raise _graph_unavailable(exc) from exc
+
+
+@router.get("/networks/topology-map", response_model=schemas.TopologyMapOut)
+def get_topology_network_map():
+    """The whole-topology, Horizon-style network map: every network
+    (with `router_external`/`gateway_router_ids`/`interface_router_ids`
+    for sorting it into the provider or self-service lane and drawing
+    its router link) plus every router standalone. Two path segments
+    ("/networks/topology-map"), so it can't collide with the
+    one-segment "/networks" list or the three-segment
+    "/networks/{network_id}/diagram" below regardless of registration
+    order -- see graph_db.fetch_topology_map.
+    """
+    try:
+        return graph_db.fetch_topology_map()
+    except (Neo4jError, ServiceUnavailable) as exc:
+        raise _graph_unavailable(exc) from exc
+
+
+@router.get("/networks/{network_id}/diagram", response_model=schemas.TopologyNetworkDiagramOut)
+def get_network_topology_diagram(network_id: str):
+    """One network's Horizon-style topology diagram: its gateway
+    router(s), and each of its subnets with the VM ports (and, where
+    resolvable, the owning instance + hypervisor) that sit on it. See
+    graph_db.fetch_network_topology.
+    """
+    try:
+        diagram = graph_db.fetch_network_topology(network_id)
+    except (Neo4jError, ServiceUnavailable) as exc:
+        raise _graph_unavailable(exc) from exc
+    if diagram is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such network in the topology graph")
+    return diagram
 
 
 @router.get("/nodes/{vertex_id}", response_model=schemas.TopologyVertexDetailOut)

@@ -1,17 +1,16 @@
 import { NextResponse } from "next/server";
+import { authHeaders } from "@/lib/serverAuth";
 
 const API_URL = process.env.CORTEX_API_URL!;
-const API_KEY = process.env.CORTEX_API_KEY!;
 
-// X-Client-Id scopes history to one anonymous browser (see
-// lib/copilotHistory.ts's getClientId) -- it's not a secret, just an opaque
-// id the browser already has, so it's fine to read it straight off the
-// incoming request and forward it. X-API-Key stays server-side only, same
-// as every other route in app/api/, so it's never sent to the browser.
-export async function GET(req: Request) {
-  const clientId = req.headers.get("x-client-id") ?? "";
+// Conversation history is scoped server-side by the logged-in account (see
+// services/api/app/routers/conversations.py's Depends(get_current_user)),
+// via the same session cookie -> Authorization header every other route in
+// app/api/ already forwards through authHeaders(). No client-supplied
+// scoping id needed here anymore.
+export async function GET() {
   const res = await fetch(`${API_URL}/api/v1/conversations`, {
-    headers: { "X-API-Key": API_KEY, "X-Client-Id": clientId },
+    headers: await authHeaders(),
     cache: "no-store",
   });
   const data = await res.json().catch(() => ({}));
@@ -19,11 +18,10 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const clientId = req.headers.get("x-client-id") ?? "";
   const body = await req.json();
   const res = await fetch(`${API_URL}/api/v1/conversations`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-API-Key": API_KEY, "X-Client-Id": clientId },
+    headers: await authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));

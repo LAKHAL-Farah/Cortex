@@ -329,13 +329,98 @@ export const NEUTRON_STATUS_COLOR: Record<string, string> = {
   DOWN: "var(--crit)",
   BUILD: "var(--warn)",
   ERROR: "var(--crit)",
+  // Nova instance states, not Neutron's own vocabulary, but sharing this
+  // map now that Instance rows use it too (see deriveInstanceRows) --
+  // SHUTOFF is a deliberately-stopped VM, not a problem, so it reads
+  // neutral rather than critical the way DOWN/ERROR do.
+  SHUTOFF: "var(--text-muted)",
 };
 export const NEUTRON_STATUS_SOFT: Record<string, string> = {
   ACTIVE: "var(--ok-soft)",
   DOWN: "var(--crit-soft)",
   BUILD: "var(--warn-soft)",
   ERROR: "var(--crit-soft)",
+  SHUTOFF: "var(--canvas)",
 };
+
+// ---------------------------------------------------------------------------
+// Instances / Ports (see topology_sync.py's Phase 6 -- _sync_instances_to_graph
+// / _sync_instance_hosts_to_graph / _sync_ports_to_graph /
+// _sync_instance_ports_to_graph / _sync_port_subnets_to_graph for exactly
+// which edges connect these). Deliberately not modeled here: security
+// groups, floating-IP association on the instance's own ports -- see
+// topology_sync.py's Phase 6 docstring on what this graph scopes to.
+// ---------------------------------------------------------------------------
+
+export interface InstanceRow {
+  id: string;
+  name: string | null;
+  status: string | null;
+  flavorName: string | null;
+  flavorVcpus: number | null;
+  flavorRamMb: number | null;
+  lastSyncedAt: string | null;
+  hypervisor: VertexRef | null; // (:Instance)-[:RUNS_ON]->(:Node), null if not visible on this cloud
+  ports: VertexRef[]; // (:Instance)-[:HAS_PORT]->(:Port)
+  properties: Record<string, unknown>;
+}
+
+export interface PortRow {
+  id: string;
+  name: string | null;
+  status: string | null;
+  adminStateUp: boolean | null;
+  macAddress: string | null;
+  deviceOwner: string | null;
+  fixedIpAddress: string | null;
+  lastSyncedAt: string | null;
+  instance: VertexRef | null; // (:Instance)-[:HAS_PORT]->(:Port), null for a DHCP/router-owned port
+  subnet: VertexRef | null; // (:Port)-[:CONNECTS]->(:Subnet)
+  properties: Record<string, unknown>;
+}
+
+export function deriveInstanceRows(graph: TopologyGraph, index: GraphIndex): InstanceRow[] {
+  return graph.nodes
+    .filter((v) => v.label === "Instance")
+    .map((v) => {
+      const p = v.properties;
+      return {
+        id: v.id,
+        name: (p.name as string) ?? null,
+        status: (p.status as string) ?? null,
+        flavorName: (p.flavor_name as string) ?? null,
+        flavorVcpus: (p.flavor_vcpus as number) ?? null,
+        flavorRamMb: (p.flavor_ram_mb as number) ?? null,
+        lastSyncedAt: (p.last_synced_at as string) ?? null,
+        hypervisor: refsOf(index, v.id, "RUNS_ON", "outgoing")[0] ?? null,
+        ports: refsOf(index, v.id, "HAS_PORT", "outgoing"),
+        properties: p,
+      };
+    })
+    .sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id));
+}
+
+export function derivePortRows(graph: TopologyGraph, index: GraphIndex): PortRow[] {
+  return graph.nodes
+    .filter((v) => v.label === "Port")
+    .map((v) => {
+      const p = v.properties;
+      return {
+        id: v.id,
+        name: (p.name as string) ?? null,
+        status: (p.status as string) ?? null,
+        adminStateUp: (p.admin_state_up as boolean) ?? null,
+        macAddress: (p.mac_address as string) ?? null,
+        deviceOwner: (p.device_owner as string) ?? null,
+        fixedIpAddress: (p.fixed_ip_address as string) ?? null,
+        lastSyncedAt: (p.last_synced_at as string) ?? null,
+        instance: refsOf(index, v.id, "HAS_PORT", "incoming")[0] ?? null,
+        subnet: refsOf(index, v.id, "CONNECTS", "outgoing")[0] ?? null,
+        properties: p,
+      };
+    })
+    .sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id));
+}
 
 // ---------------------------------------------------------------------------
 // /networks chooser page: URL-friendly slug <-> graph vertex label, for the
@@ -344,13 +429,15 @@ export const NEUTRON_STATUS_SOFT: Record<string, string> = {
 // instead of two copies drifting apart.
 // ---------------------------------------------------------------------------
 
-export type NetworkEntityLabel = "Network" | "Subnet" | "Router" | "FloatingIP";
+export type NetworkEntityLabel = "Network" | "Subnet" | "Router" | "FloatingIP" | "Instance" | "Port";
 
 export const NETWORK_ENTITY_SLUGS: Record<string, NetworkEntityLabel> = {
   networks: "Network",
   subnets: "Subnet",
   routers: "Router",
   "floating-ips": "FloatingIP",
+  instances: "Instance",
+  ports: "Port",
 };
 
 export function slugForNetworkEntity(label: NetworkEntityLabel): string {
@@ -432,6 +519,41 @@ export function deriveNetworkEntityDisplayRows(
         { label: "L3 agents", refs: r.servingAgents },
       ],
       lastSyncedAt: r.lastSyncedAt,
+    }));
+  }
+  if (label === "Instance") {
+    return deriveInstanceRows(graph, index).map((i) => ({
+      id: i.id,
+      label,
+      title: i.name ?? i.id,
+      subtitle: i.flavorName,
+      status: i.status,
+      chips: [
+        ...(i.flavorVcpus !== null ? [{ label: "vCPUs", value: String(i.flavorVcpus) }] : []),
+        ...(i.flavorRamMb !== null ? [{ label: "RAM", value: `${(i.flavorRamMb / 1024).toFixed(1)} GB` }] : []),
+      ],
+      relations: [{ label: "Hypervisor", ref: i.hypervisor }],
+      relationLists: [{ label: "Ports", refs: i.ports }],
+      lastSyncedAt: i.lastSyncedAt,
+    }));
+  }
+  if (label === "Port") {
+    return derivePortRows(graph, index).map((p) => ({
+      id: p.id,
+      label,
+      title: p.name ?? p.id,
+      subtitle: p.fixedIpAddress,
+      status: p.status,
+      chips: [
+        { label: "Admin state", value: p.adminStateUp === null ? "—" : p.adminStateUp ? "up" : "down" },
+        ...(p.deviceOwner ? [{ label: "Owner", value: p.deviceOwner }] : []),
+      ],
+      relations: [
+        { label: "Instance", ref: p.instance },
+        { label: "Subnet", ref: p.subnet },
+      ],
+      relationLists: [],
+      lastSyncedAt: p.lastSyncedAt,
     }));
   }
   // FloatingIP

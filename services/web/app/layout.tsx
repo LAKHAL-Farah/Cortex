@@ -1,7 +1,6 @@
 import "./globals.css";
 import Link from "next/link";
-import Sidebar from "../components/Sidebar";
-import Header from "../components/Header";
+import AppChrome from "../components/AppChrome";
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -26,15 +25,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
 
       <body className="min-h-screen bg-canvas text-color-text">
-        <div className="grid min-h-screen grid-cols-[224px_1fr] gap-4 p-4">
-          <Sidebar />
-          <div className="min-h-screen">
-            <div className="mx-auto max-w-[1600px]">
-              <Header />
-              <main className="mt-5">{children}</main>
-            </div>
-          </div>
-        </div>
+        <AppChrome>{children}</AppChrome>
       </body>
     </html>
   );

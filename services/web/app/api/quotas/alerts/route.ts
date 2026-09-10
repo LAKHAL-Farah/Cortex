@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { authHeaders } from "@/lib/serverAuth";
 
 const API_URL = process.env.CORTEX_API_URL!;
 
@@ -6,7 +7,10 @@ const API_URL = process.env.CORTEX_API_URL!;
  * services/api/app/routers/quotas.py::list_quota_alerts. Thin pass-through,
  * same shape as every other route in app/api/anomalies|topology/. */
 export async function GET() {
-  const res = await fetch(`${API_URL}/api/v1/quotas/alerts`, { cache: "no-store" });
+  const res = await fetch(`${API_URL}/api/v1/quotas/alerts`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   const data = await res.json().catch(() => []);
   return NextResponse.json(data, { status: res.status });
 }

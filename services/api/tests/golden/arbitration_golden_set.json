@@ -1,0 +1,226 @@
+{
+  "_comment": "v0.7 (adr-0009) arbitration golden set. Each scenario feeds app.services.rca_suggester.find_causal_suggestions the same shapes test_rca_suggester.py already mocks (a vertices map answering graph_db.fetch_vertex_detail, plus AnomalyFlag rows) and asserts the exact set of (cause_id, effect_id, relationship) triples it must produce -- this is the system's one existing deterministic 'given several concurrent anomalies, which one is the likely root cause' engine, and the closest real analog to the v0.7 brief's 'arbitration' concept until a second investigating agent exists (see compose.py's docstring). Scenarios 1-9 are the exact fixtures test_rca_suggester.py already exercises (same demo topology, same hostnames) -- reused here, not reinvented, so this golden set can't silently drift from what that unit test already pins down. Scenarios 10-13 are new synthetic incidents built from the same real, already-implemented directionality table (_DIRECTION in rca_suggester.py) to cover chained/multi-pair cases no single unit test covers today.",
+  "scenarios": [
+    {
+      "id": "runs_on_node_causes_service",
+      "description": "compute-02 (Node) is critically CPU-anomalous; nova-compute@compute-02 (Service, RUNS_ON compute-02) is also anomalous -> the node is the cause.",
+      "vertices": {
+        "compute-02": {"label": "Node", "outgoing": [], "incoming": [
+          {"id": "nova-compute@compute-02", "label": "Service", "relationship": "RUNS_ON", "direction": "incoming"}
+        ]},
+        "nova-compute@compute-02": {"label": "Service", "outgoing": [
+          {"id": "compute-02", "label": "Node", "relationship": "RUNS_ON", "direction": "outgoing"}
+        ], "incoming": []}
+      },
+      "flags": [
+        {"hostname": "compute-02", "metric_name": "cpu_usage", "severity": "critical"},
+        {"hostname": "nova-compute@compute-02", "metric_name": "cpu_usage", "severity": "high"}
+      ],
+      "expected_suggestions": [
+        {"cause_id": "compute-02", "effect_id": "nova-compute@compute-02", "relationship": "RUNS_ON"}
+      ]
+    },
+    {
+      "id": "no_edge_no_suggestion",
+      "description": "Two anomalous nodes with no graph edge between them -- never guess a relationship.",
+      "vertices": {
+        "compute-02": {"label": "Node", "outgoing": [], "incoming": []},
+        "storage-09": {"label": "Node", "outgoing": [], "incoming": []}
+      },
+      "flags": [
+        {"hostname": "compute-02", "metric_name": "cpu_usage", "severity": "high"},
+        {"hostname": "storage-09", "metric_name": "ram_usage", "severity": "high"}
+      ],
+      "expected_suggestions": []
+    },
+    {
+      "id": "neighbor_not_anomalous_no_suggestion",
+      "description": "Only one side of a real edge is anomalous -- no pair to correlate.",
+      "vertices": {
+        "compute-02": {"label": "Node", "outgoing": [], "incoming": [
+          {"id": "nova-compute@compute-02", "label": "Service", "relationship": "RUNS_ON", "direction": "incoming"}
+        ]},
+        "nova-compute@compute-02": {"label": "Service", "outgoing": [
+          {"id": "compute-02", "label": "Node", "relationship": "RUNS_ON", "direction": "outgoing"}
+        ], "incoming": []}
+      },
+      "flags": [
+        {"hostname": "compute-02", "metric_name": "cpu_usage", "severity": "high"}
+      ],
+      "expected_suggestions": []
+    },
+    {
+      "id": "connects_relationship_skipped_not_guessed",
+      "description": "CONNECTS isn't in the directionality table -- both endpoints anomalous, but must be skipped outright, never defaulted to a direction.",
+      "vertices": {
+        "sub-1": {"label": "Subnet", "outgoing": [
+          {"id": "net-1", "label": "Network", "relationship": "CONNECTS", "direction": "outgoing"}
+        ], "incoming": []},
+        "net-1": {"label": "Network", "outgoing": [], "incoming": [
+          {"id": "sub-1", "label": "Subnet", "relationship": "CONNECTS", "direction": "incoming"}
+        ]}
+      },
+      "flags": [
+        {"hostname": "sub-1", "metric_name": "service_state", "severity": "high", "current_value": 1.0, "z_score": 0.0, "baseline_n": 1},
+        {"hostname": "net-1", "metric_name": "service_state", "severity": "high", "current_value": 1.0, "z_score": 0.0, "baseline_n": 1}
+      ],
+      "expected_suggestions": []
+    },
+    {
+      "id": "no_open_alerts_empty",
+      "description": "No open AnomalyFlag rows at all -- empty result without needing any graph shape.",
+      "vertices": {},
+      "flags": [],
+      "expected_suggestions": []
+    },
+    {
+      "id": "serves_service_causes_network",
+      "description": "neutron-dhcp-agent@ctrl-01 (Service) SERVES net-1 (Network); the service is the cause side, not the network.",
+      "vertices": {
+        "neutron-dhcp-agent@ctrl-01": {"label": "Service", "outgoing": [
+          {"id": "net-1", "label": "Network", "relationship": "SERVES", "direction": "outgoing"}
+        ], "incoming": []},
+        "net-1": {"label": "Network", "outgoing": [], "incoming": [
+          {"id": "neutron-dhcp-agent@ctrl-01", "label": "Service", "relationship": "SERVES", "direction": "incoming"}
+        ]}
+      },
+      "flags": [
+        {"hostname": "neutron-dhcp-agent@ctrl-01", "metric_name": "service_state", "severity": "critical", "current_value": 1.0, "z_score": 0.0, "baseline_n": 1},
+        {"hostname": "net-1", "metric_name": "service_state", "severity": "high", "current_value": 1.0, "z_score": 0.0, "baseline_n": 1}
+      ],
+      "expected_suggestions": [
+        {"cause_id": "neutron-dhcp-agent@ctrl-01", "effect_id": "net-1", "relationship": "SERVES"}
+      ]
+    },
+    {
+      "id": "worst_of_multiple_flags_on_same_vertex_wins",
+      "description": "compute-02 is anomalous on two metrics at once (medium cpu, critical ram) -- the worst (critical ram) represents it as the cause.",
+      "vertices": {
+        "compute-02": {"label": "Node", "outgoing": [], "incoming": [
+          {"id": "nova-compute@compute-02", "label": "Service", "relationship": "RUNS_ON", "direction": "incoming"}
+        ]},
+        "nova-compute@compute-02": {"label": "Service", "outgoing": [
+          {"id": "compute-02", "label": "Node", "relationship": "RUNS_ON", "direction": "outgoing"}
+        ], "incoming": []}
+      },
+      "flags": [
+        {"hostname": "compute-02", "metric_name": "cpu_usage", "severity": "medium", "z_score": 2.1},
+        {"hostname": "compute-02", "metric_name": "ram_usage", "severity": "critical", "z_score": 5.0},
+        {"hostname": "nova-compute@compute-02", "metric_name": "cpu_usage", "severity": "high"}
+      ],
+      "expected_suggestions": [
+        {"cause_id": "compute-02", "effect_id": "nova-compute@compute-02", "relationship": "RUNS_ON", "cause_metric_name": "ram_usage", "cause_severity": "critical"}
+      ]
+    },
+    {
+      "id": "storage_node_runs_on_variant",
+      "description": "Same RUNS_ON shape, different real hostnames from the deployment (cinder-volume on a storage node) -- ground truth shouldn't depend on which Node/Service pair it is.",
+      "vertices": {
+        "storage-09": {"label": "Node", "outgoing": [], "incoming": [
+          {"id": "cinder-volume@storage-09", "label": "Service", "relationship": "RUNS_ON", "direction": "incoming"}
+        ]},
+        "cinder-volume@storage-09": {"label": "Service", "outgoing": [
+          {"id": "storage-09", "label": "Node", "relationship": "RUNS_ON", "direction": "outgoing"}
+        ], "incoming": []}
+      },
+      "flags": [
+        {"hostname": "storage-09", "metric_name": "disk_usage", "severity": "high"},
+        {"hostname": "cinder-volume@storage-09", "metric_name": "disk_usage", "severity": "medium"}
+      ],
+      "expected_suggestions": [
+        {"cause_id": "storage-09", "effect_id": "cinder-volume@storage-09", "relationship": "RUNS_ON"}
+      ]
+    },
+    {
+      "id": "neutron_l3_agent_serves_external_network",
+      "description": "A different SERVES pair (neutron-l3-agent, not neutron-dhcp-agent) -- confirms the directionality rule generalizes across services, not just the one named in the unit test.",
+      "vertices": {
+        "neutron-l3-agent@ctrl-01": {"label": "Service", "outgoing": [
+          {"id": "net-ext", "label": "Network", "relationship": "SERVES", "direction": "outgoing"}
+        ], "incoming": []},
+        "net-ext": {"label": "Network", "outgoing": [], "incoming": [
+          {"id": "neutron-l3-agent@ctrl-01", "label": "Service", "relationship": "SERVES", "direction": "incoming"}
+        ]}
+      },
+      "flags": [
+        {"hostname": "neutron-l3-agent@ctrl-01", "metric_name": "service_state", "severity": "critical", "current_value": 1.0, "z_score": 0.0, "baseline_n": 1},
+        {"hostname": "net-ext", "metric_name": "service_state", "severity": "medium", "current_value": 1.0, "z_score": 0.0, "baseline_n": 1}
+      ],
+      "expected_suggestions": [
+        {"cause_id": "neutron-l3-agent@ctrl-01", "effect_id": "net-ext", "relationship": "SERVES"}
+      ]
+    },
+    {
+      "id": "three_vertex_chain_two_suggestions",
+      "description": "A(Node) RUNS_ON<-B(Service), B SERVES->C(Network), all three anomalous -- two independent causal suggestions, not one merged chain.",
+      "vertices": {
+        "compute-05": {"label": "Node", "outgoing": [], "incoming": [
+          {"id": "nova-compute@compute-05", "label": "Service", "relationship": "RUNS_ON", "direction": "incoming"}
+        ]},
+        "nova-compute@compute-05": {"label": "Service", "outgoing": [
+          {"id": "compute-05", "label": "Node", "relationship": "RUNS_ON", "direction": "outgoing"},
+          {"id": "net-2", "label": "Network", "relationship": "SERVES", "direction": "outgoing"}
+        ], "incoming": []},
+        "net-2": {"label": "Network", "outgoing": [], "incoming": [
+          {"id": "nova-compute@compute-05", "label": "Service", "relationship": "SERVES", "direction": "incoming"}
+        ]}
+      },
+      "flags": [
+        {"hostname": "compute-05", "metric_name": "cpu_usage", "severity": "critical"},
+        {"hostname": "nova-compute@compute-05", "metric_name": "cpu_usage", "severity": "high"},
+        {"hostname": "net-2", "metric_name": "service_state", "severity": "medium", "current_value": 1.0, "z_score": 0.0, "baseline_n": 1}
+      ],
+      "expected_suggestions": [
+        {"cause_id": "compute-05", "effect_id": "nova-compute@compute-05", "relationship": "RUNS_ON"},
+        {"cause_id": "nova-compute@compute-05", "effect_id": "net-2", "relationship": "SERVES"}
+      ]
+    },
+    {
+      "id": "two_independent_pairs_two_suggestions",
+      "description": "Two unrelated RUNS_ON pairs anomalous at once (different hosts entirely) -- each pair is scored independently, no cross-contamination.",
+      "vertices": {
+        "compute-02": {"label": "Node", "outgoing": [], "incoming": [
+          {"id": "nova-compute@compute-02", "label": "Service", "relationship": "RUNS_ON", "direction": "incoming"}
+        ]},
+        "nova-compute@compute-02": {"label": "Service", "outgoing": [
+          {"id": "compute-02", "label": "Node", "relationship": "RUNS_ON", "direction": "outgoing"}
+        ], "incoming": []},
+        "storage-09": {"label": "Node", "outgoing": [], "incoming": [
+          {"id": "cinder-volume@storage-09", "label": "Service", "relationship": "RUNS_ON", "direction": "incoming"}
+        ]},
+        "cinder-volume@storage-09": {"label": "Service", "outgoing": [
+          {"id": "storage-09", "label": "Node", "relationship": "RUNS_ON", "direction": "outgoing"}
+        ], "incoming": []}
+      },
+      "flags": [
+        {"hostname": "compute-02", "metric_name": "cpu_usage", "severity": "critical"},
+        {"hostname": "nova-compute@compute-02", "metric_name": "cpu_usage", "severity": "high"},
+        {"hostname": "storage-09", "metric_name": "disk_usage", "severity": "high"},
+        {"hostname": "cinder-volume@storage-09", "metric_name": "disk_usage", "severity": "medium"}
+      ],
+      "expected_suggestions": [
+        {"cause_id": "compute-02", "effect_id": "nova-compute@compute-02", "relationship": "RUNS_ON"},
+        {"cause_id": "storage-09", "effect_id": "cinder-volume@storage-09", "relationship": "RUNS_ON"}
+      ]
+    },
+    {
+      "id": "bidirectional_pair_reported_once",
+      "description": "The same RUNS_ON pair, but ram_usage is the anomalous metric on both sides at once via a symmetric-looking flag set -- must still be deduped to exactly one suggestion, not one per direction traversed.",
+      "vertices": {
+        "compute-07": {"label": "Node", "outgoing": [], "incoming": [
+          {"id": "nova-compute@compute-07", "label": "Service", "relationship": "RUNS_ON", "direction": "incoming"}
+        ]},
+        "nova-compute@compute-07": {"label": "Service", "outgoing": [
+          {"id": "compute-07", "label": "Node", "relationship": "RUNS_ON", "direction": "outgoing"}
+        ], "incoming": []}
+      },
+      "flags": [
+        {"hostname": "compute-07", "metric_name": "ram_usage", "severity": "critical"},
+        {"hostname": "nova-compute@compute-07", "metric_name": "ram_usage", "severity": "critical"}
+      ],
+      "expected_suggestions": [
+        {"cause_id": "compute-07", "effect_id": "nova-compute@compute-07", "relationship": "RUNS_ON"}
+      ]
+    }
+  ]
+}

@@ -13,6 +13,7 @@ import {
 import EntityToolbar, { type EntityView } from "./EntityToolbar";
 import NetworkEntityCard from "./NetworkEntityCard";
 import NetworkEntityTable from "./NetworkEntityTable";
+import NetworkTopologyDiagram from "./NetworkTopologyDiagram";
 import TopologyDetailPanel from "./TopologyDetailPanel";
 
 const fetcher = async (url: string) => {
@@ -47,6 +48,10 @@ export default function NetworkEntityView({ label, placeholder }: { label: Netwo
   const [view, setView] = useState<EntityView>("table");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedVertex, setSelectedVertex] = useState<string | null>(null);
+  // Only ever set from a Network row's "View diagram" trigger (see
+  // NetworkEntityCard.tsx/NetworkEntityTable.tsx) -- a diagram only makes
+  // sense scoped to one network.
+  const [diagramNetworkId, setDiagramNetworkId] = useState<string | null>(null);
 
   const rows = useMemo(() => {
     if (!data) return [];
@@ -107,16 +112,28 @@ export default function NetworkEntityView({ label, placeholder }: { label: Netwo
       ) : view === "cards" ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {filtered.map((row) => (
-            <NetworkEntityCard key={row.id} row={row} onOpen={setSelectedVertex} />
+            <NetworkEntityCard
+              key={row.id}
+              row={row}
+              onOpen={setSelectedVertex}
+              onOpenDiagram={label === "Network" ? setDiagramNetworkId : undefined}
+            />
           ))}
         </div>
       ) : (
-        <NetworkEntityTable rows={filtered} onOpen={setSelectedVertex} />
+        <NetworkEntityTable
+          rows={filtered}
+          onOpen={setSelectedVertex}
+          onOpenDiagram={label === "Network" ? setDiagramNetworkId : undefined}
+        />
       )}
 
       <AnimatePresence>
         {selectedVertex && (
           <TopologyDetailPanel vertexId={selectedVertex} onClose={() => setSelectedVertex(null)} />
+        )}
+        {diagramNetworkId && (
+          <NetworkTopologyDiagram networkId={diagramNetworkId} onClose={() => setDiagramNetworkId(null)} />
         )}
       </AnimatePresence>
     </div>

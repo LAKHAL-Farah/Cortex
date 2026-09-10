@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutGrid,
   Server,
@@ -19,7 +19,9 @@ import {
   ShieldCheck,
   Settings2,
   LifeBuoy,
+  LogOut,
 } from "lucide-react";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 const NAV_SECTIONS = [
   { title: "Dashboard", href: "/dashboard", icon: LayoutGrid },
@@ -78,6 +80,18 @@ function NavLink({ href, icon: Icon, title, active }: { href: string; icon: any;
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const { user } = useCurrentUser();
+
+  const sections = NAV_SECTIONS.filter((s) => s.href !== "/admin" || user?.role === "admin");
+
+  const logout = async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.push("/login");
+    router.refresh();
+  };
+
+  const initials = user?.username ? user.username.slice(0, 2).toUpperCase() : "..";
 
   return (
     <aside className="sticky top-4 h-[calc(100vh-2rem)] w-[224px] shrink-0 panel flex flex-col p-3">
@@ -92,7 +106,7 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex-1 space-y-3 " aria-label="Primary navigation">
-        {NAV_SECTIONS.map((section, index) => (
+        {sections.map((section, index) => (
           <div key={index}>
             {section.items ? (
               <div className="space-y-0.5">
@@ -118,12 +132,20 @@ export default function Sidebar() {
             className="grid h-8 w-8 flex-shrink-0 place-items-center rounded-full text-xs font-semibold"
             style={{ background: "var(--accent-soft)", color: "var(--accent)" }}
           >
-            AM
+            {initials}
           </div>
-          <div className="min-w-0">
-            <div className="truncate text-sm font-medium text-color-text">Alex Morgan</div>
-            <div className="truncate text-xs text-text-faint">Product Ops</div>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-medium text-color-text">{user?.username ?? "Signed out"}</div>
+            <div className="truncate text-xs text-text-faint capitalize">{user?.role ?? ""}</div>
           </div>
+          <button
+            onClick={logout}
+            title="Log out"
+            aria-label="Log out"
+            className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-[var(--radius-control)] text-text-dim hover:bg-[var(--surface)]"
+          >
+            <LogOut className="h-[15px] w-[15px]" strokeWidth={1.75} />
+          </button>
         </div>
       </div>
     </aside>

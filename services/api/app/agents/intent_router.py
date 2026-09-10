@@ -1,0 +1,205 @@
+"""Classifies a question's intent and picks the target agent to handle it.
+
+v0.1 used a hardcoded keyword table (fine with exactly one agent to route
+to). Now that there are four (monitoring / prediction / rag / anomaly),
+routing is a real classification problem -- "how do we fix X" and "will X
+run out of disk" don't share vocabulary with a fixed keyword list you'd
+have to keep extending by hand. This is an LLM call via LangChain's
+structured output instead: the model reads the question and picks exactly
+one of the agent names, constrained to that enum so it can't return
+anything the graph doesn't know how to route.
+
+Falls back to DEFAULT_AGENT if the LLM isn't configured or the call itself
+fails (post-retry, via resilience.get_breaker) -- a missing NVIDIA_API_KEY
+or a hung/unreachable NIM endpoint should degrade routing quality, not take
+the whole graph down. This deliberately does NOT feed into
+CortexState["failures"]/compose.py's degraded-answer note: a routing
+fallback still runs a real agent that produces full-confidence evidence of
+its own kind, which is a different thing from the *evidence itself* being
+degraded (see nodes/anomaly.py) -- conflating the two would print "this
+answer is degraded" on a perfectly good monitoring/prediction/rag answer
+that just got there via the default route instead of a classified one.
+
+v0.5 (adr-0007) adds a genuine clarification gate on top of that, for the
+case where the LLM call itself *works* but is honestly unsure which agent
+fits: the classifier also reports its own confidence, and below
+CLARIFY_THRESHOLD the router asks the user to disambiguate instead of
+silently guessing (previously: "if genuinely ambiguous, default to
+monitoring" -- a guess dressed up as an answer). This only fires when the
+LLM ran successfully; an LLM failure still degrades to DEFAULT_AGENT as
+before -- clarifying requires a working classifier to tell ambiguous from
+merely-unavailable.
+
+v0.9 adds a sixth branch, "network" -- router/floating-IP/agent health and
+node-level network-traffic anomalies (see nodes/network.py). Same
+"leaf, straightforward" shape as monitoring, so it's a plain addition to
+the enum/prompt below, not a structural change to how routing itself
+works.
+
+v0.10 (Phase C) widens that same "network" branch's own description
+(not the enum -- still one "network" agent) to cover questions scoped to
+a Neutron/Nova entity instead of a physical node ("which VMs are on
+network X", "why can't instance Y reach the internet", "is anything down
+on subnet Z") -- nodes/network.py itself decides node-scoped vs
+entity-scoped once routed here (see that module's own v0.10 note), this
+prompt only needs to widen the surface examples so the classifier still
+recognizes the question as this agent's territory.
+
+v0.8 adds two things:
+
+- This call now runs on the fast tier (services/llm_client.py) -- routing
+  is a short, single-shot classification made on literally every turn, the
+  textbook case for the cheaper model instead of the same reasoning-tier
+  model every deep-investigation agent uses.
+- A low-confidence classification no longer *always* falls straight to
+  clarifying. A bare follow-up like "what about now?" reads exactly like
+  genuine ambiguity to a classifier with no memory of what came before --
+  but if this conversation has session memory (state["session_memory"],
+  see agents/state.py and node_resolver.py's third resolution tier) with a
+  `last_agent`, that's a much better prior than "ask again": treat a
+  low-confidence turn as *probably* a continuation of the same topic and
+  route to `last_agent` instead. Genuinely low confidence on the *first*
+  turn of a conversation (no session memory yet) still clarifies exactly
+  as before.
+"""
+import logging
+import os
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from ..services.llm_client import LLMConfigError, get_chat_model
+from .resilience import get_breaker
+from .state import CortexState
+
+logger = logging.getLogger(__name__)
+
+AgentName = Literal["monitoring", "prediction", "rag", "anomaly", "openstack_expert", "network"]
+
+# Safest, cheapest default: a direct status pull, no forecast math,
+# knowledge-base retrieval, or multi-source investigation involved.
+DEFAULT_AGENT: AgentName = "monitoring"
+
+# Below this, the router asks instead of guessing (see module docstring).
+# Env-overridable since "how cautious should routing be" is a product/tuning
+# knob, not a code change -- lower it to clarify less often, raise it to
+# clarify more.
+CLARIFY_THRESHOLD = float(os.environ.get("ROUTER_CLARIFY_THRESHOLD", "0.5"))
+
+_CLARIFYING_QUESTION = (
+    "I'm not confident which of these you're asking about -- could you clarify? "
+    "I can check current live status (CPU/RAM/disk/uptime/health), check network/router/"
+    "floating-IP health, forecast a future trend (e.g. \"will X run out of disk\"), look up "
+    "how-to/troubleshooting guidance from the knowledge base, investigate a suspected incident "
+    "by correlating metrics and logs, or walk through a specific known symptom (a service down, "
+    "a resource pressure) with commands to check and fix it."
+)
+
+_SYSTEM_PROMPT = """You route a user's infrastructure question to exactly one specialist agent:
+
+- monitoring: current/live status right now -- CPU, RAM, disk, uptime, up/down, health.
+- network: network/connectivity health -- for a physical node: router or floating-IP status, \
+whether a Neutron agent (neutron-l3-agent/neutron-dhcp-agent/neutron-openvswitch-agent) is up, or \
+node-level network interface errors/drops/throughput. E.g. "is the network okay on compute-02", \
+"any floating IP issues", "check router status", "is there packet loss on storage-09". Also covers \
+the same kind of question scoped to a network/subnet/instance instead of a node: "which VMs are on \
+network X", "is anything down on subnet Z", "why can't instance Y reach the internet".
+- prediction: forecast / future-trend questions -- "will X run out of disk", "CPU trend for \
+the next week", "when will Y hit 90%".
+- rag: how-to / troubleshooting / explanatory questions -- "how do we fix X", "why does Y \
+happen", "what's the procedure for Z", anything about docs, runbooks, or how a system works.
+- anomaly: something is wrong / investigate an incident -- "something's wrong with compute-01", \
+"why is X acting up", "investigate this alert", "is X having an issue" -- questions that need \
+correlating metric and log evidence to figure out what's actually happening, as opposed to a \
+plain current-value read (that's monitoring) or a plain network/connectivity check (that's \
+network).
+- openstack_expert: you already have a specific, named technical symptom in mind -- a resource \
+metric, or a specific OpenStack service like nova-compute/nova-scheduler/cinder-volume/ \
+neutron-l3-agent/neutron-dhcp-agent/neutron-openvswitch-agent, or a hypervisor/libvirt/RabbitMQ/ \
+MariaDB/Keystone/Glance problem -- and want to know exactly how to check/confirm it and what's \
+usually done about it, with actual runnable commands. E.g. "how do I check if nova-compute is \
+running", "what commands show disk usage on a compute node", "how do I confirm neutron-dhcp-agent \
+is up", "what causes an instance to get stuck in BUILD". Different from rag: rag is for broader \
+conceptual/procedural documentation questions about how THIS cloud is set up or how to do \
+something end-to-end (e.g. "how do I create a new project", "what's our network topology"), not a \
+specific technical symptom with a command-level answer.
+
+Pick the single best match, and honestly report your confidence in that pick from 0.0 (a pure \
+guess -- the question could just as easily fit a different agent) to 1.0 (unambiguous). Do not \
+inflate confidence to avoid an ambiguous-sounding score -- a low, honest score is exactly what \
+lets the system ask a clarifying question instead of guessing wrong."""
+
+
+class _IntentClassification(BaseModel):
+    agent: AgentName = Field(description="Which specialist agent should handle this question.")
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in this routing choice: 0.0 (pure guess) to 1.0 (unambiguous).",
+    )
+
+
+def route(state: CortexState) -> CortexState:
+    query = state["user_query"]
+    target: AgentName = DEFAULT_AGENT
+
+    try:
+        llm = get_chat_model(temperature=0, tier="fast")
+        structured = llm.with_structured_output(_IntentClassification)
+    except LLMConfigError:
+        logger.warning("intent_router: LLM not configured, defaulting to %s", DEFAULT_AGENT)
+        state["intent"] = target
+        state["target_agent"] = target
+        return state
+
+    # TEMP (2026-09-04, revised): 60s (not None) -- see graph.py's
+    # build_graph for why. Put a smaller number back (was 6.0) once NIM's
+    # current instability is resolved.
+    breaker = get_breaker("router.intent_llm", timeout_seconds=60.0, max_retries=1)
+    call_result = breaker.call(
+        structured.invoke,
+        [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": query},
+        ],
+    )
+
+    if not call_result.ok:
+        logger.warning(
+            "intent_router: LLM classification failed (%s), defaulting to %s",
+            call_result.failure,
+            DEFAULT_AGENT,
+        )
+        state["intent"] = target
+        state["target_agent"] = target
+        return state
+
+    classification = call_result.value
+    if classification.confidence < CLARIFY_THRESHOLD:
+        last_agent = (state.get("session_memory") or {}).get("last_agent")
+        if last_agent:
+            logger.info(
+                "intent_router: confidence %.2f for %r below threshold %.2f, but session "
+                "memory has last_agent=%r -- treating as a follow-up instead of clarifying",
+                classification.confidence, classification.agent, CLARIFY_THRESHOLD, last_agent,
+            )
+            state["intent"] = last_agent
+            state["target_agent"] = last_agent
+            return state
+
+        logger.info(
+            "intent_router: confidence %.2f for %r below threshold %.2f, asking for clarification",
+            classification.confidence,
+            classification.agent,
+            CLARIFY_THRESHOLD,
+        )
+        state["intent"] = "clarify"
+        state["target_agent"] = "clarify"
+        state["error"] = _CLARIFYING_QUESTION
+        state["agent_result"] = None
+        return state
+
+    target = classification.agent
+    state["intent"] = target  # intent label == agent name 1:1, same as v0.1
+    state["target_agent"] = target
+    return state

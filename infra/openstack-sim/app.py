@@ -85,6 +85,13 @@ NETWORKS = [
         "status": "ACTIVE",
         "admin_state_up": True,
         "shared": False,
+        # Self-service (tenant-owned) network -- not externally reachable
+        # on its own, only via sandbox-router's gateway onto
+        # sandbox-external-net below. Mirrors real Neutron's
+        # `router:external` field (see topology_sync.py's
+        # `is_router_external` read); openstacksdk maps this exact key
+        # to that attribute.
+        "router:external": False,
         "subnets": ["8f3f0f4a-0000-0000-0000-000000000011"],
         "project_id": "sandbox-project",
     },
@@ -94,7 +101,25 @@ NETWORKS = [
         "status": "ACTIVE",
         "admin_state_up": True,
         "shared": False,
+        # Also self-service, but deliberately left un-routed (no router
+        # interface onto it below) -- an isolated storage/back-end network
+        # is a common real shape, and one with no gateway at all is a
+        # useful edge case for the network-topology view to render sanely.
+        "router:external": False,
         "subnets": ["8f3f0f4a-0000-0000-0000-000000000012"],
+        "project_id": "sandbox-project",
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000003",
+        "name": "sandbox-external-net",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        # Shared provider network every project's routers gateway onto --
+        # the "public"/"provider" trunk in Horizon's Network Topology view
+        # and in NetworkTopologyCanvas.tsx.
+        "shared": True,
+        "router:external": True,
+        "subnets": ["8f3f0f4a-0000-0000-0000-000000000013"],
         "project_id": "sandbox-project",
     },
 ]
@@ -116,6 +141,14 @@ SUBNETS = [
         "ip_version": 4,
         "gateway_ip": "10.0.2.1",
     },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000013",
+        "name": "sandbox-external-subnet",
+        "network_id": "8f3f0f4a-0000-0000-0000-000000000003",
+        "cidr": "203.0.113.0/24",
+        "ip_version": 4,
+        "gateway_ip": "203.0.113.1",
+    },
 ]
 
 ROUTERS = [
@@ -124,12 +157,18 @@ ROUTERS = [
         "name": "sandbox-router",
         "status": "ACTIVE",
         "admin_state_up": True,
-        # Gatewayed onto sandbox-net -- exercises topology_sync's
-        # Router-[:CONNECTS]->Network edge (via _gateway_network_id).
+        # Gatewayed onto sandbox-external-net (the provider side) --
+        # exercises topology_sync's Router-[:CONNECTS]->Network edge (via
+        # _gateway_network_id). Its other side, the router-interface port
+        # onto sandbox-net's subnet below (PORTS), is the self-service
+        # side -- together the two are what let
+        # graph_db.fetch_topology_map's interface_router_ids/
+        # gateway_router_ids place this one router between both networks
+        # on the topology canvas, same as Horizon draws it.
         "external_gateway_info": {
-            "network_id": "8f3f0f4a-0000-0000-0000-000000000001",
+            "network_id": "8f3f0f4a-0000-0000-0000-000000000003",
             "external_fixed_ips": [
-                {"subnet_id": "8f3f0f4a-0000-0000-0000-000000000011", "ip_address": "10.0.1.254"}
+                {"subnet_id": "8f3f0f4a-0000-0000-0000-000000000013", "ip_address": "203.0.113.254"}
             ],
             "enable_snat": True,
         },
@@ -143,7 +182,11 @@ FLOATING_IPS = [
         "floating_ip_address": "203.0.113.10",
         "fixed_ip_address": "10.0.1.21",
         "status": "ACTIVE",
-        "floating_network_id": "8f3f0f4a-0000-0000-0000-000000000001",
+        # Carved from the provider network, same as real Neutron always
+        # requires (a floating IP always comes from a router:external=True
+        # network) -- not from sandbox-net, which isn't externally routable
+        # on its own.
+        "floating_network_id": "8f3f0f4a-0000-0000-0000-000000000003",
         "router_id": "8f3f0f4a-0000-0000-0000-000000000021",
     },
 ]
@@ -153,6 +196,106 @@ NEUTRON_AGENTS = [
     {"id": "a2", "binary": "neutron-dhcp-agent", "host": "controller-sim", "agent_type": "DHCP agent", "alive": True, "admin_state_up": True},
     {"id": "a3", "binary": "neutron-openvswitch-agent", "host": "compute1-sim", "agent_type": "Open vSwitch agent", "alive": True, "admin_state_up": True},
     {"id": "a4", "binary": "neutron-openvswitch-agent", "host": "compute2-sim", "agent_type": "Open vSwitch agent", "alive": True, "admin_state_up": True},
+]
+
+# Phase 6 seed data (topology_sync.py's instance/port sync) -- three VMs on
+# sandbox-net, two healthy (one per compute-sim node, exercising the
+# Instance-[:RUNS_ON]->Node edge across both hypervisors) and one
+# deliberately broken (ERROR status + its port DOWN/admin_state_up False),
+# so a sync against this sim always has a real problem to show on the
+# planned network-topology visualization, the same way ROUTERS/
+# NEUTRON_AGENTS above always have one real, working structural edge to
+# test against.
+SERVERS = [
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000041",
+        "name": "sandbox-vm-1",
+        "status": "ACTIVE",
+        "tenant_id": "sandbox-project",
+        # Extended attribute -- see topology_sync.py's Phase 6 docstring on
+        # why real Nova sometimes gates this field behind an admin-only
+        # policy even when the server listing itself is visible. The sim
+        # has no policy engine, so it's always present here.
+        "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute1-sim",
+        "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000042",
+        "name": "sandbox-vm-2",
+        "status": "ACTIVE",
+        "tenant_id": "sandbox-project",
+        "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute2-sim",
+        "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000043",
+        "name": "sandbox-vm-3-broken",
+        "status": "ERROR",
+        "tenant_id": "sandbox-project",
+        "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute1-sim",
+        "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
+    },
+]
+
+PORTS = [
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000051",
+        "name": "sandbox-vm-1-port",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:51",
+        "device_id": SERVERS[0]["id"],
+        "device_owner": "compute:nova",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.101"}],
+        "tenant_id": "sandbox-project",
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-000000000052",
+        "name": "sandbox-vm-2-port",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:52",
+        "device_id": SERVERS[1]["id"],
+        "device_owner": "compute:nova",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.102"}],
+        "tenant_id": "sandbox-project",
+    },
+    {
+        # The broken pairing: sandbox-vm-3-broken's port is DOWN and
+        # admin-disabled -- a realistic combination (a failed port bind
+        # commonly leaves the instance stuck in ERROR too).
+        "id": "8f3f0f4a-0000-0000-0000-000000000053",
+        "name": "sandbox-vm-3-port",
+        "status": "DOWN",
+        "admin_state_up": False,
+        "mac_address": "fa:16:3e:00:00:53",
+        "device_id": SERVERS[2]["id"],
+        "device_owner": "compute:nova",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.103"}],
+        "tenant_id": "sandbox-project",
+    },
+    {
+        # sandbox-router's internal interface onto sandbox-net's subnet --
+        # device_owner starts with "network:router_interface" and
+        # device_id is the router's own id, exactly the shape
+        # graph_db.fetch_topology_map's interface_router_ids traversal
+        # looks for to find which router(s) sit "below" a self-service
+        # network. Sits at the subnet's own gateway_ip, same as real
+        # Neutron always places a router interface port.
+        "id": "8f3f0f4a-0000-0000-0000-000000000054",
+        "name": "sandbox-router-interface",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:54",
+        "device_id": ROUTERS[0]["id"],
+        "device_owner": "network:router_interface",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.1"}],
+        "tenant_id": "sandbox-project",
+    },
 ]
 
 # DHCP/L3 hosting-endpoint seed data -- what
@@ -337,6 +480,22 @@ def list_services():
     return {"services": NOVA_SERVICES}
 
 
+@app.get("/v2.1/servers/detail")
+def list_servers_detail():
+    # openstacksdk's compute.servers(details=True) hits this path.
+    # Real Nova also accepts filters (?status=, ?host=, ?all_tenants=,
+    # ...) as query params; the sim ignores them and always returns the
+    # full seed list, same simplification every other list endpoint here
+    # makes. See topology_sync.py's Phase 6 docstring for why
+    # all_projects/all_tenants isn't something Cortex actually asks for.
+    return {"servers": SERVERS}
+
+
+@app.get("/v2.1/servers")
+def list_servers():
+    return {"servers": SERVERS}
+
+
 @app.get("/v2.1/limits")
 def get_compute_limits(tenant_id: str | None = None):
     # `tenant_id` is what openstacksdk's compute.get_limits(project_id=...)
@@ -418,6 +577,11 @@ def list_dhcp_agent_networks(agent_id: str):
 @app.get("/v2.0/agents/{agent_id}/l3-routers")
 def list_l3_agent_routers(agent_id: str):
     return {"routers": L3_AGENT_ROUTERS.get(agent_id, [])}
+
+
+@app.get("/v2.0/ports")
+def list_ports():
+    return {"ports": PORTS}
 
 
 @app.get("/healthz")

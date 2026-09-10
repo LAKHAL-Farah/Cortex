@@ -35,6 +35,9 @@ SCHEMA_CONSTRAINTS = [
     "CREATE CONSTRAINT subnet_id IF NOT EXISTS FOR (s:Subnet) REQUIRE s.id IS UNIQUE",
     "CREATE CONSTRAINT router_id IF NOT EXISTS FOR (r:Router) REQUIRE r.id IS UNIQUE",
     "CREATE CONSTRAINT fip_id IF NOT EXISTS FOR (f:FloatingIP) REQUIRE f.id IS UNIQUE",
+    # Phase 6 (topology_sync.py's instance/port sync) additions.
+    "CREATE CONSTRAINT instance_id IF NOT EXISTS FOR (i:Instance) REQUIRE i.id IS UNIQUE",
+    "CREATE CONSTRAINT port_id IF NOT EXISTS FOR (p:Port) REQUIRE p.id IS UNIQUE",
 ]
 
 
@@ -57,9 +60,10 @@ def close_driver() -> None:
 # Phase 5 (API) read helpers.
 #
 # Everything topology_sync.py/prometheus_health.py write above is a plain
-# property graph over six vertex labels (Node, Service, Network, Subnet,
-# Router, FloatingIP) and three relationship types (RUNS_ON, SERVES,
-# CONNECTS) -- see docs/architecture/adr-0002-topology-graph.md and
+# property graph over eight vertex labels (Node, Service, Network, Subnet,
+# Router, FloatingIP, and, as of Phase 6, Instance and Port) and four
+# relationship types (RUNS_ON, SERVES, CONNECTS, and, as of Phase 6,
+# HAS_PORT) -- see docs/architecture/adr-0002-topology-graph.md and
 # adr-0003-prometheus-cross-check.md. These functions are the read side of
 # that same graph for routers/topology.py: no writes, no schema changes,
 # just Cypher that mirrors the shapes the sync code above already
@@ -172,6 +176,146 @@ def fetch_services() -> list[dict]:
             {**_serialize(record["service"]), "node_id": record["node_id"]}
             for record in records
         ]
+
+
+def fetch_network_topology(network_id: str) -> dict | None:
+    """One :Network's Horizon-style topology, purpose-shaped for the
+    per-network diagram (see NetworkTopologyDiagram.tsx): this network's
+    own properties, the :Router(s) gatewayed onto it, and each :Subnet
+    carved from it with the VM-facing :Port(s) that sit on that subnet --
+    each port's owning :Instance where one exists (None for a DHCP/
+    router-owned port -- see topology_sync.py's Phase 6 docstring on why
+    those get a Port vertex but no HAS_PORT edge) and, on that instance,
+    its hypervisor host where visible (None if this cloud gates
+    OS-EXT-SRV-ATTR:hypervisor_hostname behind an admin-only policy --
+    same docstring).
+
+    A purpose-built shape rather than a filtered view of fetch_graph()'s
+    flat list, same reasoning fetch_networks() above already applies one
+    level up: this is what one specific network's own diagram needs;
+    fetch_networks() is what the /networks list view needs. Returns None
+    if no :Network with that id exists, same 404-vs-empty-shell
+    convention as fetch_vertex_detail.
+
+    Uses Cypher map projections (`variable {.*, key: expr}`) rather than
+    this module's usual `properties(x)` + manual dict-building -- plain
+    openCypher, no APOC, same Neo4j-5-Community constraint as everywhere
+    else in this file, just not previously needed here since nothing else
+    nests four levels deep (network -> subnet -> port -> instance).
+    """
+    with driver.session() as session:
+        result = session.run(
+            """
+            MATCH (net:Network) WHERE net.id = $network_id
+            RETURN net {.*} AS network,
+                   [(r:Router)-[:CONNECTS]->(net) | r {.*}] AS gateway_routers,
+                   [(sub:Subnet)-[:CONNECTS]->(net) | sub {
+                       .*,
+                       ports: [(port:Port)-[:CONNECTS]->(sub) | port {
+                           .*,
+                           instance: head([(i:Instance)-[:HAS_PORT]->(port) | i {
+                               .*,
+                               hypervisor_hostname: head([(i)-[:RUNS_ON]->(n:Node) | n.id])
+                           }])
+                       }]
+                   }] AS subnets
+            """,
+            network_id=network_id,
+        )
+        record = result.single()
+        if record is None:
+            return None
+        return {
+            **_serialize(record["network"]),
+            "gateway_routers": _serialize(record["gateway_routers"]),
+            "subnets": _serialize(record["subnets"]),
+        }
+
+
+def fetch_topology_map() -> dict:
+    """Whole-topology, Horizon-style network map for
+    NetworkTopologyCanvas.tsx's provider-vs-self-service view: every
+    :Network (nested the same subnet -> port -> instance shape
+    fetch_network_topology() builds for one network), plus every
+    standalone :Router, plus enough router linkage on each network to
+    place a router between the two sides it actually sits on:
+
+    - `gateway_router_ids`: :Router(s) CONNECTS-ed onto this network --
+      i.e. this network is that router's *external* gateway (the
+      provider side, same edge fetch_network_topology's
+      `gateway_routers` already reads one network at a time).
+    - `interface_router_ids`: id of any :Router whose internal
+      router-interface :Port sits on one of this network's subnets --
+      i.e. this network is that router's *internal* side (the
+      self-service side). Read off each port's own `device_id`/
+      `device_owner` (see topology_sync.py's _sync_ports_to_graph
+      docstring on why `device_id` is stored at all), filtered to
+      "network:router_interface"-prefixed owners the same way
+      _sync_instance_ports_to_graph filters the "compute:"-owned case
+      down the hall -- Neutron uses that prefix for a plain router
+      interface, an HA-router replica's interface, and a DVR interface
+      alike, so a prefix match (not an exact one) is deliberate here.
+
+    A network with neither list populated (Neutron's own `shared`/
+    `router_external` flags both false and no router touches it at all)
+    is a genuinely stranded self-service network -- the topology map
+    still needs to render it as its own unattached trunk rather than
+    dropping it, the same way NetworkTopologyDiagram.tsx already renders
+    a single network with "No gateway router" instead of hiding it.
+
+    Two flat queries (networks, then routers) rather than one nested
+    one: a :Router with no gateway and no interface on anything synced
+    yet (freshly created, mid-provisioning) would never appear in the
+    first query's pattern comprehensions at all, and the topology map
+    still wants to show it as an unattached router card rather than
+    silently omitting it.
+    """
+    with driver.session() as session:
+        network_records = session.run(
+            """
+            MATCH (net:Network)
+            RETURN net {.*} AS network,
+                   [(r:Router)-[:CONNECTS]->(net) | r.id] AS gateway_router_ids,
+                   [(port:Port)-[:CONNECTS]->(:Subnet)-[:CONNECTS]->(net)
+                       WHERE port.device_owner STARTS WITH 'network:router_interface'
+                       | port.device_id] AS interface_router_ids,
+                   [(sub:Subnet)-[:CONNECTS]->(net) | sub {
+                       .*,
+                       ports: [(port:Port)-[:CONNECTS]->(sub) | port {
+                           .*,
+                           instance: head([(i:Instance)-[:HAS_PORT]->(port) | i {
+                               .*,
+                               hypervisor_hostname: head([(i)-[:RUNS_ON]->(n:Node) | n.id])
+                           }])
+                       }]
+                   }] AS subnets
+            ORDER BY net.id
+            """
+        )
+        networks = [
+            {
+                **_serialize(record["network"]),
+                "gateway_router_ids": sorted(set(record["gateway_router_ids"])),
+                "interface_router_ids": sorted({rid for rid in record["interface_router_ids"] if rid}),
+                "subnets": _serialize(record["subnets"]),
+            }
+            for record in network_records
+        ]
+
+        router_records = session.run(
+            """
+            MATCH (r:Router)
+            RETURN r {.*} AS router,
+                   head([(r)-[:CONNECTS]->(net:Network) | net.id]) AS gateway_network_id
+            ORDER BY r.id
+            """
+        )
+        routers = [
+            {**_serialize(record["router"]), "gateway_network_id": record["gateway_network_id"]}
+            for record in router_records
+        ]
+
+        return {"networks": networks, "routers": routers}
 
 
 def fetch_networks() -> list[dict]:

@@ -219,15 +219,15 @@ export interface RcaSuggestion {
 //
 // Mirrors schemas.TopologyGraphOut/TopologyVertexDetailOut/TopologyHealthOut
 // on the API side. `properties` is left as a loose dict rather than typed
-// per-label (the graph has six vertex labels -- Node/Service/Network/
-// Subnet/Router/FloatingIP -- each with its own property shape; see
-// graph_db.py's module docstring) since the frontend only needs a handful
-// of well-known keys (role, state, hostname, ...) off of it, read
+// per-label (the graph has eight vertex labels -- Node/Service/Network/
+// Subnet/Router/FloatingIP/Instance/Port -- each with its own property
+// shape; see graph_db.py's module docstring) since the frontend only needs
+// a handful of well-known keys (role, state, hostname, ...) off of it, read
 // defensively via lib/topology.ts's helpers.
 
-export type TopologyVertexLabel = "Node" | "Service" | "Network" | "Subnet" | "Router" | "FloatingIP";
+export type TopologyVertexLabel = "Node" | "Service" | "Network" | "Subnet" | "Router" | "FloatingIP" | "Instance" | "Port";
 
-export type TopologyEdgeType = "RUNS_ON" | "SERVES" | "CONNECTS";
+export type TopologyEdgeType = "RUNS_ON" | "SERVES" | "CONNECTS" | "HAS_PORT";
 
 export interface TopologyVertex {
   id: string;
@@ -258,6 +258,93 @@ export interface TopologyVertexDetail {
   label: TopologyVertexLabel;
   properties: Record<string, unknown>;
   neighbors: TopologyNeighbor[];
+}
+
+// --- Per-network topology diagram (see graph_db.fetch_network_topology,
+// GET /api/v1/topology/networks/{id}/diagram) -- the Horizon-style shaped
+// read for NetworkTopologyDiagram.tsx. Deliberately typed with a handful of
+// named fields (rather than left as loose `dict`s the way TopologyVertex's
+// `properties` is) since this shape only ever comes from one purpose-built
+// endpoint with one fixed nesting, unlike a generic vertex's properties.
+
+export interface TopologyDiagramInstance {
+  id: string;
+  name?: string;
+  status?: string;
+  flavor_name?: string;
+  hypervisor_hostname?: string | null;
+  [key: string]: unknown;
+}
+
+export interface TopologyDiagramPort {
+  id: string;
+  name?: string;
+  status?: string;
+  admin_state_up?: boolean;
+  device_owner?: string;
+  fixed_ip_address?: string;
+  instance: TopologyDiagramInstance | null;
+  [key: string]: unknown;
+}
+
+export interface TopologyDiagramSubnet {
+  id: string;
+  name?: string;
+  cidr?: string;
+  ports: TopologyDiagramPort[];
+  [key: string]: unknown;
+}
+
+export interface TopologyNetworkDiagram {
+  id: string;
+  name?: string;
+  status?: string;
+  gateway_routers: Record<string, unknown>[];
+  subnets: TopologyDiagramSubnet[];
+  [key: string]: unknown;
+}
+
+// --- Whole-topology, Horizon-style network map (see
+// graph_db.fetch_topology_map, GET /api/v1/topology/networks/topology-map)
+// -- the multi-network canvas NetworkTopologyCanvas.tsx renders, as
+// opposed to TopologyNetworkDiagram above's one-network-at-a-time modal.
+// Reuses TopologyDiagramSubnet's port/instance nesting (same shape, same
+// endpoint family) rather than redeclaring it.
+
+export interface TopologyMapNetwork {
+  id: string;
+  name?: string;
+  status?: string;
+  // Neutron's own "provider network" flag (`router:external`, see
+  // topology_sync.py) -- true sorts this network into the provider lane,
+  // false/undefined into the self-service lane.
+  router_external?: boolean;
+  shared?: boolean;
+  // Router(s) this network is the *external gateway* for -- the
+  // provider-side link (drawn above the network's trunk).
+  gateway_router_ids: string[];
+  // Router(s) with an internal router-interface port onto one of this
+  // network's subnets -- the self-service-side link (drawn below a
+  // provider network's trunk, or in place of one for a network with no
+  // provider side at all).
+  interface_router_ids: string[];
+  subnets: TopologyDiagramSubnet[];
+  [key: string]: unknown;
+}
+
+export interface TopologyMapRouter {
+  id: string;
+  name?: string;
+  status?: string;
+  // The provider network this router's external gateway sits on, or null
+  // for a router with no gateway configured yet.
+  gateway_network_id: string | null;
+  [key: string]: unknown;
+}
+
+export interface TopologyMap {
+  networks: TopologyMapNetwork[];
+  routers: TopologyMapRouter[];
 }
 
 export type TopologySyncType = "openstack" | "prometheus_health";
@@ -335,5 +422,276 @@ export interface ChatSource {
   doc_title: string;
   heading: string | null;
   score: number;
+}
+
+// -- Agent orchestrator (POST /api/v1/agents/orchestrate) ------------------
+//
+// The router picks exactly one specialist per question (see services/api/
+// app/agents/intent_router.py) and its raw_data shape depends on which one
+// answered -- these interfaces mirror what routers/agents.py's agent nodes
+// actually return, used by components/CopilotAgentPanels.tsx to pick a
+// renderer.
+
+export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly" | "openstack_expert" | "network";
+
+// Same live-status shape as LiveMetrics above, just named for clarity at
+// the copilot call site.
+export type AgentMonitoringData = LiveMetrics;
+
+export interface ForecastPoint {
+  horizon_hours: number;
+  timestamp: string;
+  predicted: number;
+  lower: number;
+  upper: number;
+  extrapolated: boolean;
+}
+
+export interface ActualPoint {
+  timestamp: string;
+  value: number;
+}
+
+export interface AgentPredictionData {
+  hostname: string;
+  metric: string;
+  model_type: string;
+  generated_at: string;
+  n_points_used: number;
+  horizon_days: number;
+  max_horizon_hours: number;
+  forecast: ForecastPoint[];
+  actual: ActualPoint[];
+}
+
+export interface AgentRagSource {
+  source_path: string;
+  doc_title: string;
+  score: number;
+}
+
+export interface AgentRagData {
+  sources: AgentRagSource[];
+}
+
+// Anomaly agent (v0.4, services/api/app/agents/nodes/anomaly.py) -- mirrors
+// its two sub-orchestration steps exactly, so the panel can render each
+// piece of evidence separately before showing the merged narrative's
+// confidence. `data` on the metric signal is one of two shapes depending on
+// which tier supplied it (`source`), see anomaly.py's _check_metrics.
+export interface AgentAnomalyFlagSignal {
+  source: "anomaly_flags";
+  metric_name: string;
+  current_value: number;
+  z_score: number;
+  severity: AnomalySeverity;
+  method: AnomalyMethod;
+  detected_at: string | null;
+  other_flagged_metrics: string[];
+}
+
+export interface AgentAnomalyLiveSignal {
+  source: "live_metrics";
+  cpu_percent: number;
+  memory_percent: number;
+  disk_percent: number;
+  status: string;
+  health: string;
+}
+
+export interface AgentAnomalyMetricSignal {
+  has_signal: boolean;
+  detail: string;
+  data: AgentAnomalyFlagSignal | AgentAnomalyLiveSignal | null;
+}
+
+export interface AgentAnomalyLogEntry {
+  ts: number; // unix ms
+  line: string;
+  service: string | null;
+}
+
+export interface AgentAnomalyLogSignal {
+  has_signal: boolean;
+  detail: string;
+  entries: AgentAnomalyLogEntry[];
+}
+
+export interface AgentAnomalyData {
+  hostname: string;
+  role: string;
+  metric_signal: AgentAnomalyMetricSignal;
+  log_signal: AgentAnomalyLogSignal;
+  // Heuristic root-cause hypothesis derived from the two signals above
+  // (services/api/app/agents/nodes/anomaly.py::_hypothesize_cause) --
+  // always a hedged guess, never a confirmed diagnosis. Null when nothing
+  // matched.
+  likely_cause: string | null;
+}
+
+// OpenStack Expert agent (v0.6, services/api/app/agents/nodes/
+// openstack_expert.py) -- mirrors _build_result's raw_data shape exactly, so
+// the panel can render each command with its own read-only/state-changing
+// label and copy button instead of relying on the markdown answer alone.
+// `matched_symptom_id` is null on the graceful "nothing in the catalog
+// matched" fallback (see _run_standalone) -- that case renders no panel.
+export interface AgentExpertCommand {
+  command: string;
+  description: string;
+  read_only: boolean;
+}
+
+export type AgentExpertCategory =
+  | "compute"
+  | "storage"
+  | "network"
+  | "identity"
+  | "image"
+  | "message-bus"
+  | "database"
+  | "hypervisor"
+  | "host";
+
+export interface AgentExpertData {
+  matched_symptom_id: string | null;
+  matched_symptom_title?: string;
+  category?: AgentExpertCategory;
+  confirm_commands?: AgentExpertCommand[];
+  remediation_commands?: AgentExpertCommand[];
+  doc_ref?: string;
+  // Present only in chained mode (see openstack_expert.py::_run_chained) --
+  // which upstream agent's finding this walkthrough is explaining, and that
+  // agent's own original summary, kept rather than discarded.
+  diagnosed_by?: "anomaly" | "monitoring" | "network" | null;
+  upstream_summary?: string;
+}
+
+// Network agent (v0.9/v0.10, services/api/app/agents/nodes/network.py) --
+// mirrors _run_node_scope/_run_entity_scope's raw_data exactly. `scope`
+// picks which shape is present: "node" (a physical host -- the common
+// case, node_exporter interface counters + Neutron control-plane) vs.
+// "network"/"subnet"/"instance" (a Neutron/Nova entity with no node_exporter
+// counters at all, see network.py's module docstring on Phase C).
+export interface AgentNetworkMetrics {
+  node: string;
+  role: string;
+  instance: string;
+  network_rx_bytes: number;
+  network_tx_bytes: number;
+  network_errors_per_sec: number;
+  network_drops_per_sec: number;
+  status: string;
+}
+
+export interface AgentNetworkSignal {
+  has_signal: boolean;
+  degraded?: boolean;
+  detail: string;
+  data?: unknown;
+}
+
+export interface NeutronAgentStatus {
+  id: string;
+  binary: string;
+  agent_type: string;
+  host: string;
+  alive: boolean;
+  admin_state_up: boolean;
+}
+
+export interface NeutronRouterStatus {
+  id: string;
+  name: string;
+  status: string;
+  admin_state_up: boolean;
+}
+
+export interface NeutronInstanceStatus {
+  id: string;
+  name: string;
+  status: string;
+  hypervisor_hostname?: string;
+  has_down_port: boolean;
+}
+
+export interface AgentNetworkNeutronSignal extends AgentNetworkSignal {
+  data?: {
+    hostname: string;
+    agents: NeutronAgentStatus[];
+    routers: NeutronRouterStatus[];
+    networks: unknown[];
+    floating_ips: unknown[];
+    instances: NeutronInstanceStatus[];
+  };
+  down_agents?: NeutronAgentStatus[];
+  bad_routers?: NeutronRouterStatus[];
+  bad_networks?: unknown[];
+  bad_fips?: unknown[];
+  bad_instances?: NeutronInstanceStatus[];
+}
+
+export interface AgentNetworkData {
+  scope: "node" | "network" | "subnet" | "instance";
+  // scope === "node"
+  hostname?: string;
+  role?: string;
+  metric_signal?: AgentNetworkSignal & { data?: AgentNetworkMetrics | null };
+  neutron_signal?: AgentNetworkNeutronSignal;
+  // scope !== "node" (Phase C, entity-scoped)
+  entity?: { kind: "network" | "subnet" | "instance"; id: string; name: string; cidr?: string | null };
+  entity_signal?: AgentNetworkSignal & {
+    down_ports?: unknown[];
+    down_instances?: NeutronInstanceStatus[];
+  };
+}
+
+export type AgentRawData =
+  | AgentMonitoringData
+  | AgentPredictionData
+  | AgentRagData
+  | AgentAnomalyData
+  | AgentExpertData
+  | AgentNetworkData
+  | Record<string, unknown>;
+
+// v0.7 (adr-0009) trace step -- one per node the graph actually visited
+// this turn, in execution order. `detail` is the same small, JSON-safe
+// blob agents/trace.py's _safe_detail builds server-side: intent/
+// target_agent on "router", critic_verdict on "critic", and otherwise
+// confidence + summary (AgentResult's own plain-language narration, not a
+// second description invented client-side) plus, only on
+// "openstack_expert", chained_from -- which upstream agent's finding (if
+// any) triggered this walkthrough, so the UI can render "network agent
+// found X -> chained into openstack_expert" as one connected story
+// instead of two unrelated-looking steps.
+export interface AgentTraceStep {
+  node: string;
+  status: "ok" | "error" | "skipped" | string;
+  duration_ms: number;
+  timestamp: string;
+  detail: {
+    intent?: string | null;
+    target_agent?: string | null;
+    critic_verdict?: { status: string; [key: string]: unknown } | string | null;
+    confidence?: number | null;
+    summary?: string | null;
+    chained_from?: AgentName | string | null;
+    error?: string | null;
+    [key: string]: unknown;
+  };
+}
+
+export interface AgentOrchestrateResponse {
+  answer: string;
+  agent_used: AgentName | string;
+  raw_data: AgentRawData | null;
+  confidence: number | null;
+  degraded?: boolean;
+  trace_id?: string;
+  critic_verdict?: string | null;
+  // v0.11 (agentic-ai-layer UI): the real router -> agent [-> chained
+  // agent] -> critic -> compose pipeline for this turn, inlined so the UI
+  // that just triggered it can render it live -- see AgentTraceStep above.
+  steps?: AgentTraceStep[];
 }
 
