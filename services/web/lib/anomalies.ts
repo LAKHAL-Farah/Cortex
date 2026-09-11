@@ -46,6 +46,17 @@ export function metricLabel(metric: string): string {
   return METRIC_LABEL[metric] ?? metric.replace(/_/g, " ");
 }
 
+export function formatMetricValue(metric: string, value: number): string {
+  if (isServiceStateMetric(metric)) return "Down";
+  if (metric === "ssh_failed_logins_5min" || metric === "ssh_successful_logins_5min") {
+    return `${Math.round(value)} in 5m`;
+  }
+  if (metric === "cpu_usage" || metric === "ram_usage") {
+    return `${value.toFixed(1)}%`;
+  }
+  return value.toFixed(1);
+}
+
 /** "service_state" flags come from the OpenStack/Prometheus state
  * cross-check (see services/api/app/services/prometheus_health.py), not
  * from anomaly_detector.py's baseline/EWMA scoring -- current_value,
