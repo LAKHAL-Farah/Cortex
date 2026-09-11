@@ -161,6 +161,7 @@ class AnomalyEvent(Base):
     details = Column(JSON, nullable=True)
     started_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)  # NULL while still active
+    resolution_type = Column(String, nullable=True)  # e.g. "manual"; NULL while unresolved
     resolution_note = Column(Text, nullable=True)
 
 
