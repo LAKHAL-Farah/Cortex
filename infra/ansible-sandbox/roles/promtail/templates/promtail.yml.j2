@@ -27,3 +27,20 @@ scrape_configs:
           service: "{{ service }}"
           __path__: "/var/log/kolla/{{ service }}/*.log"
 {% endfor %}
+
+  # story 3.4 -- auth_log_metrics.py queries Loki with {host="<hostname>"}
+  # |= "Failed password" / |= "Accepted ", so this job just needs the same
+  # `host` label as the "system" job above; no extra label is required for
+  # that selector to match, but `service` is added anyway for consistency
+  # with the per-service jobs and easier ad hoc querying in Grafana.
+  # ssh_auth_log_path here MUST stay in lockstep with the same variable
+  # roles/ssh_auth_simulator writes to -- both read it from
+  # group_vars/all.yml, not redefined in either role.
+  - job_name: ssh_auth
+    static_configs:
+      - targets: [localhost]
+        labels:
+          host: "{{ inventory_hostname }}"
+          role: "{{ node_role }}"
+          service: ssh_auth_sim
+          __path__: "{{ ssh_auth_log_path }}"

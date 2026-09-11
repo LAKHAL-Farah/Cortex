@@ -556,12 +556,16 @@ def list_subnets():
 
 @app.get("/v2.0/routers")
 def list_routers():
-    return {"routers": ROUTERS}
+    return {"routers": [{**r, **_ROUTER_FAULTS.get(r["id"], {})} for r in ROUTERS]}
 
 
 @app.get("/v2.0/floatingips")
 def list_floating_ips():
-    return {"floatingips": FLOATING_IPS}
+    return {
+        "floatingips": [
+            {**f, **_FLOATINGIP_FAULTS.get(f["id"], {})} for f in FLOATING_IPS
+        ]
+    }
 
 
 @app.get("/v2.0/agents")
@@ -581,9 +585,60 @@ def list_l3_agent_routers(agent_id: str):
 
 @app.get("/v2.0/ports")
 def list_ports():
-    return {"ports": PORTS}
+    return {"ports": [{**p, **_PORT_FAULTS.get(p["id"], {})} for p in PORTS]}
 
 
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+# ---- sandbox-only fault injection ----------------------------------------
+# Everything above this line mirrors real Neutron read APIs against static
+# seed data. There's no way to exercise story 3.6's actual anomaly paths
+# (routers_down / floating_ips_orphaned / ports_down in
+# graph_db.fetch_network_anomalies, sourced from topology_sync's periodic
+# graph sync of these same lists) without a way to flip a resource's state
+# on demand. These endpoints do exactly that -- in-memory overrides merged
+# into the GET responses above, never touching real OpenStack semantics.
+# Not part of any real OpenStack API; only ever call these against the
+# sandbox, and only from test scripts/ansible, never from the Cortex API
+# itself.
+_ROUTER_FAULTS: dict[str, dict] = {}
+_PORT_FAULTS: dict[str, dict] = {}
+_FLOATINGIP_FAULTS: dict[str, dict] = {}
+
+
+@app.post("/_sandbox/fault/router/{router_id}")
+def fault_router(router_id: str, body: dict):
+    """body: {\"status\": \"DOWN\"} (or any non-ACTIVE value) to trip
+    graph_db.fetch_network_anomalies' routers-not-ACTIVE check on the next
+    topology_sync pass."""
+    _ROUTER_FAULTS[router_id] = {"status": body.get("status", "DOWN")}
+    return {"router_id": router_id, "override": _ROUTER_FAULTS[router_id]}
+
+
+@app.post("/_sandbox/fault/port/{port_id}")
+def fault_port(port_id: str, body: dict):
+    """body: {\"status\": \"DOWN\"} to trip the ports-not-ACTIVE check."""
+    _PORT_FAULTS[port_id] = {"status": body.get("status", "DOWN")}
+    return {"port_id": port_id, "override": _PORT_FAULTS[port_id]}
+
+
+@app.post("/_sandbox/fault/floatingip/{fip_id}")
+def fault_floating_ip(fip_id: str, body: dict | None = None):
+    """Detaches the floating IP from its router (router_id: null), which is
+    exactly the \"no CONNECTS edge to a router\" condition
+    fetch_network_anomalies' floating_ips_orphaned check looks for."""
+    _FLOATINGIP_FAULTS[fip_id] = {"router_id": None, "port_id": None}
+    return {"floatingip_id": fip_id, "override": _FLOATINGIP_FAULTS[fip_id]}
+
+
+@app.post("/_sandbox/fault/reset")
+def fault_reset():
+    """Clears every override above, restoring all seed data to its healthy
+    default state."""
+    _ROUTER_FAULTS.clear()
+    _PORT_FAULTS.clear()
+    _FLOATINGIP_FAULTS.clear()
+    return {"status": "reset"}

@@ -33,3 +33,9 @@ loki_server_host: "{{ hostvars[groups[\"loki_server\"][0]].ansible_host }}"
 
 loki_push_url: >-
   http://{{ loki_server_host }}:{{ loki_http_port }}/loki/api/v1/push
+
+# Shared between roles/promtail (which tails this path) and
+# roles/ssh_auth_simulator (which writes it) -- single source of truth so
+# the two can never drift apart and silently stop matching.
+ssh_auth_log_dir: /var/log/cortex-ssh-sim
+ssh_auth_log_path: "{{ ssh_auth_log_dir }}/auth.log"

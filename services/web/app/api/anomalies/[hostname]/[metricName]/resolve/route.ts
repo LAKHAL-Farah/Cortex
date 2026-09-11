@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { authHeaders } from "@/lib/serverAuth";
 
 const API_URL = process.env.CORTEX_API_URL!;
 
@@ -11,7 +12,7 @@ export async function POST(
     `${API_URL}/api/v1/anomalies/${encodeURIComponent(hostname)}/${encodeURIComponent(metricName)}/resolve`,
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: await authHeaders({ "content-type": "application/json" }),
       body: await request.text(),
       cache: "no-store",
     }

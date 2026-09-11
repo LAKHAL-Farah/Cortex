@@ -1,0 +1,33 @@
+---
+- name: Create ssh auth sim log directory
+  ansible.builtin.file:
+    path: "{{ ssh_auth_log_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Deploy background ssh auth log generator
+  ansible.builtin.template:
+    src: ssh_auth_sim.sh.j2
+    dest: /usr/local/bin/ssh_auth_sim.sh
+    mode: "0755"
+  notify: Restart ssh auth simulator
+
+- name: Deploy on-demand ssh event trigger script
+  ansible.builtin.template:
+    src: trigger_ssh_event.sh.j2
+    dest: /usr/local/bin/trigger_ssh_event.sh
+    mode: "0755"
+
+- name: Deploy ssh auth simulator systemd unit
+  ansible.builtin.template:
+    src: ssh-auth-simulator.service.j2
+    dest: /etc/systemd/system/ssh-auth-simulator.service
+    mode: "0644"
+  notify: Restart ssh auth simulator
+
+- name: Enable and start ssh auth simulator
+  ansible.builtin.systemd:
+    name: ssh-auth-simulator
+    enabled: true
+    state: started
+    daemon_reload: true

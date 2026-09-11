@@ -1,16 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
+import { authHeaders } from "@/lib/serverAuth";
 
 const API_URL = process.env.CORTEX_API_URL!;
 
 export async function GET() {
-  const res = await fetch(`${API_URL}/api/v1/settings/alert-email`, { cache: "no-store" });
+  const res = await fetch(`${API_URL}/api/v1/settings/alert-email`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   return NextResponse.json(await res.json(), { status: res.status });
 }
 
 export async function PUT(request: NextRequest) {
   const res = await fetch(`${API_URL}/api/v1/settings/alert-email`, {
     method: "PUT",
-    headers: { "content-type": "application/json" },
+    headers: await authHeaders({ "content-type": "application/json" }),
     body: await request.text(),
     cache: "no-store",
   });

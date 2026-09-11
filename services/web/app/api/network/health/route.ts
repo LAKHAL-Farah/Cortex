@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { authHeaders } from "@/lib/serverAuth";
 
 const API_URL = process.env.CORTEX_API_URL;
 
@@ -8,7 +9,10 @@ export async function GET() {
   }
 
   try {
-    const res = await fetch(`${API_URL}/api/v1/network/health`, { cache: "no-store" });
+    const res = await fetch(`${API_URL}/api/v1/network/health`, {
+      cache: "no-store",
+      headers: await authHeaders(),
+    });
     const body = await res.text();
 
     try {
