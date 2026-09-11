@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 from ipaddress import ip_address, ip_network
-from typing import TypedDict
+from typing import Literal, TypedDict
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from ipaddress import ip_address, ip_network
 
@@ -37,6 +37,23 @@ class NodeBase(BaseModel):
 
 class NodeCreate(NodeBase):
     pass
+
+
+class ManualAlertResolution(BaseModel):
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class AlertEmailSettingsUpdate(BaseModel):
+    recipient_email: str = Field(min_length=3, max_length=320)
+    enabled: bool = True
+
+    @field_validator("recipient_email")
+    @classmethod
+    def email_must_look_valid(cls, value: str) -> str:
+        email = value.strip().lower()
+        if email.count("@") != 1 or email.startswith("@") or email.endswith("@"):
+            raise ValueError("recipient_email must be a valid email address")
+        return email
 
 
 class NodeUpdate(NodeBase):
@@ -111,6 +128,24 @@ class TopologyNetworkOut(BaseModel):
     gateway_routers: list[dict] = Field(default_factory=list)
     floating_ips: list[dict] = Field(default_factory=list)
     serving_agents: list[dict] = Field(default_factory=list)
+
+
+class NetworkLatencyOut(BaseModel):
+    hostname: str
+    ip_address: str | None = None
+    port: int
+    latency_ms: float | None = None
+    reachable: bool
+    error: str | None = None
+
+
+class NetworkHealthOut(BaseModel):
+    status: Literal["ok", "degraded"]
+    graph_available: bool = True
+    routers_down: list[dict] = Field(default_factory=list)
+    floating_ips_orphaned: list[dict] = Field(default_factory=list)
+    ports_down: list[dict] = Field(default_factory=list)
+    latencies: list[NetworkLatencyOut] = Field(default_factory=list)
 
 
 class TopologyNetworkDiagramOut(BaseModel):

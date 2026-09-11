@@ -124,7 +124,10 @@ class AnomalyFlag(Base):
     severity = Column(String, nullable=False)  # "medium" | "high" | "critical" | "normal"
     method = Column(String, nullable=False, default="robust_zscore")  # "robust_zscore" | "ewma_fallback"
     baseline_n = Column(Integer, nullable=True)  # sample count backing the baseline used (None if EWMA fallback)
+    details = Column(JSON, nullable=True)
     detected_at = Column(DateTime, default=datetime.utcnow)
+    manually_resolved_at = Column(DateTime, nullable=True)
+    resolution_note = Column(Text, nullable=True)
  
     __table_args__ = (
         UniqueConstraint("hostname", "metric_name", name="uq_anomaly_slot"),
@@ -155,8 +158,20 @@ class AnomalyEvent(Base):
     severity = Column(String, nullable=False)
     method = Column(String, nullable=False, default="robust_zscore")
     baseline_n = Column(Integer, nullable=True)
+    details = Column(JSON, nullable=True)
     started_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)  # NULL while still active
+    resolution_note = Column(Text, nullable=True)
+
+
+class AlertEmailSettings(Base):
+    """Single deployment-wide recipient until user preferences exist."""
+    __tablename__ = "alert_email_settings"
+
+    id = Column(Integer, primary_key=True, default=1)
+    recipient_email = Column(String(320), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
 class EwmaState(Base):
@@ -467,4 +482,26 @@ class AgentSessionMemory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class RoleBaseline(Base):
+    """Baseline statistics grouped by node role instead of hostname."""
+    __tablename__ = "role_baselines"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    role = Column(String, nullable=False, index=True)
+    metric_name = Column(String, nullable=False)
+    weekday = Column(Integer, nullable=False)
+    hour = Column(Integer, nullable=False)
+    mean = Column(Float, nullable=False)
+    stddev = Column(Float, nullable=False)
+    median = Column(Float, nullable=False)
+    mad = Column(Float, nullable=False)
+    sample_count = Column(Integer, nullable=False, default=0)
+    distinct_hosts = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("role", "metric_name", "weekday", "hour", name="uq_role_baseline_slot"),
     )

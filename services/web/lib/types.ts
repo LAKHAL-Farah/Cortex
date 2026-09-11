@@ -347,6 +347,26 @@ export interface TopologyMap {
   routers: TopologyMapRouter[];
 }
 
+export interface NetworkLatency {
+  hostname: string;
+  ip_address: string | null;
+  port: number;
+  latency_ms: number | null;
+  reachable: boolean;
+  error: string | null;
+}
+
+export type NetworkHealthStatus = "ok" | "degraded";
+
+export interface NetworkHealth {
+  status: NetworkHealthStatus;
+  graph_available: boolean;
+  routers_down: Record<string, unknown>[];
+  floating_ips_orphaned: Record<string, unknown>[];
+  ports_down: Record<string, unknown>[];
+  latencies: NetworkLatency[];
+}
+
 export type TopologySyncType = "openstack" | "prometheus_health";
 export type TopologySyncStatus = "ok" | "degraded" | "failed" | "unknown";
 

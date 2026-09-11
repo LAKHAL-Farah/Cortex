@@ -29,6 +29,7 @@ import {
   ArrowRight,
   Crosshair,
   Inbox,
+  CheckCircle2,
 } from "lucide-react";
 import type { AnomalyFlag, AnomalyIncident, AnomalySeverity, RcaSuggestion } from "@/lib/types";
 import {
@@ -40,6 +41,7 @@ import {
   SEVERITY_THRESHOLDS,
   buildInsight,
   formatDetectedAt,
+  formatMetricValue,
   formatRelative,
   formatZScore,
   isServiceStateMetric,
@@ -230,7 +232,7 @@ function AlertRow({ a, onOpen }: { a: AnomalyFlag; onOpen: () => void }) {
           <span className="text-xs text-text-faint">live check</span>
         ) : (
           <>
-            <span className="stat-figure text-sm text-color-text">{a.current_value.toFixed(1)}%</span>
+            <span className="stat-figure text-sm text-color-text">{formatMetricValue(a.metric_name, a.current_value)}</span>
             <ProgressBar value={a.current_value} color={SEVERITY_COLOR[a.severity]} />
           </>
         )}
@@ -452,7 +454,18 @@ function RcaSuggestionsPanel({ suggestions }: { suggestions: RcaSuggestion[] }) 
   );
 }
 
-function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
+function Detail({
+  a,
+  onClose,
+  onResolved,
+}: {
+  a: AnomalyFlag;
+  onClose: () => void;
+  onResolved: () => Promise<void>;
+}) {
+  const [note, setNote] = useState("");
+  const [isResolving, setIsResolving] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -465,6 +478,31 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
   // should point at instead of the service id itself, which isn't a
   // valid /nodes/{hostname} lookup key.
   const nodeHostname = service?.host ?? a.hostname;
+
+  const resolve = async () => {
+    const trimmedNote = note.trim();
+    if (!trimmedNote) {
+      setResolveError("Add a short resolution note before closing this alert.");
+      return;
+    }
+    setIsResolving(true);
+    setResolveError(null);
+    try {
+      const res = await fetch(`/api/anomalies/${encodeURIComponent(a.hostname)}/${encodeURIComponent(a.metric_name)}/resolve`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ note: trimmedNote }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || "Unable to resolve this alert.");
+      await onResolved();
+      onClose();
+    } catch (err) {
+      setResolveError(err instanceof Error ? err.message : "Unable to resolve this alert.");
+    } finally {
+      setIsResolving(false);
+    }
+  };
 
   return (
     <>
@@ -549,7 +587,7 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
             <>
               <div className="panel p-4">
                 <div className="eyebrow">Current value</div>
-                <div className="stat-figure mt-1 text-2xl text-color-text">{a.current_value.toFixed(1)}%</div>
+                <div className="stat-figure mt-1 text-2xl text-color-text">{formatMetricValue(a.metric_name, a.current_value)}</div>
                 <div className="mt-3">
                   <ProgressBar value={a.current_value} color={SEVERITY_COLOR[a.severity]} />
                 </div>
@@ -564,6 +602,32 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
                 </div>
                 <ZScoreMeter z={a.z_score} severity={a.severity} />
               </div>
+
+              {/* Story 3.4: source IPs behind an SSH auth alert -- absent
+                 (section not rendered) for metrics that don't carry them
+                 (cpu_usage/ram_usage), same "only show what's there"
+                 pattern the Service branch above already follows. */}
+              {a.details?.source_ips && a.details.source_ips.length > 0 && (
+                <div className="panel p-4">
+                  <div className="eyebrow">Source IPs</div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {a.details.source_ips.map((ip) => (
+                      <span
+                        key={ip}
+                        className="stat-figure inline-flex items-center rounded px-2 py-1 text-xs font-medium"
+                        style={{ color: SEVERITY_COLOR[a.severity], background: SEVERITY_SOFT[a.severity] }}
+                      >
+                        {ip}
+                      </span>
+                    ))}
+                  </div>
+                  {a.details.triggered_by === "absolute_threshold" && (
+                    <p className="mt-2 text-xs text-text-faint">
+                      Flagged by a fixed-count threshold, independent of this host&apos;s learned baseline.
+                    </p>
+                  )}
+                </div>
+              )}
             </>
           )}
 
@@ -583,6 +647,35 @@ function Detail({ a, onClose }: { a: AnomalyFlag; onClose: () => void }) {
                 <span className="text-color-text">{row.value}</span>
               </div>
             ))}
+          </div>
+
+          <div className="panel p-4" style={{ borderColor: "var(--ok)" }}>
+            <div className="flex items-center gap-1.5 text-sm font-semibold text-color-text">
+              <CheckCircle2 className="h-4 w-4" style={{ color: "var(--ok)" }} strokeWidth={2} />
+              Resolve manually
+            </div>
+            <p className="mt-1 text-xs leading-relaxed text-text-faint">
+              Close this alert after intervention. The note is saved in its history; a new alert is raised only after the signal recovers and recurs.
+            </p>
+            <textarea
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              maxLength={2000}
+              rows={3}
+              placeholder="What did you do, or what should the next operator know?"
+              className="mt-3 w-full resize-y rounded-[var(--radius-control)] p-2.5 text-sm text-color-text outline-none transition-colors"
+              style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
+            />
+            {resolveError && <p className="mt-2 text-xs" style={{ color: "var(--crit)" }}>{resolveError}</p>}
+            <button
+              onClick={resolve}
+              disabled={isResolving}
+              className="mt-3 inline-flex items-center gap-1.5 rounded-[var(--radius-control)] px-3 py-2 text-sm font-semibold text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-60"
+              style={{ background: "var(--ok)" }}
+            >
+              <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2} />
+              {isResolving ? "Resolving…" : "Mark as resolved"}
+            </button>
           </div>
         </div>
 
@@ -999,7 +1092,17 @@ export default function AlertsView() {
         </div>
       </div>
 
-      <AnimatePresence>{selected && <Detail a={selected} onClose={() => setSelectedKey(null)} />}</AnimatePresence>
+      <AnimatePresence>
+        {selected && (
+          <Detail
+            a={selected}
+            onClose={() => setSelectedKey(null)}
+            onResolved={async () => {
+              await Promise.all([mutate(), mutateRca()]);
+            }}
+          />
+        )}
+      </AnimatePresence>
     </main>
   );
 }

@@ -14,8 +14,10 @@ from .routers import logs
 from .routers import anomalies
 from .routers import baselines
 from .routers import topology
+from .routers import network
 from .routers import knowledge
 from .routers import conversations
+from .routers import settings
 from .routers import quotas
 from .routers import agents
 from .routers import auth as auth_router
@@ -317,6 +319,7 @@ app.include_router(anomalies.router, dependencies=_auth_required)
 app.include_router(baselines.router, dependencies=_auth_required)
 app.include_router(forecast.router, dependencies=_auth_required)
 app.include_router(topology.router, dependencies=_auth_required)
+app.include_router(network.router, dependencies=_auth_required)
 app.include_router(quotas.router, dependencies=_auth_required)
 # Not added to the periodic lifespan tasks above on purpose -- unlike anomaly
 # detection/baselines/forecasting/topology sync, the knowledge base doesn't
@@ -330,6 +333,8 @@ app.include_router(knowledge.router, dependencies=_auth_required)
 # poll on a schedule.
 app.include_router(conversations.router, dependencies=_auth_required)
 app.include_router(agents.router, dependencies=_auth_required)
+app.include_router(settings.router, dependencies=_auth_required)
+app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 @app.get("/health")
 def health():

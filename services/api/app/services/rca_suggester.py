@@ -103,7 +103,10 @@ def find_causal_suggestions(db: Session) -> list[dict]:
     """
     rows = (
         db.query(models.AnomalyFlag)
-        .filter(models.AnomalyFlag.severity != "normal")
+        .filter(
+            models.AnomalyFlag.severity != "normal",
+            models.AnomalyFlag.manually_resolved_at.is_(None),
+        )
         .all()
     )
     if not rows:
