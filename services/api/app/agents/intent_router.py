@@ -45,6 +45,18 @@ entity-scoped once routed here (see that module's own v0.10 note), this
 prompt only needs to widen the surface examples so the classifier still
 recognizes the question as this agent's territory.
 
+v0.9 (Phase 5) adds a seventh branch, "security" -- auth anomalies,
+security-group audit, known-vulnerable packages, and kernel-level (eBPF)
+signals for one node (see nodes/security.py). Same "leaf, straightforward
+routing addition" shape network's own v0.9 arrival was from this router's
+point of view -- the sub-orchestration (four sub-checks merged into one
+finding) is entirely private to that node, this prompt only needs one
+more enum value and description so the classifier recognizes "is compute-
+02 compromised", "any suspicious auth activity", "check for open ports/
+CVEs on X" as this agent's territory rather than defaulting to anomaly
+(which investigates *resource* incidents, not security ones) or
+monitoring.
+
 v0.8 adds two things:
 
 - This call now runs on the fast tier (services/llm_client.py) -- routing
@@ -74,7 +86,7 @@ from .state import CortexState
 
 logger = logging.getLogger(__name__)
 
-AgentName = Literal["monitoring", "prediction", "rag", "anomaly", "openstack_expert", "network"]
+AgentName = Literal["monitoring", "prediction", "rag", "anomaly", "openstack_expert", "network", "security"]
 
 # Safest, cheapest default: a direct status pull, no forecast math,
 # knowledge-base retrieval, or multi-source investigation involved.
@@ -113,6 +125,13 @@ happen", "what's the procedure for Z", anything about docs, runbooks, or how a s
 correlating metric and log evidence to figure out what's actually happening, as opposed to a \
 plain current-value read (that's monitoring) or a plain network/connectivity check (that's \
 network).
+- security: auth/security-related questions about one node -- "is compute-02 compromised", \
+"any suspicious login activity on X", "check for open ports or known CVEs on X", "audit security \
+groups on X", "any unusual process activity on X". Different from anomaly: anomaly investigates \
+*resource* incidents (CPU/RAM/disk spikes, correlated error logs); security investigates \
+*auth/exploit* concerns (failed logins, overly-permissive firewall rules, vulnerable package \
+versions, kernel-level behavioral alerts) -- a question about whether something was compromised \
+or misconfigured for security reasons is this agent, not anomaly.
 - openstack_expert: you already have a specific, named technical symptom in mind -- a resource \
 metric, or a specific OpenStack service like nova-compute/nova-scheduler/cinder-volume/ \
 neutron-l3-agent/neutron-dhcp-agent/neutron-openvswitch-agent, or a hypervisor/libvirt/RabbitMQ/ \

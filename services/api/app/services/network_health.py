@@ -422,3 +422,30 @@ def list_known_subnets(conn=None) -> list[dict]:
 def list_known_instances(conn=None) -> list[dict]:
     conn = conn or _connect()
     return [{"id": i.id, "name": getattr(i, "name", None)} for i in conn.compute.servers()]
+
+
+# --------------------------------------------------------------------
+# v0.9 -- bulk scope lookup for the incident fan-out (agents/nodes/
+# anomaly.py's _incident_scope_from_living_model). Deliberately a single
+# no-argument bulk read (one `conn.network.agents()` call), not a
+# per-hostname helper looped over every known node -- the same "cheap and
+# fast enough to call unconditionally when scoping a broad incident
+# question" property list_all_open_anomaly_flag_hostnames already has.
+# --------------------------------------------------------------------
+
+def list_hosts_with_down_agents(conn=None) -> list[str]:
+    """Every hostname currently running at least one dead/disabled Neutron
+    agent -- a down neutron-openvswitch-agent (or l3/dhcp-agent) is exactly
+    as much "this node is worth investigating" as a scored metric anomaly
+    is, and shouldn't have to wait on a coincidental CPU/RAM side effect
+    (if there even is one) before a broad "is anything wrong" question
+    picks it up. Mirrors `_check_neutron`'s own down_agents filter in
+    nodes/network.py, just across every host at once instead of one."""
+    conn = conn or _connect()
+    down = {
+        getattr(a, "host", None)
+        for a in conn.network.agents()
+        if not getattr(a, "is_alive", False) or not getattr(a, "is_admin_state_up", False)
+    }
+    down.discard(None)
+    return sorted(down)
