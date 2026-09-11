@@ -21,6 +21,7 @@ import {
   HardDrive,
   Lightbulb,
   Loader2,
+  Lock,
   MemoryStick,
   Minus,
   Network,
@@ -58,6 +59,7 @@ import type {
   AgentPredictionData,
   AgentRagData,
   AgentRawData,
+  AgentSecurityData,
   AgentTraceStep,
   ForecastPoint,
   NeutronAgentStatus,
@@ -118,6 +120,13 @@ export const AGENT_META: Record<
     icon: Network,
     color: "var(--chart-6)",
     soft: "rgba(43,158,158,0.12)",
+  },
+  security: {
+    label: "Security agent",
+    short: "Auth, CVEs & kernel signals",
+    icon: Lock,
+    color: "var(--chart-4)",
+    soft: "rgba(139,127,224,0.12)",
   },
 };
 
@@ -777,6 +786,126 @@ function NetworkPanel({ data }: { data: AgentNetworkData }) {
 }
 
 // ---------------------------------------------------------------------------
+// Security agent panel -- four sub-checks (auth-anomaly, sec-group-diff,
+// CVE-match, eBPF-signal) merged into one finding, see nodes/security.py.
+// Every sub-signal renders the same way: a status chip (clean / flagged /
+// unknown) plus its own detail line -- except when `restricted` is set,
+// which means this response was RBAC-filtered for a non-admin account
+// (see routers/agents.py's `_redact_security_raw_data`); in that case the
+// panel shows a clear "admin only" placeholder instead of trying to
+// render fields the backend never sent.
+// ---------------------------------------------------------------------------
+
+function SecuritySignalRow({
+  icon: Icon,
+  label,
+  signal,
+  children,
+}: {
+  icon: typeof Activity;
+  label: string;
+  signal: { has_signal: boolean; degraded?: boolean; detail?: string; restricted?: boolean };
+  children?: ReactNode;
+}) {
+  const tone = signal.restricted
+    ? "var(--text-muted)"
+    : signal.degraded
+    ? "var(--warn)"
+    : signal.has_signal
+    ? "var(--crit)"
+    : "var(--ok)";
+  const soft = signal.restricted
+    ? "var(--canvas)"
+    : signal.degraded
+    ? "var(--warn-soft)"
+    : signal.has_signal
+    ? "var(--crit-soft)"
+    : "var(--ok-soft)";
+  const statusLabel = signal.restricted ? "Admin only" : signal.degraded ? "Unknown" : signal.has_signal ? "Flagged" : "Clean";
+
+  return (
+    <div className="flex flex-col gap-1 rounded-[var(--radius-control)] px-2.5 py-2" style={{ background: "var(--canvas)", border: "1px solid var(--border-soft)" }}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          <Icon className="h-3.5 w-3.5" style={{ color: tone }} strokeWidth={1.9} />
+          <span className="text-[12px] font-semibold text-color-text">{label}</span>
+        </div>
+        <span className="agent-pill" style={{ color: tone, background: soft }}>
+          {statusLabel}
+        </span>
+      </div>
+      {signal.restricted ? (
+        <p className="text-[11.5px] italic leading-relaxed" style={{ color: "var(--text-muted)" }}>
+          Details restricted to admin accounts.
+        </p>
+      ) : (
+        signal.detail && <p className="text-[11.5px] leading-relaxed text-text-dim">{signal.detail}</p>
+      )}
+      {!signal.restricted && children}
+    </div>
+  );
+}
+
+function SecurityPanel({ data }: { data: AgentSecurityData }) {
+  const anyRestricted = [data.auth_signal, data.sec_group_signal, data.cve_signal, data.ebpf_signal].some((s) => s.restricted);
+
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--chart-4) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <Lock className="h-3.5 w-3.5" style={{ color: "var(--chart-4)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">{data.hostname}</span>
+          <span className="text-[11px] text-text-muted">{data.role}</span>
+        </div>
+        {anyRestricted && (
+          <span className="agent-pill" style={{ color: "var(--text-muted)", background: "var(--canvas)" }}>
+            <Lock className="h-3 w-3" strokeWidth={2} />
+            Admin only
+          </span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+        <SecuritySignalRow icon={Terminal} label="Auth activity" signal={data.auth_signal} />
+        <SecuritySignalRow icon={Network} label="Security groups" signal={data.sec_group_signal}>
+          {(data.sec_group_signal.risky_rules?.length ?? 0) > 0 && (
+            <ul className="flex flex-col gap-0.5">
+              {data.sec_group_signal.risky_rules!.slice(0, 3).map((r, i) => (
+                <li key={i} className="text-[11px]" style={{ color: "var(--crit)" }}>
+                  {r.security_group}: {r.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+        </SecuritySignalRow>
+        <SecuritySignalRow icon={ScrollText} label="Known CVEs" signal={data.cve_signal}>
+          {(data.cve_signal.matches?.length ?? 0) > 0 && (
+            <ul className="flex flex-col gap-0.5">
+              {data.cve_signal.matches!.slice(0, 3).map((m, i) => (
+                <li key={i} className="text-[11px]" style={{ color: "var(--crit)" }}>
+                  {m.cve_id} ({m.severity}) -- {m.package} {m.installed_version}
+                </li>
+              ))}
+            </ul>
+          )}
+        </SecuritySignalRow>
+        <SecuritySignalRow icon={Cpu} label="Kernel-level (eBPF)" signal={data.ebpf_signal}>
+          {(data.ebpf_signal.alerts?.length ?? 0) > 0 && (
+            <ul className="flex flex-col gap-0.5">
+              {data.ebpf_signal.alerts!.slice(0, 3).map((a, i) => (
+                <li key={i} className="text-[11px]" style={{ color: "var(--crit)" }}>
+                  [{a.priority}] {a.rule}
+                </li>
+              ))}
+            </ul>
+          )}
+        </SecuritySignalRow>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Prediction panel -- forecast chart (actual history + predicted band) built
 // from the same series the API returns in raw_data.forecast/actual.
 // ---------------------------------------------------------------------------
@@ -1425,6 +1554,28 @@ function AgentPanelSkeleton({ agentUsed }: { agentUsed?: string }) {
       </div>
     );
   }
+  if (agentUsed === "security") {
+    return (
+      <div
+        className="agent-panel"
+        style={{ borderColor: "color-mix(in srgb, var(--chart-4) 16%, var(--border))" }}
+      >
+        <div className="flex items-center justify-between">
+          <SkeletonBar width="34%" />
+          <SkeletonBar width="16%" />
+        </div>
+        <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+          {[0, 1, 2, 3].map((i) => (
+            <div
+              key={i}
+              className="h-[54px] animate-pulse rounded-[var(--radius-control)]"
+              style={{ background: "var(--canvas)", border: "1px solid var(--border-soft)" }}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
   if (agentUsed === "anomaly") {
     return (
       <div
@@ -1498,6 +1649,7 @@ export function AgentAnswerPanel({
       <Markdown text={answer} />
       {agentUsed === "monitoring" && rawData && <MonitoringPanel data={rawData as AgentMonitoringData} />}
       {agentUsed === "network" && rawData && <NetworkPanel data={rawData as AgentNetworkData} />}
+      {agentUsed === "security" && rawData && <SecurityPanel data={rawData as AgentSecurityData} />}
       {agentUsed === "prediction" && rawData && <PredictionPanel data={rawData as AgentPredictionData} />}
       {agentUsed === "rag" && rawData && <RagPanel data={rawData as AgentRagData} />}
       {agentUsed === "anomaly" && rawData && (
@@ -1543,6 +1695,7 @@ export function AnimatedAgentAnswer({
         <motion.div initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
           {agentUsed === "monitoring" && <MonitoringPanel data={rawData as AgentMonitoringData} />}
           {agentUsed === "network" && <NetworkPanel data={rawData as AgentNetworkData} />}
+          {agentUsed === "security" && <SecurityPanel data={rawData as AgentSecurityData} />}
           {agentUsed === "prediction" && <PredictionPanel data={rawData as AgentPredictionData} />}
           {agentUsed === "rag" && <RagPanel data={rawData as AgentRagData} />}
           {agentUsed === "anomaly" && <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />}

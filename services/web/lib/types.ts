@@ -432,7 +432,7 @@ export interface ChatSource {
 // actually return, used by components/CopilotAgentPanels.tsx to pick a
 // renderer.
 
-export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly" | "openstack_expert" | "network";
+export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly" | "openstack_expert" | "network" | "security";
 
 // Same live-status shape as LiveMetrics above, just named for clarity at
 // the copilot call site.
@@ -517,7 +517,37 @@ export interface AgentAnomalyLogSignal {
   entries: AgentAnomalyLogEntry[];
 }
 
-export interface AgentAnomalyData {
+// v0.9 (Phase 5): fields anomaly_arbitrate (nodes/anomaly.py) adds on top
+// of whichever agent's own raw_data shape won that turn's cross-agent
+// arbitration -- see that function's own docstring for the ranking rule.
+// Every one of AgentAnomalyData/AgentNetworkData/AgentSecurityData can
+// carry these, since arbitration can pick any of the three as primary.
+export interface CrossAgentFinding {
+  hostname: string;
+  agent: AgentName | string;
+  confidence?: number;
+  summary?: string;
+  has_signal?: boolean;
+  // v0.9 RBAC: present (with `summary`/other specifics stripped) when
+  // this entry belongs to the Security agent and the current user isn't
+  // an admin -- see routers/agents.py's `_redact_security_raw_data`.
+  restricted?: boolean;
+}
+
+export interface CrossAgentArbitrationFields {
+  // Which agent's finding this raw_data shape actually belongs to --
+  // present whenever this turn went through arbitration at all (i.e. a
+  // broad incident question, not a single agent answering directly).
+  investigating_agent?: AgentName | string;
+  // Other agent(s) that also investigated this same host, most-confident
+  // first -- present only when more than one agent found something here.
+  cross_agent_findings?: CrossAgentFinding[];
+  // One entry per host in scope, this host's own winning theory --
+  // present only when more than one host was investigated.
+  multi_node_findings?: CrossAgentFinding[];
+}
+
+export interface AgentAnomalyData extends CrossAgentArbitrationFields {
   hostname: string;
   role: string;
   metric_signal: AgentAnomalyMetricSignal;
@@ -630,7 +660,7 @@ export interface AgentNetworkNeutronSignal extends AgentNetworkSignal {
   bad_instances?: NeutronInstanceStatus[];
 }
 
-export interface AgentNetworkData {
+export interface AgentNetworkData extends CrossAgentArbitrationFields {
   scope: "node" | "network" | "subnet" | "instance";
   // scope === "node"
   hostname?: string;
@@ -645,6 +675,76 @@ export interface AgentNetworkData {
   };
 }
 
+// Security agent (v0.9, services/api/app/agents/nodes/security.py) --
+// mirrors _investigate's raw_data exactly: four near-independent
+// sub-checks, each with the same {has_signal, degraded, detail} shape
+// every "signal" dict in this codebase uses, plus its own extra evidence
+// field. The detail fields below are typed optional because a non-admin
+// ("viewer") account receives each sub-signal collapsed to just
+// {has_signal, degraded, restricted: true} -- see routers/agents.py's
+// `_redact_security_raw_data` -- not because the backend ever omits them
+// for an admin caller.
+export interface AgentSecuritySignal {
+  has_signal: boolean;
+  degraded?: boolean;
+  detail?: string;
+  restricted?: boolean;
+}
+
+export interface AgentAuthAnomalySignal extends AgentSecuritySignal {
+  entries?: { ts: number; line: string; service: string | null }[];
+}
+
+export interface AgentSecGroupRule {
+  security_group: string;
+  reason: string;
+  rule: {
+    direction: string;
+    protocol: string | null;
+    port_range_min: number | null;
+    port_range_max: number | null;
+    remote_ip_prefix: string | null;
+  };
+}
+
+export interface AgentSecGroupSignal extends AgentSecuritySignal {
+  risky_rules?: AgentSecGroupRule[];
+}
+
+export interface AgentCveMatch {
+  cve_id: string;
+  severity: "critical" | "high" | "medium" | "low" | string;
+  package: string;
+  installed_version: string;
+  fixed_version: string;
+  description: string;
+}
+
+export interface AgentCveSignal extends AgentSecuritySignal {
+  matches?: AgentCveMatch[];
+}
+
+export interface AgentEbpfAlert {
+  rule: string;
+  priority: string;
+  output: string;
+  time: string;
+}
+
+export interface AgentEbpfSignal extends AgentSecuritySignal {
+  alerts?: AgentEbpfAlert[];
+}
+
+export interface AgentSecurityData extends CrossAgentArbitrationFields {
+  hostname: string;
+  role: string;
+  has_signal: boolean;
+  auth_signal: AgentAuthAnomalySignal;
+  sec_group_signal: AgentSecGroupSignal;
+  cve_signal: AgentCveSignal;
+  ebpf_signal: AgentEbpfSignal;
+}
+
 export type AgentRawData =
   | AgentMonitoringData
   | AgentPredictionData
@@ -652,6 +752,7 @@ export type AgentRawData =
   | AgentAnomalyData
   | AgentExpertData
   | AgentNetworkData
+  | AgentSecurityData
   | Record<string, unknown>;
 
 // v0.7 (adr-0009) trace step -- one per node the graph actually visited

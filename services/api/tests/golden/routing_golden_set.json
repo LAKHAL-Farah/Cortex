@@ -295,6 +295,30 @@
       "expected_target_agent": "network",
       "source": "router_prompt_example",
       "notes": "Phase C (v0.10): subnet-scoped question."
+    },
+    {
+      "id": "r49",
+      "query": "is compute-02 compromised",
+      "expected_target_agent": "security",
+      "source": "router_prompt_example"
+    },
+    {
+      "id": "r50",
+      "query": "any suspicious login activity on compute-01",
+      "expected_target_agent": "security",
+      "source": "router_prompt_example"
+    },
+    {
+      "id": "r51",
+      "query": "check for open ports or known CVEs on compute-02",
+      "expected_target_agent": "security",
+      "source": "router_prompt_example"
+    },
+    {
+      "id": "r52",
+      "query": "audit security groups on compute-01",
+      "expected_target_agent": "security",
+      "source": "router_prompt_example"
     }
   ]
 }

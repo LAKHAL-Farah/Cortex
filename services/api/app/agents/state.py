@@ -70,8 +70,12 @@ def _concat(left: list, right: list) -> list:
     """Reducer for CortexState's one concurrently-written field
     (`agent_results`).
 
-    Deliberately dedupes by hostname (first-seen wins) rather than doing
-    plain concatenation. The reason isn't the concurrent Send fan-out
+    Deliberately dedupes by (hostname, agent) -- not just hostname -- since
+    v0.9's cross-agent fan-out (see nodes/anomaly.py's `_fan_out_to_investigate`
+    in graph.py) sends multiple agents (anomaly, network, security) to
+    investigate the *same* node concurrently; deduping on hostname alone
+    would silently drop two of every three findings per node. The reason
+    a dedupe key is needed at all isn't the concurrent Send fan-out
     itself -- LangGraph's Pregel model refills *every* channel's current
     persisted value into each subsequent node's input regardless of what
     that node returns, which means anomaly_arbitrate reading and then
@@ -83,15 +87,19 @@ def _concat(left: list, right: list) -> list:
     that exact same list right back to this channel on its own next turn.
     A plain-concatenation reducer would then add it again at every single
     one of those steps, silently doubling the fan-out's findings once per
-    downstream node. Deduping by hostname makes that re-contribution a
-    no-op (every hostname it contains is already present) while still
-    correctly merging the genuinely-concurrent, genuinely-distinct
-    findings from the fan-out's actual parallel branches.
+    downstream node. Deduping by (hostname, agent) makes that
+    re-contribution a no-op (every (hostname, agent) pair it contains is
+    already present) while still correctly merging the genuinely-
+    concurrent, genuinely-distinct findings from the fan-out's actual
+    parallel branches.
     """
     left = left or []
     right = right or []
-    seen = {finding["hostname"] for finding in left}
-    return left + [finding for finding in right if finding["hostname"] not in seen]
+    seen = {(finding["hostname"], finding.get("agent", "anomaly")) for finding in left}
+    return left + [
+        finding for finding in right
+        if (finding["hostname"], finding.get("agent", "anomaly")) not in seen
+    ]
 
 
 class KnownNode(TypedDict):
@@ -124,13 +132,24 @@ class CriticVerdict(TypedDict):
 
 
 class IncidentFinding(TypedDict):
-    """One node's worth of anomaly-investigation output, gathered by a
-    single Send("anomaly_investigate", ...) branch (see graph.py). Kept
-    separate from AgentResult (rather than just a list[AgentResult]) so
-    anomaly_arbitrate doesn't have to dig `hostname` back out of
-    `agent_result["raw_data"]` to rank/report per-node."""
+    """One (node, agent) pair's worth of incident-investigation output,
+    gathered by a single Send(...) branch (see graph.py). Kept separate
+    from AgentResult (rather than just a list[AgentResult]) so
+    anomaly_arbitrate doesn't have to dig `hostname`/`agent` back out of
+    `agent_result["raw_data"]` to rank/report per-node/per-agent.
+
+    v0.9 adds `agent` -- before this, the fan-out only ever dispatched the
+    Anomaly agent, so one finding per hostname was the whole picture; now
+    Anomaly, Network, and Security can all investigate the same node
+    concurrently (see graph.py's `_fan_out_to_investigate`), so `hostname`
+    alone no longer uniquely identifies a finding. Defaults implicitly to
+    "anomaly" wherever an older finding shape (or a test fixture predating
+    this field) doesn't set it -- see state.py's `_concat` reducer and
+    nodes/anomaly.py's `anomaly_arbitrate`.
+    """
 
     hostname: str
+    agent: str  # "anomaly" | "network" | "security"
     agent_result: AgentResult
     # Any FailureRecord this node's own evidence-gathering hit (e.g. a
     # Loki timeout) -- embedded here rather than written straight to
