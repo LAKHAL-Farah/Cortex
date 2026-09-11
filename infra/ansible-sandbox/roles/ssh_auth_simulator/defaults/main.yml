@@ -1,0 +1,46 @@
+---
+# ssh_auth_log_dir / ssh_auth_log_path are defined once in
+# group_vars/all.yml (shared with roles/promtail, which tails the same
+# path this role writes to) -- not redefined here on purpose.
+
+# Background daemon tick interval (seconds). One "normal" event (an
+# operator logging in, or in rare cases a single mistyped password) is
+# written roughly once per tick.
+ssh_auth_tick_interval: 15
+
+# Per-tick probability [0.0-1.0] of the background daemon firing an
+# unprompted failed-login burst on its own, so the sandbox has *some*
+# brute-force signal even if nobody triggers one manually.
+ssh_auth_spontaneous_burst_chance: 0.03
+
+# Failed-login burst size range. anomaly_detector._severity_for_ssh_failed_count
+# treats 5/15/30 failures in the 5-minute window as warning/critical
+# floors (fail2ban's own long-standing defaults) -- keep the upper end of
+# this range comfortably past 30 so a spontaneous burst reliably reaches
+# "critical", not just "warning".
+ssh_auth_burst_min: 6
+ssh_auth_burst_max: 40
+
+# "Attacker" source IPs a burst is drawn from (rotates so
+# auth_log_metrics.get_failed_login_stats' source_ips list has more than
+# one address to show, like a real credential-stuffing attempt would).
+ssh_auth_attacker_ips:
+  - "203.0.113.77"
+  - "203.0.113.91"
+  - "198.51.100.23"
+
+# "Operator" source IPs for the normal successful-login trickle.
+ssh_auth_operator_ips:
+  - "10.0.1.5"
+  - "10.0.1.6"
+
+ssh_auth_usernames_invalid:
+  - admin
+  - root
+  - test
+  - oracle
+  - postgres
+
+ssh_auth_operator_users:
+  - ops
+  - deploy

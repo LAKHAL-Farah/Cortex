@@ -1,0 +1,78 @@
+#!/bin/bash
+# Cortex sandbox SSH auth log simulator -- SANDBOX ONLY.
+# Writes fake but sshd-format-accurate auth lines so auth_log_metrics.py's
+# Loki queries ({host="<this host>"} |= "Failed password" / |= "Accepted ")
+# have real matching log lines to count, without real SSH brute-force
+# traffic (or real user accounts) needed against these containers.
+#
+# Two ways this writes lines:
+#   1. This background loop: a quiet trickle of normal activity, plus an
+#      occasional spontaneous failed-login burst (see
+#      ssh_auth_spontaneous_burst_chance) so the sandbox isn't silent.
+#   2. /usr/local/bin/trigger_ssh_event.sh, deployed alongside this script,
+#      for deterministic on-demand bursts during manual testing -- see that
+#      script's own comments.
+{% raw %}
+set -u
+
+log_line() {
+  # sshd's real log format: "<Mon> <DD> <HH:MM:SS> <host> sshd[<pid>]: <msg>"
+  local ts
+  ts=$(date -u +"%b %e %H:%M:%S")
+  echo "${ts} ${HOSTNAME_LABEL} sshd[$((RANDOM % 30000 + 1000))]: $1" >> "$LOG_PATH"
+}
+
+failed_line() {
+  local ip=$1
+  if (( RANDOM % 2 == 0 )); then
+    local user=${INVALID_USERS[$((RANDOM % ${#INVALID_USERS[@]}))]}
+    log_line "Failed password for invalid user ${user} from ${ip} port $((RANDOM % 40000 + 1024)) ssh2"
+  else
+    local user=${OPERATOR_USERS[$((RANDOM % ${#OPERATOR_USERS[@]}))]}
+    log_line "Failed password for ${user} from ${ip} port $((RANDOM % 40000 + 1024)) ssh2"
+  fi
+}
+
+accepted_line() {
+  local ip=$1
+  local user=${OPERATOR_USERS[$((RANDOM % ${#OPERATOR_USERS[@]}))]}
+  log_line "Accepted password for ${user} from ${ip} port $((RANDOM % 40000 + 1024)) ssh2"
+}
+{% endraw %}
+LOG_PATH="{{ ssh_auth_log_path }}"
+HOSTNAME_LABEL="{{ inventory_hostname }}"
+TICK_INTERVAL={{ ssh_auth_tick_interval }}
+BURST_CHANCE_PCT={{ (ssh_auth_spontaneous_burst_chance * 100) | int }}
+BURST_MIN={{ ssh_auth_burst_min }}
+BURST_MAX={{ ssh_auth_burst_max }}
+ATTACKER_IPS=({{ ssh_auth_attacker_ips | join(' ') }})
+OPERATOR_IPS=({{ ssh_auth_operator_ips | join(' ') }})
+INVALID_USERS=({{ ssh_auth_usernames_invalid | join(' ') }})
+OPERATOR_USERS=({{ ssh_auth_operator_users | join(' ') }})
+{% raw %}
+mkdir -p "$(dirname "$LOG_PATH")"
+touch "$LOG_PATH"
+
+while true; do
+  # Quiet baseline: usually one accepted login, rarely one lone failed
+  # attempt (normal mistyped-password noise -- one line alone never crosses
+  # the 5/15/30 floor, it's just realistic background signal).
+  if (( RANDOM % 10 < 8 )); then
+    accepted_line "${OPERATOR_IPS[$((RANDOM % ${#OPERATOR_IPS[@]}))]}"
+  else
+    failed_line "${OPERATOR_IPS[$((RANDOM % ${#OPERATOR_IPS[@]}))]}"
+  fi
+
+  # Spontaneous burst, so the sandbox has *some* brute-force signal even
+  # with nobody driving it manually.
+  if (( RANDOM % 100 < BURST_CHANCE_PCT )); then
+    n=$((RANDOM % (BURST_MAX - BURST_MIN + 1) + BURST_MIN))
+    for _ in $(seq 1 "$n"); do
+      failed_line "${ATTACKER_IPS[$((RANDOM % ${#ATTACKER_IPS[@]}))]}"
+      sleep 0.2
+    done
+  fi
+
+  sleep "$TICK_INTERVAL"
+done
+{% endraw %}

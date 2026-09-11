@@ -46,6 +46,17 @@ export function metricLabel(metric: string): string {
   return METRIC_LABEL[metric] ?? metric.replace(/_/g, " ");
 }
 
+export function formatMetricValue(metric: string, value: number): string {
+  if (isServiceStateMetric(metric)) return "Down";
+  if (metric === "ssh_failed_logins_5min" || metric === "ssh_successful_logins_5min") {
+    return `${Math.round(value)} in 5m`;
+  }
+  if (metric === "cpu_usage" || metric === "ram_usage") {
+    return `${value.toFixed(1)}%`;
+  }
+  return value.toFixed(1);
+}
+
 /** "service_state" flags come from the OpenStack/Prometheus state
  * cross-check (see services/api/app/services/prometheus_health.py), not
  * from anomaly_detector.py's baseline/EWMA scoring -- current_value,
@@ -145,12 +156,19 @@ export function buildInsight(a: AnomalyFlag): string {
   }
 
   const metric = metricLabel(a.metric_name);
-  const dir = a.z_score >= 0 ? "above" : "below";
   const magnitude = Math.abs(a.z_score).toFixed(1);
-  const confidence =
-    a.method === "ewma_fallback"
-      ? "a short-term EWMA estimate, since this host/hour slot doesn't have enough history yet"
-      : `a baseline of ${a.baseline_n ?? "—"} samples for this weekday and hour`;
+  const startedAt = new Date(a.detected_at).toLocaleString();
 
-  return `${a.hostname}'s ${metric.toLowerCase()} is at ${a.current_value.toFixed(1)}%, ${magnitude}σ ${dir} what's typical here — based on ${confidence}.`;
+  if (a.method === "ewma_fallback") {
+    const direction = a.z_score >= 0 ? "above" : "below";
+
+    return `${metric} on ${a.hostname} reached ${a.current_value.toFixed(1)}% on ${startedAt}, ${magnitude}σ ${direction} its recent expected level. There was not enough historical data for this weekday and hour, so a short-term EWMA estimate was used.`;
+  }
+
+  const direction =
+    a.z_score >= 0
+      ? "well above the normal level expected at this time"
+      : "well below the normal level expected at this time";
+
+  return `${metric} on ${a.hostname} reached ${a.current_value.toFixed(1)}% on ${startedAt}, ${direction}. It was ${magnitude}σ from the contextual baseline, based on ${a.baseline_n ?? "—"} historical samples for the same weekday and hour.`;
 }

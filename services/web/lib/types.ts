@@ -61,6 +61,7 @@ export interface AnomalyFlag {
   severity: AnomalySeverity;
   method: AnomalyMethod;
   baseline_n: number | null; // sample count backing the baseline (null when EWMA fallback)
+  details?: { source_ips?: string[] | null; triggered_by?: string | null } | null;
   detected_at: string; // ISO 8601
 }
 
@@ -158,8 +159,11 @@ export interface AnomalyEvent {
   severity: AnomalySeverity; // peak severity reached during the episode
   method: AnomalyMethod;
   baseline_n: number | null;
+  details?: { source_ips?: string[] | null; triggered_by?: string | null } | null;
   started_at: string; // ISO 8601
   resolved_at: string | null; // ISO 8601, null while still active
+  resolution_type: "automatic" | "manual" | null;
+  resolution_note: string | null;
   is_active: boolean;
 }
 
@@ -345,6 +349,26 @@ export interface TopologyMapRouter {
 export interface TopologyMap {
   networks: TopologyMapNetwork[];
   routers: TopologyMapRouter[];
+}
+
+export interface NetworkLatency {
+  hostname: string;
+  ip_address: string | null;
+  port: number;
+  latency_ms: number | null;
+  reachable: boolean;
+  error: string | null;
+}
+
+export type NetworkHealthStatus = "ok" | "degraded";
+
+export interface NetworkHealth {
+  status: NetworkHealthStatus;
+  graph_available: boolean;
+  routers_down: Record<string, unknown>[];
+  floating_ips_orphaned: Record<string, unknown>[];
+  ports_down: Record<string, unknown>[];
+  latencies: NetworkLatency[];
 }
 
 export type TopologySyncType = "openstack" | "prometheus_health";

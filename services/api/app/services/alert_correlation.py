@@ -90,7 +90,10 @@ def _open_alert_rows(db: Session) -> list[models.AnomalyFlag]:
     have to be called through the router (e.g. from tests)."""
     return (
         db.query(models.AnomalyFlag)
-        .filter(models.AnomalyFlag.severity != "normal")
+        .filter(
+            models.AnomalyFlag.severity != "normal",
+            models.AnomalyFlag.manually_resolved_at.is_(None),
+        )
         .all()
     )
 
@@ -104,6 +107,7 @@ def _alert_to_dict(row: models.AnomalyFlag) -> dict:
         "severity": row.severity,
         "method": row.method,
         "baseline_n": row.baseline_n,
+        "details": row.details,
         "detected_at": _iso_utc(row.detected_at),
     }
 

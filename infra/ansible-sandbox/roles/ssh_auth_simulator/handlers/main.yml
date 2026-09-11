@@ -1,0 +1,6 @@
+---
+- name: Restart ssh auth simulator
+  ansible.builtin.systemd:
+    name: ssh-auth-simulator
+    state: restarted
+    daemon_reload: true

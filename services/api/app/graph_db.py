@@ -348,3 +348,49 @@ def fetch_networks() -> list[dict]:
             }
             for record in records
         ]
+
+
+def fetch_network_anomalies() -> dict:
+    """Return the unhealthy router, floating IP, and port graph entries."""
+    with driver.session() as session:
+        routers_down = session.run(
+            """
+            MATCH (r:Router)
+            WHERE r.status IS NOT NULL AND r.status <> 'ACTIVE'
+            RETURN properties(r) AS router
+            ORDER BY r.id
+            """
+        )
+        floating_ips_orphaned = session.run(
+            """
+            MATCH (f:FloatingIP)
+            WHERE NOT (f)-[:CONNECTS]->(:Router)
+            RETURN properties(f) AS fip
+            ORDER BY f.id
+            """
+        )
+        ports_down = session.run(
+            """
+            MATCH (p:Port)
+            WHERE p.status IS NOT NULL AND p.status <> 'ACTIVE'
+            OPTIONAL MATCH (p)-[:CONNECTS]->(net:Network)
+            OPTIONAL MATCH (p)-[:ATTACHED_TO]->(device)
+            RETURN properties(p) AS port,
+                   properties(net) AS network,
+                   properties(device) AS device
+            ORDER BY p.id
+            """
+        )
+
+        return {
+            "routers_down": [_serialize(record["router"]) for record in routers_down],
+            "floating_ips_orphaned": [_serialize(record["fip"]) for record in floating_ips_orphaned],
+            "ports_down": [
+                {
+                    **_serialize(record["port"]),
+                    "network": _serialize(record["network"]) if record["network"] else None,
+                    "device": _serialize(record["device"]) if record["device"] else None,
+                }
+                for record in ports_down
+            ],
+        }

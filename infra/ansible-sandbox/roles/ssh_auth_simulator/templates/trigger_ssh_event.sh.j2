@@ -1,0 +1,61 @@
+#!/bin/bash
+# Cortex sandbox SSH auth simulator -- manual trigger. SANDBOX ONLY.
+#
+# Fires an immediate, deterministic burst of auth log lines, independent
+# of the background daemon's random schedule -- use this when you need a
+# specific test outcome right now instead of waiting on chance.
+#
+# Usage (run on the sim host, e.g. via `ansible <host> -b -m command -a
+# "/usr/local/bin/trigger_ssh_event.sh <kind> <count>"`):
+#
+#   trigger_ssh_event.sh failed 3    # below the "warning" floor (5) -- should NOT alert
+#   trigger_ssh_event.sh failed 6    # crosses the "warning" floor
+#   trigger_ssh_event.sh failed 16   # crosses the "critical" floor (matches
+#                                     # anomaly_detector._severity_for_ssh_failed_count)
+#   trigger_ssh_event.sh failed 35   # comfortably past both floors
+#   trigger_ssh_event.sh accepted 20 # spike in successful logins -- exercises
+#                                     # the ssh_successful_logins_5min baseline
+#                                     # path (story 3.8's odd-hour/unusual-
+#                                     # volume signal is *this*: a count far
+#                                     # above what's normal for the current
+#                                     # (weekday, hour) baseline slot, not a
+#                                     # literal clock-time check -- run this
+#                                     # against a host with an established
+#                                     # quiet baseline to see it fire)
+{% raw %}
+set -euo pipefail
+
+KIND="${1:-failed}"
+COUNT="${2:-20}"
+{% endraw %}
+LOG_PATH="{{ ssh_auth_log_path }}"
+HOSTNAME_LABEL="{{ inventory_hostname }}"
+ATTACKER_IPS=({{ ssh_auth_attacker_ips | join(' ') }})
+OPERATOR_IPS=({{ ssh_auth_operator_ips | join(' ') }})
+INVALID_USERS=({{ ssh_auth_usernames_invalid | join(' ') }})
+OPERATOR_USERS=({{ ssh_auth_operator_users | join(' ') }})
+{% raw %}
+mkdir -p "$(dirname "$LOG_PATH")"
+touch "$LOG_PATH"
+
+log_line() {
+  local ts
+  ts=$(date -u +"%b %e %H:%M:%S")
+  echo "${ts} ${HOSTNAME_LABEL} sshd[$((RANDOM % 30000 + 1000))]: $1" >> "$LOG_PATH"
+}
+
+for _ in $(seq 1 "$COUNT"); do
+  if [[ "$KIND" == "accepted" ]]; then
+    ip=${OPERATOR_IPS[$((RANDOM % ${#OPERATOR_IPS[@]}))]}
+    user=${OPERATOR_USERS[$((RANDOM % ${#OPERATOR_USERS[@]}))]}
+    log_line "Accepted password for ${user} from ${ip} port $((RANDOM % 40000 + 1024)) ssh2"
+  else
+    ip=${ATTACKER_IPS[$((RANDOM % ${#ATTACKER_IPS[@]}))]}
+    user=${INVALID_USERS[$((RANDOM % ${#INVALID_USERS[@]}))]}
+    log_line "Failed password for invalid user ${user} from ${ip} port $((RANDOM % 40000 + 1024)) ssh2"
+  fi
+  sleep 0.1
+done
+
+echo "Wrote ${COUNT} '${KIND}' line(s) to ${LOG_PATH} on ${HOSTNAME_LABEL}."
+{% endraw %}

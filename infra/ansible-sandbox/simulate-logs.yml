@@ -1,16 +1,31 @@
 ---
-# SANDBOX ONLY. Deploys a background generator on every logging_agents host
-# that continuously writes fake log lines into the same /var/log/kolla/<service>/
-# paths Promtail already scrapes for that host's role, so the log pipeline
-# has real per-service traffic to exchange without real OpenStack services
-# running. Deliberately kept out of site.yml so it's never run against
-# real infra by accident.
+# SANDBOX ONLY. Deploys background generators on every logging_agents host:
+# one writing fake per-service lines into the same /var/log/kolla/<service>/
+# paths Promtail already scrapes (log_simulator), and one writing fake but
+# sshd-format-accurate auth lines into the path Promtail's ssh_auth job
+# scrapes (ssh_auth_simulator, story 3.4) -- so both the general log
+# pipeline and auth_log_metrics.py's Loki queries have real matching
+# traffic without real OpenStack services or real SSH brute-force attempts
+# needed. Deliberately kept out of site.yml so it's never run against real
+# infra by accident.
 #
 # Run:   ansible-playbook simulate-logs.yml
 # Stop:  ansible logging_agents -b -m systemd -a "name=log-simulator state=stopped"
+#        ansible logging_agents -b -m systemd -a "name=ssh-auth-simulator state=stopped"
+#
+# For a deterministic SSH auth test instead of waiting on the ssh_auth_simulator's
+# background randomness, use the trigger script it deploys alongside itself:
+#   ansible <host> -b -m command -a "/usr/local/bin/trigger_ssh_event.sh failed 16"
+#   ansible <host> -b -m command -a "/usr/local/bin/trigger_ssh_event.sh accepted 20"
 
 - name: Deploy fake per-service log generator
   hosts: logging_agents
   become: true
   roles:
     - log_simulator
+
+- name: Deploy fake SSH auth log generator (story 3.4 testing)
+  hosts: logging_agents
+  become: true
+  roles:
+    - ssh_auth_simulator
