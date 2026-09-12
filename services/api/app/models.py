@@ -486,6 +486,39 @@ class AgentSessionMemory(Base):
     )
 
 
+class SecurityGroupSnapshot(Base):
+    """Phase Sec-1: one row per (hostname, security_group_id) captured at
+    `captured_at` -- the actual "did this change since we last looked"
+    memory `_check_sec_group_diff` (agents/nodes/security.py) needs and
+    didn't have before. Same shape family as `Baseline`/`RoleBaseline`
+    (keyed columns + a captured/updated timestamp + a serialized payload),
+    but append-only like `TopologySyncRun` rather than upserted in place --
+    a diff needs the *previous* state to still exist after the current one
+    is captured, so overwriting a row in place the way Baseline does would
+    destroy the exact thing this table exists to keep.
+
+    `rules` is the same list-of-dicts shape `security_audit._rule_to_dict`
+    already produces (id, security_group_id, direction, ethertype,
+    protocol, port_range_min/max, remote_ip_prefix) -- stored verbatim
+    rather than normalized into their own columns/table, since nothing
+    reads a single rule field independently of its group; the whole
+    rule-set is always read and diffed together.
+
+    Not unique-constrained on (hostname, security_group_id): a fresh row
+    is written every snapshot pass on purpose (see
+    security_snapshot_builder.py), and `crud.get_latest_security_group_snapshots`
+    is what picks the newest one per group back out.
+    """
+    __tablename__ = "security_group_snapshots"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hostname = Column(String, nullable=False, index=True)
+    security_group_id = Column(String, nullable=False, index=True)
+    security_group_name = Column(String, nullable=True)
+    rules = Column(JSON, nullable=False)
+    captured_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
 class RoleBaseline(Base):
     """Baseline statistics grouped by node role instead of hostname."""
     __tablename__ = "role_baselines"

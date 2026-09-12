@@ -11,6 +11,7 @@ from ..auth import get_current_user
 from ..db import get_db
 from ..agents.graph import app_graph
 from ..agents.trace import new_trace_id
+from ..services import security_rbac
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -18,139 +19,18 @@ router = APIRouter(
     tags=["agents"],
 )
 
-_SECURITY_SUB_SIGNAL_KEYS = ("auth_signal", "sec_group_signal", "cve_signal", "ebpf_signal")
-_RESTRICTED_NOTICE = (
-    "This turn's finding involved the Security Agent (auth activity, security-group rules, "
-    "known-vulnerable packages, or kernel-level alerts). Those specifics are restricted to admin "
-    "accounts -- ask an admin to review this trace, or sign in with an admin account to see the "
-    "full finding."
-)
-
-
-def _security_agent_involved(agent_used: str, raw_data: dict | None) -> bool:
-    """True if the Security Agent contributed *any* finding this turn --
-    as the direct answer (`agent_used == "security"`), as arbitration's
-    chosen primary theory for a cross-agent incident
-    (`raw_data["investigating_agent"]`), or merely as one of several
-    corroborating/competing findings arbitration reported alongside
-    another agent's primary theory (`cross_agent_findings`/
-    `multi_node_findings`, see nodes/anomaly.py's `anomaly_arbitrate`).
-    That last case matters just as much as the first two: the
-    cross-agent narrative an LLM writes from *all* contributing findings
-    (see anomaly.py's `_ARBITRATION_SYSTEM_PROMPT`, which explicitly asks
-    it to name specifics from every agent that fired) can surface a CVE
-    ID or an eBPF alert's output line in prose even when Security wasn't
-    the winning theory -- so "involved at all", not just "was primary",
-    is the right question for whether this response needs filtering.
-    """
-    if agent_used == "security":
-        return True
-    raw_data = raw_data or {}
-    if raw_data.get("investigating_agent") == "security":
-        return True
-    for key in ("cross_agent_findings", "multi_node_findings"):
-        if any(f.get("agent") == "security" for f in raw_data.get(key) or []):
-            return True
-    return False
-
-
-def _redact_security_raw_data(raw_data: dict | None) -> dict | None:
-    """Strips this turn's raw_data down to what's safe for a non-admin:
-    booleans and hostnames survive (a viewer can still see "something was
-    flagged on compute-02"), but the specific evidence -- which CVE,
-    which security-group rule, which eBPF alert line, which auth-log
-    entry -- does not, since (per nodes/security.py's module docstring)
-    that's each individually exploitable, not just informative. Only
-    Security's own sub-signals and Security's own entries in a
-    cross-agent breakdown are touched; another agent's (Network's,
-    Anomaly's) own findings in the same raw_data are left exactly as they
-    were, since those aren't the sensitive part of this turn."""
-    if raw_data is None:
-        return None
-    redacted = dict(raw_data)
-
-    for key in _SECURITY_SUB_SIGNAL_KEYS:
-        signal = redacted.get(key)
-        if isinstance(signal, dict):
-            redacted[key] = {"has_signal": signal.get("has_signal"), "degraded": signal.get("degraded"), "restricted": True}
-
-    for key in ("cross_agent_findings", "multi_node_findings"):
-        entries = redacted.get(key)
-        if not entries:
-            continue
-        redacted[key] = [
-            {"hostname": f.get("hostname"), "agent": f.get("agent"), "has_signal": f.get("has_signal"), "restricted": True}
-            if f.get("agent") == "security" else f
-            for f in entries
-        ]
-
-    return redacted
-
-
-def _filter_security_response_for_role(answer: str, raw_data: dict | None, agent_used: str, role: str) -> tuple[str, dict | None]:
-    """Applied once, right before the orchestrate response is built (and
-    reused by GET /trace/{trace_id} for the same trace later -- otherwise
-    a viewer could trivially bypass this by fetching the trace_id
-    orchestrate handed them instead of reading the filtered response).
-
-    Admins always get the full answer/raw_data -- see auth.py's
-    User.role, "admin" | "viewer". A non-admin gets a generic redaction
-    notice in place of the prose answer (the free-form arbitration/
-    narration text can name specifics for any agent that contributed, not
-    just the primary one, so partial prose-scrubbing isn't safe -- see
-    `_security_agent_involved`'s own docstring) and a raw_data with only
-    Security's own fields stripped down to booleans (`_redact_security_raw_data`).
-    """
-    if role == "admin" or not _security_agent_involved(agent_used, raw_data):
-        return answer, raw_data
-    return _RESTRICTED_NOTICE, _redact_security_raw_data(raw_data)
-
-
-def _filter_security_response_for_role(answer: str, raw_data: dict | None, agent_used: str, role: str) -> tuple[str, dict | None]:
-    """Applied once, right before the orchestrate response is built (and
-    reused by GET /trace/{trace_id} for the same trace later -- otherwise
-    a viewer could trivially bypass this by fetching the trace_id
-    orchestrate handed them instead of reading the filtered response).
-
-    Admins always get the full answer/raw_data -- see auth.py's
-    User.role, "admin" | "viewer". A non-admin gets a generic redaction
-    notice in place of the prose answer (the free-form arbitration/
-    narration text can name specifics for any agent that contributed, not
-    just the primary one, so partial prose-scrubbing isn't safe -- see
-    `_security_agent_involved`'s own docstring) and a raw_data with only
-    Security's own fields stripped down to booleans (`_redact_security_raw_data`).
-    """
-    if role == "admin" or not _security_agent_involved(agent_used, raw_data):
-        return answer, raw_data
-    return _RESTRICTED_NOTICE, _redact_security_raw_data(raw_data)
-
-
-def _filter_security_steps_for_role(steps: list[dict], involved: bool, role: str) -> list[dict]:
-    """Same rule as `_filter_security_response_for_role`, applied per-step
-    to the trace timeline. Only two step *names* can ever carry Security
-    specifics: "security" itself (the standalone leaf agent, see
-    nodes/security.py) and "anomaly" (the cross-agent arbitration join
-    node, see nodes/anomaly.py's `anomaly_arbitrate` -- its own narrative
-    can name a CVE/eBPF alert from a *corroborating* Security finding even
-    when Security wasn't the winning theory). Every other step name
-    (router/monitoring/network/openstack_expert/critic/compose) is
-    structurally incapable of repeating Security's own findings, so
-    `involved` -- this turn's already-computed top-level answer/raw_data
-    involvement flag, see `_security_agent_involved` -- is reused directly
-    rather than re-deriving it per step."""
-    if role == "admin" or not involved:
-        return steps
-
-    filtered = []
-    for step in steps:
-        if step.get("node") not in ("security", "anomaly"):
-            filtered.append(step)
-            continue
-        new_detail = dict(step.get("detail") or {})
-        new_detail["summary"] = _RESTRICTED_NOTICE
-        new_detail.pop("chained_from", None)
-        filtered.append({**step, "detail": new_detail})
-    return filtered
+# v0.9's RBAC output filtering moved to services/security_rbac.py in
+# Phase Sec-2, so routers/security.py's dashboard endpoints can call the
+# exact same functions instead of keeping a second copy that could drift
+# out of sync (see that module's own docstring). These names are kept as
+# thin aliases -- not re-implementations -- purely so this router's own
+# call sites below and any existing imports of this module's private
+# names don't need to change.
+_RESTRICTED_NOTICE = security_rbac.RESTRICTED_NOTICE
+_security_agent_involved = security_rbac.security_agent_involved
+_redact_security_raw_data = security_rbac.redact_security_raw_data
+_filter_security_response_for_role = security_rbac.filter_security_response_for_role
+_filter_security_steps_for_role = security_rbac.filter_security_steps_for_role
 
 
 @router.post("/orchestrate", response_model=schemas.AgentOrchestrateResponse)

@@ -30,6 +30,14 @@ services:
       # Faster than the 300s production default, so a manual "Check now"
       # (or just waiting a bit) shows a result quickly during local testing.
       QUOTA_BUDGET_CHECK_INTERVAL_SECONDS: '60'
+      # Same reasoning, for Phase Sec-1's security-group snapshot job
+      # (services/security_snapshot_builder.py): 90s instead of the 900s
+      # production default, so injecting a rule change via openstack-sim's
+      # /_sandbox/security-group-rule/add|remove and then asking the
+      # Security Agent shows up as real drift within a couple of polls
+      # instead of a 15-minute wait. Use scripts/run_security_snapshot.py
+      # for an on-demand pass instead of waiting even that long.
+      SECURITY_SNAPSHOT_INTERVAL_SECONDS: '90'
 
     volumes:
       - ../ansible-sandbox:/infra/ansible-sandbox

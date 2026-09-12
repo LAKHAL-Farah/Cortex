@@ -17,6 +17,7 @@ import {
   Bot,
   Workflow,
   ShieldCheck,
+  ShieldAlert,
   Settings2,
   LifeBuoy,
   LogOut,
@@ -46,6 +47,7 @@ const NAV_SECTIONS = [
     ],
   },
   { title: "AI Copilot", href: "/copilot", icon: Bot },
+  { title: "Security", href: "/security", icon: ShieldAlert },
   { title: "Operations", href: "/operations", icon: Workflow },
   { title: "Administration", href: "/admin", icon: ShieldCheck },
 ];

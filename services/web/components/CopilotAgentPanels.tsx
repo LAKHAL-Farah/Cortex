@@ -796,7 +796,7 @@ function NetworkPanel({ data }: { data: AgentNetworkData }) {
 // render fields the backend never sent.
 // ---------------------------------------------------------------------------
 
-function SecuritySignalRow({
+export function SecuritySignalRow({
   icon: Icon,
   label,
   signal,
@@ -846,7 +846,7 @@ function SecuritySignalRow({
   );
 }
 
-function SecurityPanel({ data }: { data: AgentSecurityData }) {
+export function SecurityPanel({ data }: { data: AgentSecurityData }) {
   const anyRestricted = [data.auth_signal, data.sec_group_signal, data.cve_signal, data.ebpf_signal].some((s) => s.restricted);
 
   return (
@@ -873,6 +873,20 @@ function SecurityPanel({ data }: { data: AgentSecurityData }) {
               {data.sec_group_signal.risky_rules!.slice(0, 3).map((r, i) => (
                 <li key={i} className="text-[11px]" style={{ color: "var(--crit)" }}>
                   {r.security_group}: {r.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          {/* Phase Sec-1: drift since the last stored snapshot, kept
+             visually distinct (warn, not crit) from risky_rules above --
+             a rule change isn't automatically a risk, it's a fact worth
+             noticing on its own. */}
+          {(data.sec_group_signal.drift?.length ?? 0) > 0 && (
+            <ul className="flex flex-col gap-0.5">
+              {data.sec_group_signal.drift!.slice(0, 3).map((d, i) => (
+                <li key={i} className="text-[11px]" style={{ color: "var(--warn)" }}>
+                  {d.security_group}: +{d.added_rules.length}/-{d.removed_rules.length} rule(s) since{" "}
+                  {new Date(d.previous_captured_at).toLocaleString()}
                 </li>
               ))}
             </ul>

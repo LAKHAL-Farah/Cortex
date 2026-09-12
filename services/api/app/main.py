@@ -20,12 +20,14 @@ from .routers import conversations
 from .routers import settings
 from .routers import quotas
 from .routers import agents
+from .routers import security
 from .routers import auth as auth_router
 from .auth import get_current_user, hash_password
 from . import models
 from .services.anomaly_detector import detect_anomalies
 from .services.quota_budget_monitor import check_quota_and_budget
 from .services.baseline_builder import compute_baselines
+from .services.security_snapshot_builder import capture_security_group_snapshots
 from .services.node_seeder import seed_nodes_from_file_sd
 from .services.forecast_dataset_builder import build_dataset
 from .routers import forecast
@@ -43,6 +45,19 @@ ANOMALY_DETECTION_INTERVAL_SECONDS = int(os.getenv("ANOMALY_DETECTION_INTERVAL_S
 # history. Hourly is plenty -- a single slot's stats don't meaningfully change
 # faster than that, and it keeps the range-query load on Prometheus low.
 BASELINE_REFRESH_INTERVAL_SECONDS = int(os.getenv("BASELINE_REFRESH_INTERVAL_SECONDS", "3600"))
+# How often security_snapshot_builder.capture_security_group_snapshots()
+# re-captures every known node's security groups into
+# `security_group_snapshots` (Phase Sec-1). Deliberately its own interval
+# rather than reusing TOPOLOGY_SYNC_INTERVAL_SECONDS or
+# BASELINE_REFRESH_INTERVAL_SECONDS -- it's neither the Nova/Cinder/
+# Neutron structural sync topology_sync.py owns (adr-0002's "one and only
+# OpenStack polling loop" is about that one job, not every OpenStack read
+# in this codebase, the same exception security_audit.py's own module
+# docstring already carves out) nor a Prometheus-history rebuild. Default
+# well under an hour: unlike a (weekday, hour) baseline slot, a security-
+# group rule can change at any moment and the whole point of this phase is
+# to notice that promptly.
+SECURITY_SNAPSHOT_INTERVAL_SECONDS = int(os.getenv("SECURITY_SNAPSHOT_INTERVAL_SECONDS", "900"))
 
 # How often the forecasting dataset (cpu/memory/disk history CSV) is rebuilt
 # from Prometheus. build_dataset() is incremental (it only fetches since the
@@ -263,6 +278,11 @@ async def lifespan(app: FastAPI):
             _run_periodic(compute_baselines, BASELINE_REFRESH_INTERVAL_SECONDS, "baseline refresh")
         ),
         asyncio.create_task(
+            _run_periodic(
+                capture_security_group_snapshots, SECURITY_SNAPSHOT_INTERVAL_SECONDS, "security-group snapshot"
+            )
+        ),
+        asyncio.create_task(
             _run_periodic_no_db(build_dataset, FORECAST_DATASET_REFRESH_INTERVAL_SECONDS, "forecast dataset build")
         ),
         asyncio.create_task(
@@ -333,6 +353,12 @@ app.include_router(knowledge.router, dependencies=_auth_required)
 # poll on a schedule.
 app.include_router(conversations.router, dependencies=_auth_required)
 app.include_router(agents.router, dependencies=_auth_required)
+# Phase Sec-2: direct, pollable GET endpoints for the Security Agent's
+# findings, the same shape network.router gives the Network agent's data
+# -- see routers/security.py's module docstring for why this doesn't
+# re-implement agents.router's RBAC redaction (services/security_rbac.py
+# is the shared helper both routers call).
+app.include_router(security.router, dependencies=_auth_required)
 app.include_router(settings.router, dependencies=_auth_required)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 

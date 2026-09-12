@@ -26,6 +26,31 @@ def get_node_by_hostname(db: Session, hostname: str) -> models.Node | None:
     return db.scalar(select(models.Node).where(models.Node.hostname == hostname))
 
 
+def get_latest_security_group_snapshots(db: Session, hostname: str) -> dict[str, "models.SecurityGroupSnapshot"]:
+    """Latest `security_group_snapshots` row per security_group_id for one
+    hostname -- what `_check_sec_group_diff` (agents/nodes/security.py,
+    Phase Sec-1) diffs the live Neutron read against.
+
+    Plain "fetch every row for this hostname, order by captured_at desc,
+    keep the first per group" done in Python rather than a window-function/
+    DISTINCT ON query: the snapshot job runs at most a few times an hour
+    (see main.py's SECURITY_SNAPSHOT_INTERVAL_SECONDS) and a host rarely
+    has more than a handful of security groups, so this stays cheap --
+    same simplicity-over-cleverness tradeoff baseline_builder.py already
+    makes elsewhere in this codebase.
+    """
+    rows = (
+        db.query(models.SecurityGroupSnapshot)
+        .filter_by(hostname=hostname)
+        .order_by(models.SecurityGroupSnapshot.captured_at.desc())
+        .all()
+    )
+    latest: dict[str, models.SecurityGroupSnapshot] = {}
+    for row in rows:
+        latest.setdefault(row.security_group_id, row)
+    return latest
+
+
 def list_open_anomaly_flags(db: Session, hostname: str) -> list[models.AnomalyFlag]:
     """Currently-open (non-"normal") AnomalyFlag rows for one host.
 

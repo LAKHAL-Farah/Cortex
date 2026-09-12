@@ -731,8 +731,23 @@ export interface AgentSecGroupRule {
   };
 }
 
+export interface AgentSecGroupDriftEntry {
+  security_group: string;
+  security_group_id: string;
+  previous_captured_at: string;
+  added_rules: AgentSecGroupRule["rule"][];
+  removed_rules: AgentSecGroupRule["rule"][];
+}
+
 export interface AgentSecGroupSignal extends AgentSecuritySignal {
   risky_rules?: AgentSecGroupRule[];
+  // Phase Sec-1: this pass's live rules diffed against the most recent
+  // stored security_group_snapshots row -- present alongside risky_rules
+  // (a rule can show up here even when it isn't risky by the static
+  // baseline, e.g. a newly-opened internal-only port). Optional for the
+  // same reason every other evidence field here is: a viewer account
+  // never receives it (see AgentSecuritySignal's own docstring).
+  drift?: AgentSecGroupDriftEntry[];
 }
 
 export interface AgentCveMatch {
@@ -767,6 +782,30 @@ export interface AgentSecurityData extends CrossAgentArbitrationFields {
   sec_group_signal: AgentSecGroupSignal;
   cve_signal: AgentCveSignal;
   ebpf_signal: AgentEbpfSignal;
+}
+
+// Phase Sec-2 (routers/security.py) -- the shape GET /api/v1/security/
+// findings and /findings/{hostname} return: the same AgentSecurityData
+// raw_data + confidence a chat answer would carry for this host, just
+// without the LLM-narrated `summary` (routers/security.py calls
+// `_investigate(..., narrate=False)`, so `answer` is nodes/security.py's
+// own deterministic fallback sentence, or the shared RESTRICTED_NOTICE
+// for a non-admin -- see services/security_rbac.py).
+export interface SecurityFinding {
+  hostname: string;
+  role: string;
+  confidence: number | null;
+  has_signal: boolean;
+  degraded: boolean;
+  answer: string;
+  raw_data: AgentSecurityData;
+}
+
+export interface SecurityStatus {
+  status: "ok" | "degraded";
+  has_signal: boolean;
+  degraded: boolean;
+  node_count: number;
 }
 
 export type AgentRawData =

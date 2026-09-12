@@ -20,10 +20,15 @@ which alone is conclusive:
    succeeded. See _CONFIDENCE_BY_SIGNAL for exactly how this is weighted
    below eBPF/sec-group/CVE.
 2. `_check_sec_group_diff` -- Neutron security-group rules attached to
-   this host's instances, audited against a built-in "overly permissive"
-   baseline (services/security_audit.py) -- a world-open SSH/RDP/database
-   port, or an all-protocols-all-ports rule. This is *configuration*
-   evidence: it says the door is open, not that anyone walked through it.
+   this host's instances, audited two ways: against a built-in "overly
+   permissive" baseline (services/security_audit.py's `_risk_reason`) --
+   a world-open SSH/RDP/database port, or an all-protocols-all-ports
+   rule -- and (Phase Sec-1) against the most recently stored
+   `security_group_snapshots` row for this host, surfacing anything that
+   changed since that snapshot even if the new state isn't itself risky
+   enough to trip the static baseline (e.g. a newly-opened internal-only
+   port). Both are *configuration* evidence: they say the door is open,
+   or that a door moved, not that anyone walked through it.
 3. `_check_cve_match` -- this host's installed package versions
    (services/cve_feed.py) matched against a small embedded CVE reference
    table. Also configuration evidence (a known-vulnerable version is
@@ -69,6 +74,8 @@ import time
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from ... import crud
+from ...db import SessionLocal
 from ...services import cve_feed, ebpf_signal, loki_client, security_audit
 from ...services.llm_client import LLMConfigError, get_chat_model
 from ..node_resolver import resolve_node
@@ -155,6 +162,35 @@ def _check_auth_anomaly(node: KnownNode) -> dict:
 # Sub-check 2: sec-group-diff (Neutron)
 # --------------------------------------------------------------------
 
+def _diff_against_last_snapshot(hostname: str, current_groups: list[dict]) -> list[dict]:
+    """Opens its own short-lived DB session to read the most recent
+    `security_group_snapshots` rows for this host (Phase Sec-1) and diffs
+    them against this pass's live groups -- same "own session, not
+    threaded through graph state" pattern nodes/anomaly.py's
+    `_metric_signal_from_flags` already uses, for the same reason: graph
+    state has to stay JSON-serializable (see state.py's module docstring),
+    so a live Session can never be part of it.
+
+    Best-effort: a Postgres hiccup here degrades to "no drift detected"
+    for this pass rather than failing the whole sec-group-diff sub-check
+    -- the static risk read above doesn't depend on Postgres at all, so
+    there's no reason to take it down over the snapshot-history read
+    failing.
+    """
+    db = SessionLocal()
+    try:
+        previous_by_sg_id = crud.get_latest_security_group_snapshots(db, hostname)
+    except Exception:
+        logger.exception("security_agent: sec-group snapshot read failed for %s", hostname)
+        return []
+    finally:
+        db.close()
+
+    if not previous_by_sg_id:
+        return []
+    return security_audit.diff_security_groups(current_groups, previous_by_sg_id)
+
+
 def _check_sec_group_diff(node: KnownNode) -> dict:
     breaker = get_breaker("security.neutron", timeout_seconds=10.0, max_retries=1, failure_threshold=2)
     call_result = breaker.call(security_audit.get_node_security_groups, node["hostname"])
@@ -171,20 +207,43 @@ def _check_sec_group_diff(node: KnownNode) -> dict:
             ),
             "data": None,
             "risky_rules": [],
+            "drift": [],
         }
 
     data = call_result.value
     risky = data["risky_rules"]
+    drift = _diff_against_last_snapshot(node["hostname"], data["security_groups"])
+
+    detail_parts = []
     if risky:
         reasons = "; ".join(r["reason"] for r in risky)
-        detail = f"{len(risky)} overly-permissive security-group rule(s) on {node['hostname']}: {reasons}."
-        return {"has_signal": True, "degraded": False, "detail": detail, "data": data, "risky_rules": risky}
+        detail_parts.append(f"{len(risky)} overly-permissive security-group rule(s) on {node['hostname']}: {reasons}.")
+    if drift:
+        drift_summary = "; ".join(
+            f"{d['security_group']} changed since {d['previous_captured_at']} "
+            f"(+{len(d['added_rules'])}/-{len(d['removed_rules'])} rule(s))"
+            for d in drift
+        )
+        detail_parts.append(f"Security-group drift on {node['hostname']} since the last snapshot: {drift_summary}.")
 
-    if not data["security_groups"]:
-        detail = f"No security groups attached to any instance on {node['hostname']}."
-    else:
-        detail = f"{len(data['security_groups'])} security group(s) checked on {node['hostname']}, no overly-permissive ingress rules found."
-    return {"has_signal": False, "degraded": False, "detail": detail, "data": data, "risky_rules": []}
+    if not detail_parts:
+        if not data["security_groups"]:
+            detail_parts.append(f"No security groups attached to any instance on {node['hostname']}.")
+        else:
+            detail_parts.append(
+                f"{len(data['security_groups'])} security group(s) checked on {node['hostname']}, "
+                "no overly-permissive ingress rules and no drift since the last snapshot."
+            )
+
+    has_signal = bool(risky) or bool(drift)
+    return {
+        "has_signal": has_signal,
+        "degraded": False,
+        "detail": " ".join(detail_parts),
+        "data": data,
+        "risky_rules": risky,
+        "drift": drift,
+    }
 
 
 # --------------------------------------------------------------------
@@ -338,19 +397,28 @@ def _narrate(query: str, node: KnownNode, auth: dict, sec_group: dict, cve: dict
         return fallback
 
 
-def _investigate(query: str, node: KnownNode) -> tuple[AgentResult, list]:
+def _investigate(query: str, node: KnownNode, narrate: bool = True) -> tuple[AgentResult, list]:
     """Runs all four sub-checks and returns (AgentResult, embedded_failures)
     without touching any graph state -- mirrors anomaly.py's `_investigate`
     exactly, for the same reason: both the standalone leaf path
     (security_agent) and the fan-out Send target
     (security_investigate_one) need it, kept in one place so they can't
-    drift apart."""
+    drift apart.
+
+    `narrate=False` (routers/security.py's Phase Sec-2 dashboard
+    endpoints) skips the LLM call and uses `_fallback_summary` directly --
+    a panel a dashboard polls every few seconds for every known node
+    shouldn't pay an LLM invocation per host per poll just to restate the
+    same four sub-checks in prose; the fallback sentence is the real
+    evidence, which is all a panel needs. The chat path (security_agent,
+    security_investigate_one below) always narrates, unchanged.
+    """
     auth = _check_auth_anomaly(node)
     sec_group = _check_sec_group_diff(node)
     cve = _check_cve_match(node)
     ebpf = _check_ebpf_signal(node)
 
-    summary = _narrate(query, node, auth, sec_group, cve, ebpf)
+    summary = _narrate(query, node, auth, sec_group, cve, ebpf) if narrate else _fallback_summary(node, auth, sec_group, cve, ebpf)
     confidence = _confidence(auth, sec_group, cve, ebpf)
     has_signal = any(s["has_signal"] for s in (auth, sec_group, cve, ebpf))
 

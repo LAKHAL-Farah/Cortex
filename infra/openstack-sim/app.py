@@ -249,6 +249,11 @@ PORTS = [
         "network_id": NETWORKS[0]["id"],
         "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.101"}],
         "tenant_id": "sandbox-project",
+        # Phase Sec-1/Sec-2: this port carries the "default" security group
+        # (SECURITY_GROUPS below) -- what security_audit.get_node_security_groups
+        # and security_snapshot_builder.py's periodic pass both key off of
+        # (openstacksdk's port.security_group_ids).
+        "security_group_ids": ["8f3f0f4a-0000-0000-0000-0000000000e1"],
     },
     {
         "id": "8f3f0f4a-0000-0000-0000-000000000052",
@@ -261,6 +266,7 @@ PORTS = [
         "network_id": NETWORKS[0]["id"],
         "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.102"}],
         "tenant_id": "sandbox-project",
+        "security_group_ids": ["8f3f0f4a-0000-0000-0000-0000000000e1"],
     },
     {
         # The broken pairing: sandbox-vm-3-broken's port is DOWN and
@@ -276,6 +282,7 @@ PORTS = [
         "network_id": NETWORKS[0]["id"],
         "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.103"}],
         "tenant_id": "sandbox-project",
+        "security_group_ids": ["8f3f0f4a-0000-0000-0000-0000000000e1"],
     },
     {
         # sandbox-router's internal interface onto sandbox-net's subnet --
@@ -295,6 +302,56 @@ PORTS = [
         "network_id": NETWORKS[0]["id"],
         "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.1"}],
         "tenant_id": "sandbox-project",
+    },
+]
+
+# Phase Sec-1/Sec-2 seed data: one security group ("default", attached to
+# both healthy sandbox VMs above) with a real world-open SSH rule --
+# security_audit._risk_reason flags this immediately (a genuine "does
+# this look risky right now" hit against the sim, not a mocked fixture),
+# and security_snapshot_builder.py's periodic pass gives
+# `_check_sec_group_diff` a real snapshot to diff future changes against.
+# `/_sandbox/security-group-rule/add` and `/remove` below let a test (or
+# a person poking at the sandbox) actually mutate this list on demand to
+# exercise the Sec-1 drift path end to end -- add a rule, wait for the
+# next snapshot pass (or trigger one via run_security_snapshot.py), ask
+# the Security Agent again, see the diff.
+SECURITY_GROUPS = [
+    {
+        "id": "8f3f0f4a-0000-0000-0000-0000000000e1",
+        "name": "default",
+        "description": "Default security group for the sandbox project",
+        "project_id": "sandbox-project",
+    },
+]
+
+SECURITY_GROUP_RULES = [
+    {
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f1",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e1",
+        "direction": "ingress",
+        "ethertype": "IPv4",
+        "protocol": "tcp",
+        "port_range_min": 22,
+        "port_range_max": 22,
+        # World-open SSH -- security_audit._risk_reason's textbook case,
+        # seeded on purpose so a fresh sandbox always has one real
+        # "overly-permissive" finding to look at, the same way ROUTERS/
+        # SERVERS above always have one real broken/degraded case.
+        "remote_ip_prefix": "0.0.0.0/0",
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f2",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e1",
+        "direction": "egress",
+        "ethertype": "IPv4",
+        "protocol": None,
+        "port_range_min": None,
+        "port_range_max": None,
+        # Open egress is normal/expected (see security_audit._risk_reason's
+        # own "ingress-only" docstring note) -- kept here so the rule-set
+        # isn't unrealistically ingress-only.
+        "remote_ip_prefix": "0.0.0.0/0",
     },
 ]
 
@@ -588,6 +645,25 @@ def list_ports():
     return {"ports": [{**p, **_PORT_FAULTS.get(p["id"], {})} for p in PORTS]}
 
 
+@app.get("/v2.0/security-groups")
+def list_security_groups():
+    # openstacksdk's network.security_groups() -- security_audit.py's
+    # get_node_security_groups()/list_security_groups_by_hostname() both
+    # call this to resolve a security group's own name.
+    return {"security_groups": SECURITY_GROUPS}
+
+
+@app.get("/v2.0/security-group-rules")
+def list_security_group_rules():
+    # openstacksdk's network.security_group_rules() -- includes whatever
+    # /_sandbox/security-group-rule/add or /remove below has changed
+    # in-memory, so a security_snapshot_builder.py pass (or a fresh
+    # security_audit.get_node_security_groups() call) run after a fault
+    # injection sees the mutated rule-set, exactly like a real Neutron
+    # would after `openstack security group rule create/delete`.
+    return {"security_group_rules": list(_SECURITY_GROUP_RULES_LIVE.values())}
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
@@ -607,6 +683,41 @@ def healthz():
 _ROUTER_FAULTS: dict[str, dict] = {}
 _PORT_FAULTS: dict[str, dict] = {}
 _FLOATINGIP_FAULTS: dict[str, dict] = {}
+# Phase Sec-1/Sec-2 real-life drift scenario: a mutable copy of
+# SECURITY_GROUP_RULES that /_sandbox/security-group-rule/add and /remove
+# actually mutate, so a security_snapshot_builder.py pass taken before the
+# mutation and the Security Agent's live `_check_sec_group_diff` read
+# taken after it genuinely disagree -- the same "did this change since we
+# last looked" scenario Phase Sec-1 exists to catch, exercised against
+# real (if simulated) Neutron reads end to end rather than mocked fixtures.
+_SECURITY_GROUP_RULES_LIVE: dict[str, dict] = {r["id"]: dict(r) for r in SECURITY_GROUP_RULES}
+
+
+@app.post("/_sandbox/security-group-rule/add")
+def add_security_group_rule(body: dict):
+    """body: a full security-group-rule dict (id, security_group_id,
+    direction, ethertype, protocol, port_range_min/max, remote_ip_prefix)
+    -- same shape security_audit._rule_to_dict produces reading a real
+    one. `id` is required and must be unique; this sandbox has no
+    auto-generated-id convenience the way real Neutron's rule-create call
+    does, since tests/scripts driving this want a stable id to assert
+    against afterward.
+    """
+    rule_id = body.get("id")
+    if not rule_id:
+        return JSONResponse(status_code=400, content={"error": "body.id is required"})
+    _SECURITY_GROUP_RULES_LIVE[rule_id] = dict(body)
+    return {"security_group_rule": _SECURITY_GROUP_RULES_LIVE[rule_id]}
+
+
+@app.post("/_sandbox/security-group-rule/remove")
+def remove_security_group_rule(body: dict):
+    """body: {"id": "<rule-id>"} -- removes one rule from the live
+    rule-set, the other half of the Sec-1 drift scenario (a rule that
+    existed at the last snapshot and is now gone)."""
+    rule_id = body.get("id")
+    _SECURITY_GROUP_RULES_LIVE.pop(rule_id, None)
+    return {"removed": rule_id}
 
 
 @app.post("/_sandbox/fault/router/{router_id}")
@@ -637,8 +748,12 @@ def fault_floating_ip(fip_id: str, body: dict | None = None):
 @app.post("/_sandbox/fault/reset")
 def fault_reset():
     """Clears every override above, restoring all seed data to its healthy
-    default state."""
+    default state -- including the live security-group rule-set back to
+    SECURITY_GROUP_RULES's original seed (undoes any
+    /_sandbox/security-group-rule/add or /remove call)."""
     _ROUTER_FAULTS.clear()
     _PORT_FAULTS.clear()
     _FLOATINGIP_FAULTS.clear()
+    _SECURITY_GROUP_RULES_LIVE.clear()
+    _SECURITY_GROUP_RULES_LIVE.update({r["id"]: dict(r) for r in SECURITY_GROUP_RULES})
     return {"status": "reset"}
