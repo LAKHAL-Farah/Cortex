@@ -51,6 +51,80 @@ def get_latest_security_group_snapshots(db: Session, hostname: str) -> dict[str,
     return latest
 
 
+def record_security_scan_run(
+    db: Session,
+    *,
+    status: str,
+    started_at: datetime,
+    finished_at: datetime,
+    summary: dict | None = None,
+    error: str | None = None,
+) -> models.SecurityScanRun:
+    """Appends one row to `security_scan_runs` after every pass of
+    services/security_scan_cache.py's `run_security_scan` -- success or
+    failure -- so GET /api/v1/security/health has real run history to
+    answer from, the same reasoning record_topology_sync_run already
+    gives for the topology sync loop.
+    """
+    run = models.SecurityScanRun(
+        status=status, summary=summary, error=error, started_at=started_at, finished_at=finished_at,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def get_latest_security_scan_run(db: Session) -> models.SecurityScanRun | None:
+    return db.scalar(
+        select(models.SecurityScanRun).order_by(models.SecurityScanRun.finished_at.desc()).limit(1)
+    )
+
+
+def upsert_security_finding_cache(
+    db: Session,
+    *,
+    hostname: str,
+    role: str,
+    confidence: float | None,
+    has_signal: bool,
+    degraded: bool,
+    answer: str,
+    raw_data: dict,
+) -> models.SecurityFindingCache:
+    """Writes (or overwrites) the one cached finding row for `hostname` --
+    see models.SecurityFindingCache's docstring for why this is an upsert
+    rather than an append. Called once per known node per
+    run_security_scan pass, and once on-demand whenever a GET falls back
+    to a live check for a host with no cached row yet (a freshly-added
+    node the periodic pass hasn't reached).
+    """
+    row = db.get(models.SecurityFindingCache, hostname)
+    if row is None:
+        row = models.SecurityFindingCache(hostname=hostname)
+        db.add(row)
+    row.role = role
+    row.confidence = confidence
+    row.has_signal = has_signal
+    row.degraded = degraded
+    row.answer = answer
+    row.raw_data = raw_data
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def list_security_finding_cache(db: Session) -> list[models.SecurityFindingCache]:
+    return db.scalars(
+        select(models.SecurityFindingCache).order_by(models.SecurityFindingCache.hostname)
+    ).all()
+
+
+def get_security_finding_cache(db: Session, hostname: str) -> models.SecurityFindingCache | None:
+    return db.get(models.SecurityFindingCache, hostname)
+
+
 def list_open_anomaly_flags(db: Session, hostname: str) -> list[models.AnomalyFlag]:
     """Currently-open (non-"normal") AnomalyFlag rows for one host.
 

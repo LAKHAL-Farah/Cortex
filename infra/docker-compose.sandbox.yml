@@ -38,6 +38,22 @@ services:
       # instead of a 15-minute wait. Use scripts/run_security_snapshot.py
       # for an on-demand pass instead of waiting even that long.
       SECURITY_SNAPSHOT_INTERVAL_SECONDS: '90'
+      # Phase Sec-3: how often run_security_scan() refreshes
+      # security_finding_cache (services/security_scan_cache.py) -- what
+      # the /security and /security/security-groups pages actually poll.
+      # Faster than the 45s production default so the "Scanned Xm ago"
+      # badge and a fresh sandbox drift demo (POST /_sandbox/security-
+      # group-rule/add via the Security groups page's "Simulate drift"
+      # control) both show up within a couple of polls instead of
+      # waiting a full production-length tick.
+      SECURITY_SCAN_INTERVAL_SECONDS: '20'
+      # Reachable from the api container on the cortex-sandbox network --
+      # same host:port openstacksdk's clouds.yaml already points at, just
+      # addressed directly for the sandbox-only /_sandbox/... fault-
+      # injection endpoints nothing in openstacksdk knows how to call
+      # (see services/security_sandbox.py and openstack-sim/app.py's own
+      # "sandbox-only fault injection" section).
+      OPENSTACK_SIM_BASE_URL: http://openstack-sim:5000
 
     volumes:
       - ../ansible-sandbox:/infra/ansible-sandbox

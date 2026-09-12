@@ -296,6 +296,42 @@ select {
     0 0 18px -6px var(--ring-color, var(--accent));
 }
 
+/* ---- Security dashboard "big cards" (Phase Sec-4) ----
+   Notion/GitHub-flavored card grid for the Security pages' per-host and
+   per-group listings: a slightly larger radius than the standard .panel,
+   plus a small colored icon glow reminiscent of an integrations-
+   marketplace card -- restrained on purpose (a soft radial wash + a
+   hairline ring on hover, not a neon halo) so it still reads as part of
+   the same design language as every other glow effect in this file, just
+   applied to a bigger card. Color comes from --tile-color, set inline
+   per card (crit/warn/ok/chart-N depending on what the card represents). */
+@layer components {
+  .tile-card {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  }
+  .tile-card--interactive:hover {
+    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--border) 55%, var(--tile-color, var(--accent)));
+    box-shadow: 0 14px 30px -14px color-mix(in srgb, var(--tile-color, var(--accent)) 40%, transparent);
+  }
+  .tile-icon {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--tile-color, var(--accent)) 16%, var(--surface));
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--tile-color, var(--accent)) 24%, transparent),
+      0 8px 20px -8px color-mix(in srgb, var(--tile-color, var(--accent)) 55%, transparent);
+  }
+}
+
 /* ---- Copilot panel ambient background ----
    A fixed, low-opacity wash behind the whole chat panel so the surface
    reads as "alive" without competing with message text. Same accent/medium

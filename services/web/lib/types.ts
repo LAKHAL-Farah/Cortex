@@ -739,6 +739,18 @@ export interface AgentSecGroupDriftEntry {
   removed_rules: AgentSecGroupRule["rule"][];
 }
 
+// Phase Sec-3: one security group actually attached to a host's
+// instance(s), with its full rule list -- services/security_audit.py's
+// `get_node_security_groups` always computed this (as `data.
+// security_groups`), but no page rendered it until now; everything below
+// risky_rules/drift only ever showed aggregate counts, never "here's
+// every group actually on this node right now".
+export interface AgentSecGroupInfo {
+  id: string;
+  name: string;
+  rules: AgentSecGroupRule["rule"][];
+}
+
 export interface AgentSecGroupSignal extends AgentSecuritySignal {
   risky_rules?: AgentSecGroupRule[];
   // Phase Sec-1: this pass's live rules diffed against the most recent
@@ -748,6 +760,20 @@ export interface AgentSecGroupSignal extends AgentSecuritySignal {
   // same reason every other evidence field here is: a viewer account
   // never receives it (see AgentSecuritySignal's own docstring).
   drift?: AgentSecGroupDriftEntry[];
+  // Phase Sec-3: the full current-groups-per-node listing
+  // security_audit.get_node_security_groups already returns as `data` --
+  // an admin gets it here, a viewer never does (same restriction as
+  // risky_rules/drift above).
+  data?: {
+    hostname: string;
+    security_groups: AgentSecGroupInfo[];
+    risky_rules: AgentSecGroupRule[];
+  } | null;
+  // Phase Sec-3: when this particular signal was last computed --
+  // present on the dedicated GET /api/v1/security/groups/{hostname}
+  // response (routers/security.py), not on the per-signal fields nested
+  // inside a fleet-wide GET /findings response.
+  scanned_at?: string;
 }
 
 export interface AgentCveMatch {
@@ -799,6 +825,10 @@ export interface SecurityFinding {
   degraded: boolean;
   answer: string;
   raw_data: AgentSecurityData;
+  // Phase Sec-3: when `security_finding_cache` last refreshed this host
+  // (services/security_scan_cache.py) -- how GET /findings can now
+  // return instantly instead of scanning live on every request.
+  scanned_at: string;
 }
 
 export interface SecurityStatus {
@@ -806,6 +836,25 @@ export interface SecurityStatus {
   has_signal: boolean;
   degraded: boolean;
   node_count: number;
+  // Phase Sec-3 additions -- see routers/security.py's GET /status.
+  last_scan_at: string | null;
+  sandbox_mode: boolean;
+}
+
+// Phase Sec-3 -- same run-history shape TopologySyncRun/TopologyHealth
+// already give the topology page, backing GET /api/v1/security/health
+// and the SecurityHealthBadge/SecurityRescanButton components.
+export interface SecurityScanRun {
+  status: "ok" | "degraded" | "failed";
+  summary: Record<string, unknown> | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface SecurityHealth {
+  status: "ok" | "degraded" | "failed" | "unknown";
+  last_run: SecurityScanRun | null;
 }
 
 export type AgentRawData =

@@ -519,6 +519,84 @@ class SecurityGroupSnapshot(Base):
     captured_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
 
 
+class SecurityScanRun(Base):
+    """One row per completed pass of the Security Agent's fleet-wide scan
+    (services/security_scan_cache.py's `run_security_scan`) -- the exact
+    same "append-only run history backs a /health endpoint" shape
+    `TopologySyncRun` already established for the OpenStack/Prometheus
+    sync loops (see that model's own docstring for the full reasoning).
+
+    Added alongside `SecurityFindingCache` to fix a real gap Phase Sec-2
+    left open: GET /api/v1/security/findings used to call
+    `agents/nodes/security.py::_investigate` live, once per known node,
+    on *every* request -- so `/security` and `/security/security-groups`
+    never rendered instantly, they blocked on a fresh Loki/Neutron/CVE-
+    feed/eBPF round trip per host per page load. Now a periodic pass
+    (main.py's SECURITY_SCAN_INTERVAL_SECONDS) does that live work in the
+    background and this table records each pass's outcome, the same way
+    a topology sync pass does -- so a dashboard badge can show "scanned
+    Xm ago" instead of guessing from whatever's sitting in the cache.
+
+    One column intentionally NOT copied from TopologySyncRun:
+    `sync_type` -- there's only ever one kind of security scan pass, so a
+    discriminator column would always hold the same value.
+    """
+    __tablename__ = "security_scan_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # "ok": every known node's scan completed without a degraded sub-check.
+    # "degraded": ran, but at least one node had a sub-check fail/time out.
+    # "failed": the pass itself raised before producing any summary.
+    status = Column(String, nullable=False)
+    summary = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ok','degraded','failed')",
+            name="ck_security_scan_runs_status_allowed",
+        ),
+    )
+
+
+class SecurityFindingCache(Base):
+    """One upserted-in-place row per known node -- the Security Agent's
+    full (unredacted) finding from the most recent scan pass, read by
+    routers/security.py's GET /findings, /findings/{hostname}, and
+    /groups/{hostname} instead of each of those calling `_investigate`
+    live on every request (see SecurityScanRun's docstring above for why
+    that mattered).
+
+    Unlike `SecurityGroupSnapshot`/`TopologySyncRun`, this is deliberately
+    upserted rather than append-only: nothing here needs "what did this
+    look like an hour ago" history of its own (the finding's own
+    `sec_group_signal.drift` field already carries that, sourced from
+    `SecurityGroupSnapshot`) -- this table only ever needs to answer "what
+    does the fleet look like right now", so one row per hostname that
+    gets overwritten every pass keeps it cheap to read and trivially
+    correct (no "which is the latest row for this host" query needed).
+
+    `raw_data` stores the full, unredacted `AgentResult["raw_data"]`
+    (auth_signal/sec_group_signal/cve_signal/ebpf_signal, every field) --
+    RBAC redaction is applied at *read* time against the caller's own
+    role (see services/security_rbac.py), same as it always was, so an
+    admin and a viewer polling the same cached row still see different
+    things without needing two differently-redacted copies stored.
+    """
+    __tablename__ = "security_finding_cache"
+
+    hostname = Column(String, primary_key=True)
+    role = Column(String, nullable=False)
+    confidence = Column(Float, nullable=True)
+    has_signal = Column(Boolean, nullable=False, default=False)
+    degraded = Column(Boolean, nullable=False, default=False)
+    answer = Column(Text, nullable=False, default="")
+    raw_data = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class RoleBaseline(Base):
     """Baseline statistics grouped by node role instead of hostname."""
     __tablename__ = "role_baselines"

@@ -1,0 +1,1981 @@
+From e7e123abf1bf5a369f2a85f75e90a196c3aa25bb Mon Sep 17 00:00:00 2001
+From: Cortex Security Patch <cortex-agent@local>
+Date: Sat, 12 Sep 2026 22:09:49 +0000
+Subject: [PATCH] feat(security): cached scan pass, per-host group visibility,
+ sandbox drift demo
+
+Phase Sec-3 -- follows directly on Phase Sec-2's security group
+snapshots, drift detection, and REST panel commit.
+
+Backend
+- Add security_finding_cache + security_scan_runs tables
+  (models.SecurityFindingCache / SecurityScanRun) and a periodic
+  background pass (services/security_scan_cache.py, wired into main.py
+  as SECURITY_SCAN_INTERVAL_SECONDS, default 45s) that does the Security
+  Agent's four sub-checks per node on a schedule instead of live on every
+  request. This is what was making /security and
+  /security/security-groups block on a fresh Loki/Neutron/CVE-feed/eBPF
+  round trip per host on every page load.
+- routers/security.py: GET /findings, /findings/{hostname},
+  /groups/{hostname} now read that cache (falling back to one live scan
+  only for a host the periodic pass hasn't reached yet). New GET /health
+  (scan-run history, mirrors GET /topology/health) and POST /resync
+  (manual on-demand trigger, mirrors POST /topology/resync).
+- New services/security_sandbox.py + POST|DELETE
+  /security/sandbox/drift/{hostname} (admin-only, CORTEX_ENV=sandbox
+  only): wraps openstack-sim's existing sandbox fault-injection
+  endpoints into one call that takes a baseline snapshot, injects one
+  real non-risky ingress rule, and re-scans the host immediately --
+  turns the manual scripts/run_security_snapshot.py + curl walkthrough
+  into a clickable drift demo.
+
+Frontend
+- New SecurityHealthBadge / SecurityRescanButton components (same
+  pattern as TopologyHealthBadge / TopologyResyncButton) added to
+  /security, /security/security-groups, and the per-host detail page --
+  a scanned Xm ago badge plus a manual rescan trigger, alongside the
+  existing cache-only Refresh button.
+- Security groups list + detail pages now render the full
+  current-groups-per-node listing (sec_group_signal.data.security_groups,
+  already computed by security_audit.py but never surfaced) with each
+  group flagged Clean/Flagged against that host own risky_rules/drift,
+  instead of only ever showing aggregate counts.
+- Detail page: added an explanation of what Drift since last snapshot
+  means, plus a sandbox-only Simulate drift panel (only rendered when
+  GET /security/status reports sandbox_mode) that injects and can remove
+  one real demo rule via the new sandbox endpoints above.
+
+infra/docker-compose.sandbox.yml: SECURITY_SCAN_INTERVAL_SECONDS=20 and
+an explicit OPENSTACK_SIM_BASE_URL for the sandbox drift demo.
+---
+ infra/docker-compose.sandbox.yml              |  16 ++
+ .../b2c4d6e8f0a2_add_security_scan_cache.py   |  54 ++++
+ services/api/app/crud.py                      |  74 +++++
+ services/api/app/main.py                      | 103 +++++--
+ services/api/app/models.py                    |  78 ++++++
+ services/api/app/routers/security.py          | 258 +++++++++++++-----
+ services/api/app/services/security_sandbox.py | 158 +++++++++++
+ .../api/app/services/security_scan_cache.py   | 104 +++++++
+ services/web/app/api/security/health/route.ts |  16 ++
+ services/web/app/api/security/resync/route.ts |  17 ++
+ .../sandbox/drift/[hostname]/route.ts         |  34 +++
+ services/web/app/security/page.tsx            |  33 ++-
+ .../security-groups/[hostname]/page.tsx       | 234 ++++++++++++++--
+ .../web/app/security/security-groups/page.tsx |  65 ++++-
+ .../web/components/SecurityHealthBadge.tsx    |  75 +++++
+ .../web/components/SecurityRescanButton.tsx   | 118 ++++++++
+ services/web/lib/securityStatus.ts            |  24 +-
+ services/web/lib/types.ts                     |  49 ++++
+ 18 files changed, 1389 insertions(+), 121 deletions(-)
+ create mode 100644 services/api/alembic/versions/b2c4d6e8f0a2_add_security_scan_cache.py
+ create mode 100644 services/api/app/services/security_sandbox.py
+ create mode 100644 services/api/app/services/security_scan_cache.py
+ create mode 100644 services/web/app/api/security/health/route.ts
+ create mode 100644 services/web/app/api/security/resync/route.ts
+ create mode 100644 services/web/app/api/security/sandbox/drift/[hostname]/route.ts
+ create mode 100644 services/web/components/SecurityHealthBadge.tsx
+ create mode 100644 services/web/components/SecurityRescanButton.tsx
+
+diff --git a/infra/docker-compose.sandbox.yml b/infra/docker-compose.sandbox.yml
+index 92f1473..a1eca99 100644
+--- a/infra/docker-compose.sandbox.yml
++++ b/infra/docker-compose.sandbox.yml
+@@ -38,6 +38,22 @@ services:
+       # instead of a 15-minute wait. Use scripts/run_security_snapshot.py
+       # for an on-demand pass instead of waiting even that long.
+       SECURITY_SNAPSHOT_INTERVAL_SECONDS: '90'
++      # Phase Sec-3: how often run_security_scan() refreshes
++      # security_finding_cache (services/security_scan_cache.py) -- what
++      # the /security and /security/security-groups pages actually poll.
++      # Faster than the 45s production default so the "Scanned Xm ago"
++      # badge and a fresh sandbox drift demo (POST /_sandbox/security-
++      # group-rule/add via the Security groups page's "Simulate drift"
++      # control) both show up within a couple of polls instead of
++      # waiting a full production-length tick.
++      SECURITY_SCAN_INTERVAL_SECONDS: '20'
++      # Reachable from the api container on the cortex-sandbox network --
++      # same host:port openstacksdk's clouds.yaml already points at, just
++      # addressed directly for the sandbox-only /_sandbox/... fault-
++      # injection endpoints nothing in openstacksdk knows how to call
++      # (see services/security_sandbox.py and openstack-sim/app.py's own
++      # "sandbox-only fault injection" section).
++      OPENSTACK_SIM_BASE_URL: http://openstack-sim:5000
+ 
+     volumes:
+       - ../ansible-sandbox:/infra/ansible-sandbox
+diff --git a/services/api/alembic/versions/b2c4d6e8f0a2_add_security_scan_cache.py b/services/api/alembic/versions/b2c4d6e8f0a2_add_security_scan_cache.py
+new file mode 100644
+index 0000000..6d213bc
+--- /dev/null
++++ b/services/api/alembic/versions/b2c4d6e8f0a2_add_security_scan_cache.py
+@@ -0,0 +1,54 @@
++"""add security_scan_runs and security_finding_cache tables
++
++Revision ID: b2c4d6e8f0a2
++Revises: a3b4c5d6e7f8
++Create Date: 2026-09-12 00:00:00.000000
++
++Phase Sec-3: GET /api/v1/security/findings (and the /security,
++/security/security-groups dashboard pages behind it) used to call the
++Security Agent's four sub-checks live, per known node, on every request
++-- these two tables let that work happen on a schedule instead
++(services/security_scan_cache.py) and give GET /api/v1/security/health a
++real run-history table to answer from, the same shape TopologySyncRun
++already gives GET /api/v1/topology/health.
++"""
++from alembic import op
++import sqlalchemy as sa
++
++
++revision = 'b2c4d6e8f0a2'
++down_revision = 'a3b4c5d6e7f8'
++branch_labels = None
++depends_on = None
++
++
++def upgrade() -> None:
++    op.create_table(
++        'security_scan_runs',
++        sa.Column('id', sa.UUID(), nullable=False),
++        sa.Column('status', sa.String(), nullable=False),
++        sa.Column('summary', sa.JSON(), nullable=True),
++        sa.Column('error', sa.Text(), nullable=True),
++        sa.Column('started_at', sa.DateTime(), nullable=False),
++        sa.Column('finished_at', sa.DateTime(), nullable=False),
++        sa.CheckConstraint("status IN ('ok','degraded','failed')", name='ck_security_scan_runs_status_allowed'),
++        sa.PrimaryKeyConstraint('id'),
++    )
++
++    op.create_table(
++        'security_finding_cache',
++        sa.Column('hostname', sa.String(), nullable=False),
++        sa.Column('role', sa.String(), nullable=False),
++        sa.Column('confidence', sa.Float(), nullable=True),
++        sa.Column('has_signal', sa.Boolean(), nullable=False),
++        sa.Column('degraded', sa.Boolean(), nullable=False),
++        sa.Column('answer', sa.Text(), nullable=False),
++        sa.Column('raw_data', sa.JSON(), nullable=False),
++        sa.Column('updated_at', sa.DateTime(), nullable=False),
++        sa.PrimaryKeyConstraint('hostname'),
++    )
++
++
++def downgrade() -> None:
++    op.drop_table('security_finding_cache')
++    op.drop_table('security_scan_runs')
+diff --git a/services/api/app/crud.py b/services/api/app/crud.py
+index e8d1369..ad97f83 100644
+--- a/services/api/app/crud.py
++++ b/services/api/app/crud.py
+@@ -51,6 +51,80 @@ def get_latest_security_group_snapshots(db: Session, hostname: str) -> dict[str,
+     return latest
+ 
+ 
++def record_security_scan_run(
++    db: Session,
++    *,
++    status: str,
++    started_at: datetime,
++    finished_at: datetime,
++    summary: dict | None = None,
++    error: str | None = None,
++) -> models.SecurityScanRun:
++    """Appends one row to `security_scan_runs` after every pass of
++    services/security_scan_cache.py's `run_security_scan` -- success or
++    failure -- so GET /api/v1/security/health has real run history to
++    answer from, the same reasoning record_topology_sync_run already
++    gives for the topology sync loop.
++    """
++    run = models.SecurityScanRun(
++        status=status, summary=summary, error=error, started_at=started_at, finished_at=finished_at,
++    )
++    db.add(run)
++    db.commit()
++    db.refresh(run)
++    return run
++
++
++def get_latest_security_scan_run(db: Session) -> models.SecurityScanRun | None:
++    return db.scalar(
++        select(models.SecurityScanRun).order_by(models.SecurityScanRun.finished_at.desc()).limit(1)
++    )
++
++
++def upsert_security_finding_cache(
++    db: Session,
++    *,
++    hostname: str,
++    role: str,
++    confidence: float | None,
++    has_signal: bool,
++    degraded: bool,
++    answer: str,
++    raw_data: dict,
++) -> models.SecurityFindingCache:
++    """Writes (or overwrites) the one cached finding row for `hostname` --
++    see models.SecurityFindingCache's docstring for why this is an upsert
++    rather than an append. Called once per known node per
++    run_security_scan pass, and once on-demand whenever a GET falls back
++    to a live check for a host with no cached row yet (a freshly-added
++    node the periodic pass hasn't reached).
++    """
++    row = db.get(models.SecurityFindingCache, hostname)
++    if row is None:
++        row = models.SecurityFindingCache(hostname=hostname)
++        db.add(row)
++    row.role = role
++    row.confidence = confidence
++    row.has_signal = has_signal
++    row.degraded = degraded
++    row.answer = answer
++    row.raw_data = raw_data
++    row.updated_at = datetime.utcnow()
++    db.commit()
++    db.refresh(row)
++    return row
++
++
++def list_security_finding_cache(db: Session) -> list[models.SecurityFindingCache]:
++    return db.scalars(
++        select(models.SecurityFindingCache).order_by(models.SecurityFindingCache.hostname)
++    ).all()
++
++
++def get_security_finding_cache(db: Session, hostname: str) -> models.SecurityFindingCache | None:
++    return db.get(models.SecurityFindingCache, hostname)
++
++
+ def list_open_anomaly_flags(db: Session, hostname: str) -> list[models.AnomalyFlag]:
+     """Currently-open (non-"normal") AnomalyFlag rows for one host.
+ 
+diff --git a/services/api/app/main.py b/services/api/app/main.py
+index f01d972..ba5e4ac 100644
+--- a/services/api/app/main.py
++++ b/services/api/app/main.py
+@@ -28,6 +28,7 @@ from .services.anomaly_detector import detect_anomalies
+ from .services.quota_budget_monitor import check_quota_and_budget
+ from .services.baseline_builder import compute_baselines
+ from .services.security_snapshot_builder import capture_security_group_snapshots
++from .services.security_scan_cache import run_security_scan
+ from .services.node_seeder import seed_nodes_from_file_sd
+ from .services.forecast_dataset_builder import build_dataset
+ from .routers import forecast
+@@ -59,6 +60,20 @@ BASELINE_REFRESH_INTERVAL_SECONDS = int(os.getenv("BASELINE_REFRESH_INTERVAL_SEC
+ # to notice that promptly.
+ SECURITY_SNAPSHOT_INTERVAL_SECONDS = int(os.getenv("SECURITY_SNAPSHOT_INTERVAL_SECONDS", "900"))
+ 
++# How often run_security_scan() (services/security_scan_cache.py) re-runs
++# the Security Agent's four sub-checks for every known node and refreshes
++# `security_finding_cache` -- what GET /api/v1/security/findings and the
++# /security, /security/security-groups dashboard pages actually read.
++# Deliberately its own interval, much shorter than
++# SECURITY_SNAPSHOT_INTERVAL_SECONDS above: the snapshot job only feeds
++# *drift* history and doesn't need to run often, but this cache is the
++# thing a person is staring at waiting for it to update, the same
++# "shouldn't feel stale while you're looking at it" bar
++# PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS sets for the topology page.
++# POST /api/v1/security/resync (the Security page's manual "Rescan" button)
++# triggers an out-of-band pass on top of this without waiting for the tick.
++SECURITY_SCAN_INTERVAL_SECONDS = int(os.getenv("SECURITY_SCAN_INTERVAL_SECONDS", "45"))
++
+ # How often the forecasting dataset (cpu/memory/disk history CSV) is rebuilt
+ # from Prometheus. build_dataset() is incremental (it only fetches since the
+ # last stored point), so an hourly cadence is cheap on Prometheus and is what
+@@ -165,18 +180,40 @@ def _prometheus_health_status(summary: dict) -> str:
+     return "degraded"
+ 
+ 
+-async def _run_periodic_recorded(fn, interval_seconds: float, name: str, sync_type: str, status_fn) -> None:
+-    """Same shape as _run_periodic, but for the two OpenStack/Prometheus
+-    sync loops (topology_sync.sync_topology, prometheus_health.
+-    sync_prometheus_health) whose outcome now also gets appended to the
+-    `topology_sync_runs` table (see models.TopologySyncRun and
+-    crud.record_topology_sync_run) so GET /api/v1/topology/health has
+-    real run history to answer from, not just a snapshot of the graph.
++def _security_scan_status(summary: dict) -> str:
++    """run_security_scan()'s summary (services/security_scan_cache.py)
++    carries `degraded` -- True if any known node's scan had at least one
++    sub-check fail/time out this pass, or the pass itself couldn't reach
++    a node at all. Same "ran, but incompletely" vs. "ran cleanly"
++    distinction _topology_sync_status/_prometheus_health_status already
++    draw for their own loops.
++    """
++    if summary.get("degraded"):
++        return "degraded"
++    return "ok"
++
++
++async def _run_periodic_recorded(
++    fn, interval_seconds: float, name: str, sync_type: str, status_fn, record_fn=None,
++) -> None:
++    """Same shape as _run_periodic, but for periodic passes whose outcome
++    also gets appended to a run-history table so a `/health` endpoint has
++    real run history to answer from, not just a snapshot of whatever the
++    pass produces (see models.TopologySyncRun / models.SecurityScanRun's
++    own docstrings for why that distinction matters).
+ 
+     `status_fn(summary) -> "ok"|"degraded"` classifies a successful pass's
+     own summary dict; a pass that raises is always recorded as "failed"
+     regardless of status_fn, since there's no summary to classify.
++
++    `record_fn` defaults to `crud.record_topology_sync_run` (this
++    function's original two callers, the OpenStack/Prometheus sync
++    loops, both write to `topology_sync_runs` keyed by `sync_type`) --
++    pass `crud.record_security_scan_run` instead for a loop that writes
++    to its own table with no `sync_type` column at all (there's only one
++    kind of security scan pass, so a discriminator would be constant).
+     """
++    record_fn = record_fn or crud.record_topology_sync_run
+     while True:
+         started_at = datetime.utcnow()
+         db = SessionLocal()
+@@ -192,15 +229,25 @@ async def _run_periodic_recorded(fn, interval_seconds: float, name: str, sync_ty
+         finally:
+             finished_at = datetime.utcnow()
+             try:
+-                crud.record_topology_sync_run(
+-                    db,
+-                    sync_type=sync_type,
+-                    status=run_status,
+-                    summary=summary,
+-                    error=error,
+-                    started_at=started_at,
+-                    finished_at=finished_at,
+-                )
++                if record_fn is crud.record_topology_sync_run:
++                    record_fn(
++                        db,
++                        sync_type=sync_type,
++                        status=run_status,
++                        summary=summary,
++                        error=error,
++                        started_at=started_at,
++                        finished_at=finished_at,
++                    )
++                else:
++                    record_fn(
++                        db,
++                        status=run_status,
++                        summary=summary,
++                        error=error,
++                        started_at=started_at,
++                        finished_at=finished_at,
++                    )
+             except Exception:
+                 # Recording the run is itself best-effort: a Postgres hiccup
+                 # here shouldn't take the sync loop down, and the next tick
+@@ -261,6 +308,20 @@ async def lifespan(app: FastAPI):
+     finally:
+         db.close()
+ 
++    # Best-effort initial security scan so `security_finding_cache` isn't
++    # empty for the first person to load /security after a fresh deploy --
++    # without this, GET /findings' per-host fallback in routers/security.py
++    # still covers it (an on-demand live scan per host), just slower than
++    # having the fleet already warm. Same "seed once at startup, then let
++    # the periodic loop take over" idiom as seed_nodes_from_file_sd above.
++    db = SessionLocal()
++    try:
++        await asyncio.to_thread(run_security_scan, db)
++    except Exception:
++        logger.exception("startup security scan failed")
++    finally:
++        db.close()
++
+     try:
+         await asyncio.to_thread(graph_db.apply_schema_constraints)
+     except Exception:
+@@ -311,6 +372,16 @@ async def lifespan(app: FastAPI):
+                 check_quota_and_budget, QUOTA_BUDGET_CHECK_INTERVAL_SECONDS, "quota/budget check"
+             )
+         ),
++        asyncio.create_task(
++            _run_periodic_recorded(
++                run_security_scan,
++                SECURITY_SCAN_INTERVAL_SECONDS,
++                "security scan",
++                sync_type="security_scan",
++                status_fn=_security_scan_status,
++                record_fn=crud.record_security_scan_run,
++            )
++        ),
+     ]
+     try:
+         yield
+diff --git a/services/api/app/models.py b/services/api/app/models.py
+index 5a7b7fa..d8c0588 100644
+--- a/services/api/app/models.py
++++ b/services/api/app/models.py
+@@ -519,6 +519,84 @@ class SecurityGroupSnapshot(Base):
+     captured_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+ 
+ 
++class SecurityScanRun(Base):
++    """One row per completed pass of the Security Agent's fleet-wide scan
++    (services/security_scan_cache.py's `run_security_scan`) -- the exact
++    same "append-only run history backs a /health endpoint" shape
++    `TopologySyncRun` already established for the OpenStack/Prometheus
++    sync loops (see that model's own docstring for the full reasoning).
++
++    Added alongside `SecurityFindingCache` to fix a real gap Phase Sec-2
++    left open: GET /api/v1/security/findings used to call
++    `agents/nodes/security.py::_investigate` live, once per known node,
++    on *every* request -- so `/security` and `/security/security-groups`
++    never rendered instantly, they blocked on a fresh Loki/Neutron/CVE-
++    feed/eBPF round trip per host per page load. Now a periodic pass
++    (main.py's SECURITY_SCAN_INTERVAL_SECONDS) does that live work in the
++    background and this table records each pass's outcome, the same way
++    a topology sync pass does -- so a dashboard badge can show "scanned
++    Xm ago" instead of guessing from whatever's sitting in the cache.
++
++    One column intentionally NOT copied from TopologySyncRun:
++    `sync_type` -- there's only ever one kind of security scan pass, so a
++    discriminator column would always hold the same value.
++    """
++    __tablename__ = "security_scan_runs"
++
++    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
++    # "ok": every known node's scan completed without a degraded sub-check.
++    # "degraded": ran, but at least one node had a sub-check fail/time out.
++    # "failed": the pass itself raised before producing any summary.
++    status = Column(String, nullable=False)
++    summary = Column(JSON, nullable=True)
++    error = Column(Text, nullable=True)
++    started_at = Column(DateTime, nullable=False)
++    finished_at = Column(DateTime, nullable=False)
++
++    __table_args__ = (
++        CheckConstraint(
++            "status IN ('ok','degraded','failed')",
++            name="ck_security_scan_runs_status_allowed",
++        ),
++    )
++
++
++class SecurityFindingCache(Base):
++    """One upserted-in-place row per known node -- the Security Agent's
++    full (unredacted) finding from the most recent scan pass, read by
++    routers/security.py's GET /findings, /findings/{hostname}, and
++    /groups/{hostname} instead of each of those calling `_investigate`
++    live on every request (see SecurityScanRun's docstring above for why
++    that mattered).
++
++    Unlike `SecurityGroupSnapshot`/`TopologySyncRun`, this is deliberately
++    upserted rather than append-only: nothing here needs "what did this
++    look like an hour ago" history of its own (the finding's own
++    `sec_group_signal.drift` field already carries that, sourced from
++    `SecurityGroupSnapshot`) -- this table only ever needs to answer "what
++    does the fleet look like right now", so one row per hostname that
++    gets overwritten every pass keeps it cheap to read and trivially
++    correct (no "which is the latest row for this host" query needed).
++
++    `raw_data` stores the full, unredacted `AgentResult["raw_data"]`
++    (auth_signal/sec_group_signal/cve_signal/ebpf_signal, every field) --
++    RBAC redaction is applied at *read* time against the caller's own
++    role (see services/security_rbac.py), same as it always was, so an
++    admin and a viewer polling the same cached row still see different
++    things without needing two differently-redacted copies stored.
++    """
++    __tablename__ = "security_finding_cache"
++
++    hostname = Column(String, primary_key=True)
++    role = Column(String, nullable=False)
++    confidence = Column(Float, nullable=True)
++    has_signal = Column(Boolean, nullable=False, default=False)
++    degraded = Column(Boolean, nullable=False, default=False)
++    answer = Column(Text, nullable=False, default="")
++    raw_data = Column(JSON, nullable=False)
++    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
++
++
+ class RoleBaseline(Base):
+     """Baseline statistics grouped by node role instead of hostname."""
+     __tablename__ = "role_baselines"
+diff --git a/services/api/app/routers/security.py b/services/api/app/routers/security.py
+index 42a52d0..b9b0f12 100644
+--- a/services/api/app/routers/security.py
++++ b/services/api/app/routers/security.py
+@@ -1,4 +1,4 @@
+-"""Phase Sec-2: read-only, pollable panel endpoints for the Security
++"""Phase Sec-2/Sec-3: read-only, pollable panel endpoints for the Security
+ Agent's findings.
+ 
+ Before this router existed, every Security Agent finding only reached a
+@@ -7,8 +7,9 @@ direct GET a dashboard could `useSWR` against the way routers/network.py
+ already gives the Network agent's data (see that router's own module
+ docstring). This is that same shape for Security: agents/nodes/
+ security.py's four sub-checks (auth-anomaly, sec-group-diff/drift,
+-CVE-match, eBPF-signal), read directly and redacted for the caller's
+-role, with no chat/LLM round-trip required.
++CVE-match, eBPF-signal), read from a cached scan pass and redacted for
++the caller's role, with no chat/LLM round-trip and no live per-request
++Loki/Neutron/CVE-feed/eBPF round-trip required.
+ 
+ RBAC is the one thing this module deliberately does *not* reinvent: it
+ imports the exact same `security_rbac.filter_security_response_for_role`
+@@ -17,83 +18,89 @@ copy -- a viewer-role account gets identical protection whether they ask
+ via chat or load this dashboard, which is only true if both routers call
+ the same function (see services/security_rbac.py's module docstring).
+ 
+-No LLM narration: `agents/nodes/security.py`'s `_investigate(...,
+-narrate=False)` skips the chat path's LLM call and uses its deterministic
+-fallback sentence instead -- a panel a dashboard polls every few seconds,
+-for every known node, shouldn't pay an LLM invocation per host per poll
+-just to restate the same four sub-checks in prose. The sub-checks
+-themselves are unchanged: this still reads live Loki/Neutron/CVE-feed/
+-eBPF-sensor data (or the Phase Sec-1 snapshot table for drift) the exact
+-same way the chat path does, through the same circuit breakers.
++Phase Sec-3 changed *where* a finding comes from, not what it looks like:
++GET /findings and friends used to call `_investigate(..., narrate=False)`
++live, once per known node, on every single request -- which is why the
++/security and /security/security-groups pages never rendered instantly,
++every page load blocked on a fresh external round trip per host. Now a
++periodic background pass (main.py's SECURITY_SCAN_INTERVAL_SECONDS,
++services/security_scan_cache.py) does that live work on a schedule and
++writes it into `security_finding_cache`; every read endpoint below reads
++that cache (falling back to one on-demand live scan only for a host that
++pass hasn't reached yet, e.g. a node registered seconds ago). GET /health
++mirrors GET /api/v1/topology/health -- real run history, not a guess from
++whatever's sitting in the cache -- and POST /resync is the same
++"Reconverge"-style manual trigger TopologyResyncButton already gives the
++topology page, just for a security scan pass instead of an OpenStack
++sync pass.
+ """
+ import logging
++from datetime import datetime
+ 
+ from fastapi import APIRouter, Depends, HTTPException
+ from sqlalchemy.orm import Session
+ 
+ from .. import crud, models
+-from ..auth import get_current_user
++from ..auth import get_current_user, require_admin
+ from ..db import get_db
+-from ..agents.nodes import security as security_agent_node
+-from ..services import security_rbac
++from ..services import security_rbac, security_sandbox
++from ..services.security_scan_cache import run_security_scan, scan_one_node
+ 
+ logger = logging.getLogger(__name__)
+ router = APIRouter(prefix="/api/v1/security", tags=["security"])
+ 
+ 
+-def _known_node(node_row: models.Node) -> dict:
+-    """Same hostname/role/instance shape routers/agents.py's `orchestrate`
+-    builds from a `models.Node` row, so `_investigate` (which only knows
+-    about the KnownNode TypedDict shape, never the ORM model) works
+-    identically whether it's called from the chat graph or from here.
+-    """
+-    return {
+-        "hostname": node_row.hostname,
+-        "role": node_row.role.value if hasattr(node_row.role, "value") else node_row.role,
+-        "instance": f"{node_row.ip_address}:{node_row.exporter_port}",
+-    }
+-
+-
+-def _redacted_finding(node: dict, current_user: models.User) -> dict:
+-    agent_result, failures = security_agent_node._investigate(
+-        f"security dashboard check for {node['hostname']}", node, narrate=False
+-    )
++def _redact_cache_row(cache_row: models.SecurityFindingCache, current_user: models.User) -> dict:
+     answer, raw_data = security_rbac.filter_security_response_for_role(
+-        agent_result["summary"], agent_result["raw_data"], "security", current_user.role
++        cache_row.answer, cache_row.raw_data, "security", current_user.role
+     )
+     return {
+-        "hostname": node["hostname"],
+-        "role": node["role"],
+-        "confidence": agent_result["confidence"],
+-        "has_signal": agent_result["raw_data"]["has_signal"],
+-        "degraded": bool(failures),
++        "hostname": cache_row.hostname,
++        "role": cache_row.role,
++        "confidence": cache_row.confidence,
++        "has_signal": cache_row.has_signal,
++        "degraded": cache_row.degraded,
+         "answer": answer,
+         "raw_data": raw_data,
++        "scanned_at": cache_row.updated_at.isoformat(),
+     }
+ 
+ 
++def _cached_or_live(db: Session, node_row: models.Node) -> models.SecurityFindingCache:
++    """Reads this host's cached finding, computing one on the spot (and
++    caching it) if the periodic pass hasn't reached this node yet -- a
++    node registered between two scan ticks should still return something
++    real on its first GET rather than a blank/missing row.
++    """
++    cache_row = crud.get_security_finding_cache(db, node_row.hostname)
++    if cache_row is not None:
++        return cache_row
++    return scan_one_node(db, node_row)
++
++
+ @router.get("/findings")
+ def list_findings(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+     """One Security Agent finding per known node, redacted the same way
+     POST /api/v1/agents/orchestrate redacts a security-flavored chat
+     answer for the caller's role (see services/security_rbac.py). This is
+     the endpoint a security-overview dashboard page polls for its main
+-    per-host list/table.
++    per-host list/table -- reading `security_finding_cache`
++    (services/security_scan_cache.py), not a live per-request scan.
+     """
+-    findings = [_redacted_finding(_known_node(node_row), current_user) for node_row in crud.list_nodes(db)]
++    findings = [_redact_cache_row(_cached_or_live(db, node_row), current_user) for node_row in crud.list_nodes(db)]
+     return {"findings": findings}
+ 
+ 
+ @router.get("/findings/{hostname}")
+ def get_finding(hostname: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+     """Same finding as one entry of GET /findings, for a dashboard drill-
+-    down into a single host instead of re-fetching (and re-computing) the
+-    whole fleet's findings just to show one.
++    down into a single host instead of re-fetching the whole fleet's
++    cached findings just to show one.
+     """
+     node_row = crud.get_node_by_hostname(db, hostname)
+     if node_row is None:
+         raise HTTPException(status_code=404, detail=f"No known node '{hostname}'.")
+-    return _redacted_finding(_known_node(node_row), current_user)
++    return _redact_cache_row(_cached_or_live(db, node_row), current_user)
+ 
+ 
+ @router.get("/status")
+@@ -105,42 +112,165 @@ def get_status(current_user: models.User = Depends(get_current_user), db: Sessio
+     badges read consistently across agents regardless of caller role
+     (this endpoint never returns anything specific enough to need
+     redacting in the first place -- see services/security_rbac.py).
++
++    Reads the same cache GET /findings does (fast, no live scan), plus
++    two fields Phase Sec-3 added: `last_scan_at` (freshest cache row's
++    `updated_at`, null if nothing has been scanned yet) and
++    `sandbox_mode` (whether POST /sandbox/drift/{hostname}'s drift-demo
++    controls are actually reachable in this deployment -- see
++    services/security_sandbox.py).
+     """
+-    any_signal = False
+-    any_degraded = False
+-    node_count = 0
+-    for node_row in crud.list_nodes(db):
+-        node_count += 1
+-        agent_result, failures = security_agent_node._investigate(
+-            f"security dashboard status check for {node_row.hostname}", _known_node(node_row), narrate=False
+-        )
+-        if agent_result["raw_data"]["has_signal"]:
+-            any_signal = True
+-        if failures:
+-            any_degraded = True
++    cache_rows = crud.list_security_finding_cache(db)
++    node_count = len(crud.list_nodes(db))
++    any_signal = any(row.has_signal for row in cache_rows)
++    any_degraded = any(row.degraded for row in cache_rows)
++    last_scan_at = max((row.updated_at for row in cache_rows), default=None)
+ 
+     status = "degraded" if (any_signal or any_degraded) else "ok"
+-    return {"status": status, "has_signal": any_signal, "degraded": any_degraded, "node_count": node_count}
++    return {
++        "status": status,
++        "has_signal": any_signal,
++        "degraded": any_degraded,
++        "node_count": node_count,
++        "last_scan_at": last_scan_at.isoformat() if last_scan_at else None,
++        "sandbox_mode": security_sandbox.CORTEX_ENV == "sandbox",
++    }
++
++
++@router.get("/health")
++def get_security_health(db: Session = Depends(get_db)):
++    """Scan-loop health, backed by the `security_scan_runs` table main.py
++    writes to after every pass of `run_security_scan` -- NOT a live
++    recomputation. Same reasoning routers/topology.py's GET /health
++    docstring gives for its own version of this endpoint: the cache can
++    look perfectly fine (last successful pass's rows still sitting there)
++    even if the scan loop itself has silently stopped running, so this
++    answers "is the scan loop healthy" from actual run history instead of
++    guessing from the cache.
++    """
++    run = crud.get_latest_security_scan_run(db)
++    if run is None:
++        return {"status": "unknown", "last_run": None}
++    return {
++        "status": run.status,
++        "last_run": {
++            "status": run.status,
++            "summary": run.summary,
++            "error": run.error,
++            "started_at": run.started_at.isoformat(),
++            "finished_at": run.finished_at.isoformat(),
++        },
++    }
++
++
++def _resync_run_status(summary: dict) -> str:
++    """Same classification main.py's periodic loop applies to a
++    run_security_scan() pass (see main.py::_security_scan_status) --
++    duplicated rather than imported for the same reason routers/
++    topology.py's own `_resync_run_status` duplicates
++    `_topology_sync_status`: importing main.py from a router would be
++    circular (main.py imports this router).
++    """
++    if summary.get("degraded"):
++        return "degraded"
++    return "ok"
++
++
++@router.post("/resync")
++def trigger_security_resync(db: Session = Depends(get_db)):
++    """Manual, on-demand trigger for the same fleet-wide scan pass
++    main.py's periodic loop already runs every
++    SECURITY_SCAN_INTERVAL_SECONDS -- the Security-page equivalent of
++    TopologyResyncButton's "Reconverge" control. Records its own outcome
++    to `security_scan_runs` (same table the periodic pass writes to) so
++    GET /health reflects a manual run exactly like it would an automatic
++    one, then returns that run so the button can show it immediately
++    without a second round trip.
++    """
++    started_at = datetime.utcnow()
++    try:
++        summary = run_security_scan(db)
++        run_status = _resync_run_status(summary)
++        error = None
++    except Exception as exc:
++        logger.exception("security resync pass failed")
++        summary = None
++        run_status = "failed"
++        error = repr(exc)
++    finished_at = datetime.utcnow()
++
++    run = crud.record_security_scan_run(
++        db, status=run_status, summary=summary, error=error, started_at=started_at, finished_at=finished_at,
++    )
++    return {
++        "status": run.status,
++        "summary": run.summary,
++        "error": run.error,
++        "started_at": run.started_at.isoformat(),
++        "finished_at": run.finished_at.isoformat(),
++    }
+ 
+ 
+ @router.get("/groups/{hostname}")
+ def get_security_groups(hostname: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+-    """Live security-group rules for one node plus the Phase Sec-1 drift
+-    diff against the most recent stored snapshot -- the same data GET
+-    /findings' `raw_data.sec_group_signal` carries for this host, broken
+-    out on its own for a dedicated "security groups" panel view that
+-    shouldn't need to also pull auth/CVE/eBPF data it isn't showing.
++    """Cached security-group rules for one node plus the Phase Sec-1
++    drift diff against the most recent stored snapshot: the same data
++    GET /findings' `raw_data.sec_group_signal` carries for this host,
++    broken out on its own for the dedicated "security groups" panel view
++    that shouldn't need to also pull auth/CVE/eBPF data it isn't showing.
+ 
+     Same RBAC rule as everything else in this router: a non-admin gets
+-    `has_signal`/`degraded` booleans, never the actual rules or which
+-    ones were added/removed.
++    `has_signal`/`degraded` booleans, never the actual rules, the drift
++    entries, or (Phase Sec-3) the full current-groups-per-node listing
++    under `data.security_groups`.
+     """
+     node_row = crud.get_node_by_hostname(db, hostname)
+     if node_row is None:
+         raise HTTPException(status_code=404, detail=f"No known node '{hostname}'.")
+ 
+-    sec_group_signal = security_agent_node._check_sec_group_diff(_known_node(node_row))
++    cache_row = _cached_or_live(db, node_row)
++    sec_group_signal = cache_row.raw_data.get("sec_group_signal", {})
+     _, redacted = security_rbac.filter_security_response_for_role(
+         "", {"sec_group_signal": sec_group_signal}, "security", current_user.role
+     )
+-    return redacted["sec_group_signal"]
++    result = dict(redacted["sec_group_signal"])
++    result["scanned_at"] = cache_row.updated_at.isoformat()
++    return result
++
++
++# ---------------------------------------------------------------------
++# Sandbox-only drift demonstration (Phase Sec-3). See
++# services/security_sandbox.py's module docstring: gated on
++# CORTEX_ENV=sandbox, mutates only openstack-sim's in-memory sandbox
++# state, never reachable against a real cloud.
++# ---------------------------------------------------------------------
++
++@router.post("/sandbox/drift/{hostname}", dependencies=[Depends(require_admin)])
++def simulate_security_group_drift(hostname: str, db: Session = Depends(get_db)):
++    """Injects one real, end-to-end security-group change on `hostname`
++    for demonstration purposes -- see security_sandbox.inject_demo_drift
++    for the exact steps (snapshot, inject, re-scan). Admin-only, same gate
++    as every other infra-mutating endpoint in this codebase (auth.py's
++    `require_admin`), even though it only ever touches the sandbox.
++    """
++    node_row = crud.get_node_by_hostname(db, hostname)
++    if node_row is None:
++        raise HTTPException(status_code=404, detail=f"No known node '{hostname}'.")
++    try:
++        return security_sandbox.inject_demo_drift(db, hostname)
++    except security_sandbox.SandboxUnavailableError as exc:
++        raise HTTPException(status_code=404, detail=str(exc)) from exc
++    except security_sandbox.NoSecurityGroupError as exc:
++        raise HTTPException(status_code=409, detail=str(exc)) from exc
++
++
++@router.delete("/sandbox/drift/{hostname}", dependencies=[Depends(require_admin)])
++def reset_security_group_drift(hostname: str, rule_id: str, db: Session = Depends(get_db)):
++    """Removes one previously-injected demo rule (`rule_id`, returned by
++    the POST above) and re-scans the host -- see
++    security_sandbox.reset_demo_drift.
++    """
++    try:
++        return security_sandbox.reset_demo_drift(db, hostname, rule_id)
++    except security_sandbox.SandboxUnavailableError as exc:
++        raise HTTPException(status_code=404, detail=str(exc)) from exc
+diff --git a/services/api/app/services/security_sandbox.py b/services/api/app/services/security_sandbox.py
+new file mode 100644
+index 0000000..bcb44d7
+--- /dev/null
++++ b/services/api/app/services/security_sandbox.py
+@@ -0,0 +1,158 @@
++"""Sandbox-only drift demonstration for the Security groups page.
++
++Phase Sec-1/Sec-2 already gave `_check_sec_group_diff` real drift
++detection and openstack-sim already gave the sandbox real fault-injection
++endpoints for it (`/_sandbox/security-group-rule/add|remove`, see that
++module's own "sandbox-only fault injection" section) -- but exercising
++that end to end meant hand-running scripts/run_security_snapshot.py and a
++raw curl, twice, in the right order (see that script's own docstring for
++the exact steps). This module wires the same flow behind one call so the
++Security groups page can offer a "simulate real drift" control instead of
++a terminal walkthrough.
++
++Gated on CORTEX_ENV=sandbox (see infra/docker-compose.sandbox.yml) the
++same way ansible_runner.py's `_guard_against_sandbox_in_production` gates
++sandbox-inventory writes: this mutates simulated OpenStack state, and
++that must never be reachable against a real cloud.
++"""
++import logging
++import os
++import time
++
++import requests
++from sqlalchemy.orm import Session
++
++from .. import crud
++from . import security_audit
++from .security_snapshot_builder import capture_security_group_snapshots
++
++logger = logging.getLogger(__name__)
++
++CORTEX_ENV = os.environ.get("CORTEX_ENV", "development").strip().lower()
++# Reachable from the api container on the same cortex-sandbox network
++# openstacksdk's clouds.yaml already points at (see infra/docker-compose
++# .sandbox.yml) -- this hits openstack-sim's own sandbox-only HTTP
++# surface directly, not through openstacksdk, since
++# /_sandbox/security-group-rule/add|remove isn't a real Neutron API.
++OPENSTACK_SIM_BASE_URL = os.environ.get("OPENSTACK_SIM_BASE_URL", "http://openstack-sim:5000")
++
++# Deliberately NOT one of security_audit._SENSITIVE_PORTS and scoped to a
++# private CIDR -- this rule should show up under Drift since last
++# snapshot without also tripping the overly-permissive risky_rules
++# baseline, which is exactly the "a change worth noticing even when it
++# isn't itself risky" case Phase Sec-1 exists to catch (see
++# security_audit.diff_security_groups's own docstring).
++_DEMO_RULE_PORT = 8080
++_DEMO_RULE_CIDR = "10.0.0.0/16"
++
++
++class SandboxUnavailableError(Exception):
++    """Raised when a sandbox-only endpoint is hit outside CORTEX_ENV=sandbox."""
++
++
++class NoSecurityGroupError(Exception):
++    """Raised when the target host has no security group to demo drift on."""
++
++
++def require_sandbox() -> None:
++    if CORTEX_ENV != "sandbox":
++        raise SandboxUnavailableError(
++            "Drift simulation is only available when CORTEX_ENV=sandbox "
++            "(see infra/docker-compose.sandbox.yml)."
++        )
++
++
++def _demo_rule_id(hostname: str) -> str:
++    return f"demo-drift-{hostname}-{int(time.time())}"
++
++
++def inject_demo_drift(db: Session, hostname: str) -> dict:
++    """Simulates one real, end-to-end security-group change on `hostname`:
++
++    1. Takes a fresh baseline snapshot right now
++       (security_snapshot_builder.capture_security_group_snapshots) --
++       `drift` is only ever computed against *some* prior snapshot, so
++       without a snapshot taken immediately before the injected change,
++       there's nothing for the next read to diff against.
++    2. Adds one new ingress rule via openstack-sim's own
++       `/_sandbox/security-group-rule/add` -- the real sandbox fault-
++       injection endpoint this project already ships, not a fake/mocked
++       one -- to the first security group actually attached to this
++       host.
++    3. Re-scans this one host immediately (security_scan_cache.
++       scan_one_node) so the cached finding -- and therefore GET
++       /api/v1/security/groups/{hostname} -- reflects the injected drift
++       right away instead of waiting for the next periodic scan tick.
++    """
++    require_sandbox()
++
++    groups = security_audit.get_node_security_groups(hostname)["security_groups"]
++    if not groups:
++        raise NoSecurityGroupError(f"No security group attached to any instance on {hostname}.")
++    target = groups[0]
++
++    capture_security_group_snapshots(db)
++
++    rule_id = _demo_rule_id(hostname)
++    rule = {
++        "id": rule_id,
++        "security_group_id": target["id"],
++        "direction": "ingress",
++        "ethertype": "IPv4",
++        "protocol": "tcp",
++        "port_range_min": _DEMO_RULE_PORT,
++        "port_range_max": _DEMO_RULE_PORT,
++        "remote_ip_prefix": _DEMO_RULE_CIDR,
++    }
++    response = requests.post(
++        f"{OPENSTACK_SIM_BASE_URL}/_sandbox/security-group-rule/add", json=rule, timeout=8
++    )
++    response.raise_for_status()
++
++    _rescan_one_host(db, hostname)
++
++    return {
++        "hostname": hostname,
++        "security_group": target["name"],
++        "security_group_id": target["id"],
++        "rule_id": rule_id,
++        "detail": (
++            f"Added a new internal-only ingress rule (tcp/{_DEMO_RULE_PORT} from {_DEMO_RULE_CIDR}) "
++            f"to '{target['name']}' on {hostname}, right after taking a fresh baseline snapshot. "
++            "It's now visible under Drift since last snapshot for this host."
++        ),
++    }
++
++
++def reset_demo_drift(db: Session, hostname: str, rule_id: str) -> dict:
++    """Removes one previously-injected demo rule (see `inject_demo_drift`)
++    and re-scans the host so the cache drops the drift entry it created.
++    Removes only the one rule by id, via `/_sandbox/security-group-rule/
++    remove`, rather than calling openstack-sim's blanket `/_sandbox/fault/
++    reset` -- that would also clear any router/port/floating-ip faults an
++    unrelated topology demo in the same sandbox is using.
++    """
++    require_sandbox()
++    response = requests.post(
++        f"{OPENSTACK_SIM_BASE_URL}/_sandbox/security-group-rule/remove",
++        json={"id": rule_id},
++        timeout=8,
++    )
++    response.raise_for_status()
++
++    _rescan_one_host(db, hostname)
++
++    return {"hostname": hostname, "rule_id": rule_id, "removed": True}
++
++
++def _rescan_one_host(db: Session, hostname: str) -> None:
++    # Local import: security_scan_cache doesn't depend on this module, but
++    # importing it at module load time would still create an import-order
++    # footgun if that ever changes, since both live under the same
++    # services package -- deferred the same way agents/nodes/security.py
++    # defers its own DB-session helper imports.
++    from . import security_scan_cache
++
++    node_row = crud.get_node_by_hostname(db, hostname)
++    if node_row is not None:
++        security_scan_cache.scan_one_node(db, node_row)
+diff --git a/services/api/app/services/security_scan_cache.py b/services/api/app/services/security_scan_cache.py
+new file mode 100644
+index 0000000..7fa5309
+--- /dev/null
++++ b/services/api/app/services/security_scan_cache.py
+@@ -0,0 +1,104 @@
++"""Fleet-wide caching pass for the Security Agent's findings (Phase Sec-3).
++
++Before this module existed, routers/security.py's GET /findings called
++`agents/nodes/security.py::_investigate` live, once per known node, on
++*every* request -- so `/security` and `/security/security-groups` never
++rendered instantly; both pages blocked on a fresh Loki/Neutron/CVE-feed/
++eBPF round trip per host, per page load, per person looking at the page.
++
++`run_security_scan` does that same live work on a schedule instead
++(main.py's SECURITY_SCAN_INTERVAL_SECONDS, the same periodic-task idiom
++`sync_topology`/`sync_prometheus_health` already use) and writes the
++result into `security_finding_cache` (models.SecurityFindingCache, one
++upserted row per hostname). routers/security.py then reads that cache --
++a plain indexed Postgres read instead of four external calls per host --
++and applies the exact same RBAC redaction it always did, just at read
++time against the stored raw_data instead of against a freshly-computed
++one.
++
++This intentionally mirrors, rather than replaces, Phase Sec-1's snapshot
++builder (security_snapshot_builder.py): that job feeds *drift* (this
++pass's live rules vs. the last stored snapshot), this job feeds *how
++fresh is the panel a person is looking at right now*. Different questions,
++different tables, same "a periodic pass plus a manual on-demand trigger"
++shape -- see routers/security.py's POST /resync.
++"""
++import logging
++from datetime import datetime
++
++from sqlalchemy.orm import Session
++
++from .. import crud, models
++from ..agents.nodes import security as security_agent_node
++
++logger = logging.getLogger(__name__)
++
++
++def _known_node(node_row: models.Node) -> dict:
++    """Same KnownNode shape routers/security.py's own `_known_node`
++    builds -- duplicated rather than imported to avoid a
++    routers -> services -> routers import cycle (routers/security.py
++    already imports this module). Kept in sync by hand, same tradeoff
++    routers/topology.py's `_resync_run_status` docstring calls out for
++    its own small duplicated helper.
++    """
++    return {
++        "hostname": node_row.hostname,
++        "role": node_row.role.value if hasattr(node_row.role, "value") else node_row.role,
++        "instance": f"{node_row.ip_address}:{node_row.exporter_port}",
++    }
++
++
++def scan_one_node(db: Session, node_row: models.Node) -> models.SecurityFindingCache:
++    """Runs the Security Agent's four sub-checks for one node and upserts
++    its cache row -- the on-demand fallback routers/security.py uses for
++    a hostname `run_security_scan` hasn't reached yet (a freshly-added
++    node), and the single-host path POST /resync's sandbox drift-demo
++    endpoint uses to make an injected change visible immediately instead
++    of waiting for the next periodic tick.
++    """
++    node = _known_node(node_row)
++    agent_result, failures = security_agent_node._investigate(
++        f"security scan pass for {node['hostname']}", node, narrate=False
++    )
++    return crud.upsert_security_finding_cache(
++        db,
++        hostname=node["hostname"],
++        role=node["role"],
++        confidence=agent_result["confidence"],
++        has_signal=agent_result["raw_data"]["has_signal"],
++        degraded=bool(failures),
++        answer=agent_result["summary"],
++        raw_data=agent_result["raw_data"],
++    )
++
++
++def run_security_scan(db: Session) -> dict:
++    """One fleet-wide pass: scans every known node and upserts its cache
++    row. Returns a summary dict main.py's `_run_periodic_recorded`
++    classifies into "ok"/"degraded" (see main.py's
++    `_security_scan_status`) and routers/security.py's POST /resync
++    returns directly to the caller.
++
++    A single node's sub-checks failing (a Loki/Neutron/CVE-feed/eBPF
++    hiccup) degrades that node's own `degraded` flag -- same
++    resilience.get_breaker contract every other external read in this
++    codebase already has -- but never aborts the rest of the pass; the
++    other nodes' cache rows still get refreshed this tick.
++    """
++    node_rows = crud.list_nodes(db)
++    any_signal = False
++    any_degraded = False
++    for node_row in node_rows:
++        try:
++            cache_row = scan_one_node(db, node_row)
++        except Exception:
++            logger.exception("security_scan_cache: scan failed for node %s", node_row.hostname)
++            any_degraded = True
++            continue
++        if cache_row.has_signal:
++            any_signal = True
++        if cache_row.degraded:
++            any_degraded = True
++
++    return {"node_count": len(node_rows), "has_signal": any_signal, "degraded": any_degraded}
+diff --git a/services/web/app/api/security/health/route.ts b/services/web/app/api/security/health/route.ts
+new file mode 100644
+index 0000000..fb4edcb
+--- /dev/null
++++ b/services/web/app/api/security/health/route.ts
+@@ -0,0 +1,16 @@
++import { NextResponse } from "next/server";
++import { authHeaders } from "@/lib/serverAuth";
++
++const API_URL = process.env.CORTEX_API_URL!;
++
++/** Backs SecurityHealthBadge.tsx. Same thin pass-through shape as
++ * app/api/topology/health/route.ts, just for GET /api/v1/security/health
++ * (models.SecurityScanRun) instead of the topology sync-runs table. */
++export async function GET() {
++  const res = await fetch(`${API_URL}/api/v1/security/health`, {
++    cache: "no-store",
++    headers: await authHeaders(),
++  });
++  const data = await res.json().catch(() => ({}));
++  return NextResponse.json(data, { status: res.status });
++}
+diff --git a/services/web/app/api/security/resync/route.ts b/services/web/app/api/security/resync/route.ts
+new file mode 100644
+index 0000000..09b7075
+--- /dev/null
++++ b/services/web/app/api/security/resync/route.ts
+@@ -0,0 +1,17 @@
++import { NextResponse } from "next/server";
++import { authHeaders } from "@/lib/serverAuth";
++
++const API_URL = process.env.CORTEX_API_URL!;
++
++/** Proxies the "Rescan" control in the Security pages'
++ * (SecurityRescanButton.tsx) to POST /api/v1/security/resync -- the
++ * Security-page sibling of app/api/topology/resync/route.ts. */
++export async function POST() {
++  const res = await fetch(`${API_URL}/api/v1/security/resync`, {
++    method: "POST",
++    cache: "no-store",
++    headers: await authHeaders(),
++  });
++  const data = await res.json().catch(() => ({}));
++  return NextResponse.json(data, { status: res.status });
++}
+diff --git a/services/web/app/api/security/sandbox/drift/[hostname]/route.ts b/services/web/app/api/security/sandbox/drift/[hostname]/route.ts
+new file mode 100644
+index 0000000..5aa86e6
+--- /dev/null
++++ b/services/web/app/api/security/sandbox/drift/[hostname]/route.ts
+@@ -0,0 +1,34 @@
++import { NextResponse } from "next/server";
++import { authHeaders } from "@/lib/serverAuth";
++
++const API_URL = process.env.CORTEX_API_URL!;
++
++/** Proxies the security-groups detail page's sandbox-only "Simulate
++ * drift" panel to POST/DELETE /api/v1/security/sandbox/drift/{hostname}
++ * (services/security_sandbox.py). Admin-only and CORTEX_ENV=sandbox-only
++ * on the API side already -- this route is a thin pass-through, it
++ * doesn't duplicate either check. */
++export async function POST(_req: Request, { params }: { params: Promise<{ hostname: string }> }) {
++  const { hostname } = await params;
++  const res = await fetch(`${API_URL}/api/v1/security/sandbox/drift/${encodeURIComponent(hostname)}`, {
++    method: "POST",
++    cache: "no-store",
++    headers: await authHeaders(),
++  });
++  const data = await res.json().catch(() => ({}));
++  return NextResponse.json(data, { status: res.status });
++}
++
++export async function DELETE(req: Request, { params }: { params: Promise<{ hostname: string }> }) {
++  const { hostname } = await params;
++  const ruleId = new URL(req.url).searchParams.get("rule_id");
++  if (!ruleId) {
++    return NextResponse.json({ detail: "rule_id query param is required" }, { status: 400 });
++  }
++  const res = await fetch(
++    `${API_URL}/api/v1/security/sandbox/drift/${encodeURIComponent(hostname)}?rule_id=${encodeURIComponent(ruleId)}`,
++    { method: "DELETE", cache: "no-store", headers: await authHeaders() }
++  );
++  const data = await res.json().catch(() => ({}));
++  return NextResponse.json(data, { status: res.status });
++}
+diff --git a/services/web/app/security/page.tsx b/services/web/app/security/page.tsx
+index 1990223..89f5c54 100644
+--- a/services/web/app/security/page.tsx
++++ b/services/web/app/security/page.tsx
+@@ -20,6 +20,8 @@ import type { SecurityFinding, AgentSecuritySignal } from "@/lib/types";
+ import { securityPillTone } from "@/lib/securityStatus";
+ import { Card } from "@/components/ui/Card";
+ import MetricCard from "@/components/ui/MetricCard";
++import SecurityHealthBadge from "@/components/SecurityHealthBadge";
++import SecurityRescanButton from "@/components/SecurityRescanButton";
+ 
+ const fetcher = async (url: string) => {
+   const res = await fetch(url);
+@@ -58,7 +60,13 @@ export default function SecurityOverviewPage() {
+   const { data, error, isLoading, mutate } = useSWR<{ findings: SecurityFinding[] }>(
+     "/api/security/findings",
+     fetcher,
+-    { refreshInterval: 20000, revalidateOnFocus: true },
++    // Phase Sec-3: /findings now reads a cache the backend refreshes on
++    // its own schedule (SECURITY_SCAN_INTERVAL_SECONDS, default 45s) --
++    // a plain indexed Postgres read, not a live per-request scan -- so
++    // this can poll noticeably tighter than it used to without adding
++    // real load. SecurityRescanButton below covers "I don't want to
++    // wait even that long" with an explicit on-demand trigger.
++    { refreshInterval: 15000, revalidateOnFocus: true },
+   );
+ 
+   const findings = useMemo(() => data?.findings ?? [], [data]);
+@@ -86,17 +94,22 @@ export default function SecurityOverviewPage() {
+           <p className="mt-1 text-sm text-text-faint">
+             The Security Agent&apos;s four sub-checks (auth activity, security groups, known CVEs, kernel-level
+             signals), polled directly -- the same findings the Copilot gives you in chat, without asking a question
+-            first.
++            first. Refreshes automatically as the scan pass below completes; use Rescan to trigger one right now.
+           </p>
+         </div>
+-        <button
+-          onClick={() => mutate()}
+-          type="button"
+-          className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] px-3 py-1.5 text-sm font-medium text-text-dim hover:bg-[var(--surface)]"
+-        >
+-          <RefreshCw className="h-3.5 w-3.5" strokeWidth={2} />
+-          Refresh
+-        </button>
++        <div className="flex items-center gap-2">
++          <SecurityHealthBadge />
++          <SecurityRescanButton />
++          <button
++            onClick={() => mutate()}
++            type="button"
++            title="Re-fetch the current cache without triggering a new scan pass"
++            className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] px-3 py-1.5 text-sm font-medium text-text-dim hover:bg-[var(--surface)]"
++          >
++            <RefreshCw className="h-3.5 w-3.5" strokeWidth={2} />
++            Refresh
++          </button>
++        </div>
+       </div>
+ 
+       {error && (
+diff --git a/services/web/app/security/security-groups/[hostname]/page.tsx b/services/web/app/security/security-groups/[hostname]/page.tsx
+index 430cc56..03b5a6d 100644
+--- a/services/web/app/security/security-groups/[hostname]/page.tsx
++++ b/services/web/app/security/security-groups/[hostname]/page.tsx
+@@ -1,12 +1,27 @@
+ "use client";
+ 
++import { useState } from "react";
+ import { useParams } from "next/navigation";
+ import Link from "next/link";
+ import useSWR from "swr";
+-import { ArrowLeft, RefreshCw, AlertTriangle, ShieldOff, Lock, Plus, Minus } from "lucide-react";
+-import type { AgentSecGroupSignal, AgentSecGroupRule } from "@/lib/types";
+-import { securityPillTone } from "@/lib/securityStatus";
++import {
++  ArrowLeft,
++  RefreshCw,
++  AlertTriangle,
++  ShieldOff,
++  Lock,
++  Plus,
++  Minus,
++  Layers,
++  Info,
++  FlaskConical,
++  Loader2,
++} from "lucide-react";
++import type { AgentSecGroupSignal, AgentSecGroupRule, SecurityStatus } from "@/lib/types";
++import { securityPillTone, flaggedSecurityGroupKeys, isSecurityGroupFlagged } from "@/lib/securityStatus";
+ import { Card } from "@/components/ui/Card";
++import SecurityHealthBadge from "@/components/SecurityHealthBadge";
++import SecurityRescanButton from "@/components/SecurityRescanButton";
+ 
+ const fetcher = async (url: string) => {
+   const res = await fetch(url);
+@@ -26,30 +41,154 @@ function formatRule(rule: AgentSecGroupRule["rule"]) {
+   return `${rule.direction} · ${proto} · ${ports} · ${from}`;
+ }
+ 
++/** Sandbox-only "simulate a real drift" control (Phase Sec-3). Only ever
++ * rendered when GET /api/security/status' `sandbox_mode` is true (i.e.
++ * CORTEX_ENV=sandbox on the API side, see services/security_sandbox.py) --
++ * the backend endpoints this calls 404 outside the sandbox regardless,
++ * this just avoids showing a button that can't work in a real deployment.
++ *
++ * Exists because exercising Phase Sec-1's drift detection end to end used
++ * to mean hand-running scripts/run_security_snapshot.py plus a raw curl
++ * against openstack-sim's own fault-injection endpoints, in the right
++ * order, from a terminal -- see that script's docstring. This wraps the
++ * same two steps (snapshot, then inject) behind one click.
++ */
++function SandboxDriftDemo({ hostname, onChanged }: { hostname: string; onChanged: () => void }) {
++  const [busy, setBusy] = useState(false);
++  const [injected, setInjected] = useState<{ ruleId: string; detail: string; securityGroup: string } | null>(null);
++  const [error, setError] = useState<string | null>(null);
++
++  const inject = async () => {
++    setBusy(true);
++    setError(null);
++    try {
++      const res = await fetch(`/api/security/sandbox/drift/${encodeURIComponent(hostname)}`, { method: "POST" });
++      const body = await res.json().catch(() => ({}));
++      if (!res.ok) {
++        setError(body.detail ?? `Request failed (${res.status}).`);
++      } else {
++        setInjected({ ruleId: body.rule_id, detail: body.detail, securityGroup: body.security_group });
++        onChanged();
++      }
++    } catch {
++      setError("Could not reach the sandbox drift endpoint.");
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const reset = async () => {
++    if (!injected) return;
++    setBusy(true);
++    setError(null);
++    try {
++      const res = await fetch(
++        `/api/security/sandbox/drift/${encodeURIComponent(hostname)}?rule_id=${encodeURIComponent(injected.ruleId)}`,
++        { method: "DELETE" },
++      );
++      if (!res.ok) {
++        const body = await res.json().catch(() => ({}));
++        setError(body.detail ?? `Request failed (${res.status}).`);
++      } else {
++        setInjected(null);
++        onChanged();
++      }
++    } catch {
++      setError("Could not reach the sandbox drift endpoint.");
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  return (
++    <Card padding="p-0" className="border-dashed">
++      <div className="flex items-center gap-2 border-b px-5 py-3" style={{ borderColor: "var(--border-soft)" }}>
++        <FlaskConical className="h-4 w-4" style={{ color: "var(--warn)" }} strokeWidth={2} />
++        <span className="font-display text-[14px] font-semibold text-color-text">Simulate drift (sandbox)</span>
++        <span className="ml-auto rounded-full px-2 py-0.5 text-[10px] font-medium" style={{ color: "var(--warn)", background: "var(--warn-soft)" }}>
++          Sandbox only
++        </span>
++      </div>
++      <div className="space-y-3 p-5">
++        <p className="text-sm text-text-faint">
++          Takes a fresh baseline snapshot of this host right now, then adds one real ingress rule (an
++          internal-only port, via openstack-sim&apos;s own fault-injection endpoint) to whichever security group
++          is actually attached here. Nothing is faked in the UI -- the rule really is added to the simulated
++          OpenStack backend, so it shows up below under Drift since last snapshot the same way a real
++          configuration change would.
++        </p>
++        {error && (
++          <p className="text-xs" style={{ color: "var(--crit)" }}>
++            {error}
++          </p>
++        )}
++        {injected ? (
++          <>
++            <p className="text-xs text-text-dim">{injected.detail}</p>
++            <button
++              onClick={reset}
++              disabled={busy}
++              type="button"
++              className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] px-3 py-1.5 text-sm font-medium disabled:opacity-60"
++              style={{ border: "1px solid var(--border)", color: "var(--text)" }}
++            >
++              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} /> : <Minus className="h-3.5 w-3.5" strokeWidth={2} />}
++              Remove the injected rule
++            </button>
++          </>
++        ) : (
++          <button
++            onClick={inject}
++            disabled={busy}
++            type="button"
++            className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] px-3 py-1.5 text-sm font-medium disabled:opacity-60"
++            style={{ border: "1px solid var(--border)", color: "var(--text)" }}
++          >
++            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} /> : <Plus className="h-3.5 w-3.5" strokeWidth={2} />}
++            Inject a real drift on {hostname}
++          </button>
++        )}
++      </div>
++    </Card>
++  );
++}
++
+ export default function SecurityGroupDetailPage() {
+   const { hostname } = useParams<{ hostname: string }>();
+   const { data, error, isLoading, mutate } = useSWR<AgentSecGroupSignal>(
+     hostname ? `/api/security/groups/${encodeURIComponent(hostname)}` : null,
+     fetcher,
+-    { refreshInterval: 20000, revalidateOnFocus: true },
++    // Phase Sec-3: this now reads security_finding_cache (a plain
++    // Postgres lookup) rather than computing rules/drift live on every
++    // request, so a tighter poll doesn't add real backend load.
++    { refreshInterval: 15000, revalidateOnFocus: true },
+   );
++  const { data: status } = useSWR<SecurityStatus>("/api/security/status", fetcher, { refreshInterval: 15000 });
+ 
+   const tone = data ? securityPillTone(data) : null;
++  const groups = data?.data?.security_groups ?? null;
++  const flagged = data ? flaggedSecurityGroupKeys(data) : { names: new Set<string>(), ids: new Set<string>() };
+ 
+   return (
+     <div className="space-y-6">
+-      <div>
+-        <Link href="/security/security-groups" className="mb-2 inline-flex items-center gap-1.5 text-sm text-text-faint hover:text-text-dim">
+-          <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} />
+-          Back to Security groups
+-        </Link>
+-        <div className="flex items-center gap-2">
+-          <h1 className="font-display text-[22px] font-semibold text-color-text">{hostname}</h1>
+-          {tone && (
+-            <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ color: tone.color, background: tone.soft }}>
+-              {tone.label}
+-            </span>
+-          )}
++      <div className="flex items-start justify-between gap-4">
++        <div>
++          <Link href="/security/security-groups" className="mb-2 inline-flex items-center gap-1.5 text-sm text-text-faint hover:text-text-dim">
++            <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} />
++            Back to Security groups
++          </Link>
++          <div className="flex items-center gap-2">
++            <h1 className="font-display text-[22px] font-semibold text-color-text">{hostname}</h1>
++            {tone && (
++              <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ color: tone.color, background: tone.soft }}>
++                {tone.label}
++              </span>
++            )}
++          </div>
++        </div>
++        <div className="flex shrink-0 items-center gap-2 pt-1">
++          <SecurityHealthBadge />
++          <SecurityRescanButton />
+         </div>
+       </div>
+ 
+@@ -70,7 +209,7 @@ export default function SecurityGroupDetailPage() {
+         <Card>
+           <div className="flex items-center gap-2 text-sm text-text-faint">
+             <RefreshCw className="h-4 w-4 animate-spin" strokeWidth={2} />
+-            Reading live security-group rules…
++            Reading cached security-group rules…
+           </div>
+         </Card>
+       )}
+@@ -93,6 +232,55 @@ export default function SecurityGroupDetailPage() {
+             </Card>
+           )}
+ 
++          <Card padding="p-0">
++            <div className="flex items-center gap-2 border-b px-5 py-3" style={{ borderColor: "var(--border-soft)" }}>
++              <Layers className="h-4 w-4" style={{ color: "var(--chart-3)" }} strokeWidth={2} />
++              <span className="font-display text-[14px] font-semibold text-color-text">Current security groups</span>
++              {data.scanned_at && (
++                <span className="ml-auto text-xs text-text-faint">as of last scan</span>
++              )}
++            </div>
++            {groups === null ? (
++              <div className="p-5 text-sm text-text-faint">No group data available for this host.</div>
++            ) : groups.length === 0 ? (
++              <div className="p-5 text-sm text-text-faint">No security group attached to any instance on this host.</div>
++            ) : (
++              <ul className="divide-y" style={{ borderColor: "var(--border-soft)" }}>
++                {groups.map((g) => {
++                  const isFlagged = isSecurityGroupFlagged(g, flagged);
++                  return (
++                    <li key={g.id} className="px-5 py-3">
++                      <div className="flex items-center justify-between gap-3">
++                        <span className="text-sm font-medium text-color-text">{g.name}</span>
++                        <span
++                          className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
++                          style={{
++                            color: isFlagged ? "var(--crit)" : "var(--ok)",
++                            background: isFlagged ? "var(--crit-soft)" : "var(--ok-soft)",
++                          }}
++                        >
++                          {isFlagged ? "Flagged" : "Clean"}
++                        </span>
++                      </div>
++                      <p className="mt-0.5 text-xs text-text-faint">
++                        {g.rules.length} rule{g.rules.length === 1 ? "" : "s"}
++                      </p>
++                      {g.rules.length > 0 && (
++                        <ul className="mt-1.5 space-y-0.5">
++                          {g.rules.map((rule, j) => (
++                            <li key={j} className="text-xs text-text-dim">
++                              {formatRule(rule)}
++                            </li>
++                          ))}
++                        </ul>
++                      )}
++                    </li>
++                  );
++                })}
++              </ul>
++            )}
++          </Card>
++
+           <Card padding="p-0">
+             <div className="flex items-center gap-2 border-b px-5 py-3" style={{ borderColor: "var(--border-soft)" }}>
+               <ShieldOff className="h-4 w-4" style={{ color: "var(--crit)" }} strokeWidth={2} />
+@@ -118,6 +306,16 @@ export default function SecurityGroupDetailPage() {
+               <RefreshCw className="h-4 w-4" style={{ color: "var(--warn)" }} strokeWidth={2} />
+               <span className="font-display text-[14px] font-semibold text-color-text">Drift since last snapshot</span>
+             </div>
++            <div className="flex items-start gap-2 border-b px-5 py-3 text-xs text-text-faint" style={{ borderColor: "var(--border-soft)" }}>
++              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={2} />
++              <span>
++                A periodic job stores a snapshot of every host&apos;s security-group rules (every
++                SECURITY_SNAPSHOT_INTERVAL_SECONDS). This section compares this host&apos;s rules right now
++                against that last stored snapshot, so it can flag a change even when the new rule isn&apos;t
++                risky by the overly-permissive baseline above -- e.g. a newly-opened internal port is worth
++                knowing about even if it&apos;s not itself a security hole.
++              </span>
++            </div>
+             {(data.drift?.length ?? 0) === 0 ? (
+               <div className="p-5 text-sm text-text-faint">
+                 No change since the last stored snapshot (or no snapshot has been taken for this host yet).
+@@ -147,6 +345,8 @@ export default function SecurityGroupDetailPage() {
+               </ul>
+             )}
+           </Card>
++
++          {status?.sandbox_mode && hostname && <SandboxDriftDemo hostname={hostname} onChanged={() => mutate()} />}
+         </>
+       )}
+     </div>
+diff --git a/services/web/app/security/security-groups/page.tsx b/services/web/app/security/security-groups/page.tsx
+index 4dd173e..1a0e6de 100644
+--- a/services/web/app/security/security-groups/page.tsx
++++ b/services/web/app/security/security-groups/page.tsx
+@@ -4,8 +4,10 @@ import Link from "next/link";
+ import useSWR from "swr";
+ import { ArrowLeft, RefreshCw, AlertTriangle, Network as NetworkIcon } from "lucide-react";
+ import type { SecurityFinding } from "@/lib/types";
+-import { securityPillTone } from "@/lib/securityStatus";
++import { securityPillTone, flaggedSecurityGroupKeys, isSecurityGroupFlagged } from "@/lib/securityStatus";
+ import { Card } from "@/components/ui/Card";
++import SecurityHealthBadge from "@/components/SecurityHealthBadge";
++import SecurityRescanButton from "@/components/SecurityRescanButton";
+ 
+ const fetcher = async (url: string) => {
+   const res = await fetch(url);
+@@ -22,24 +24,31 @@ export default function SecurityGroupsListPage() {
+   const { data, error, isLoading, mutate } = useSWR<{ findings: SecurityFinding[] }>(
+     "/api/security/findings",
+     fetcher,
+-    { refreshInterval: 20000, revalidateOnFocus: true },
++    { refreshInterval: 15000, revalidateOnFocus: true },
+   );
+ 
+   const findings = data?.findings ?? [];
+ 
+   return (
+     <div className="space-y-6">
+-      <div>
+-        <Link href="/security" className="mb-2 inline-flex items-center gap-1.5 text-sm text-text-faint hover:text-text-dim">
+-          <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} />
+-          Back to Security
+-        </Link>
+-        <h1 className="font-display text-[22px] font-semibold text-color-text">Security groups</h1>
+-        <p className="mt-1 text-sm text-text-faint">
+-          Current Neutron security-group rules per host, audited against the built-in overly-permissive baseline,
+-          plus drift against the most recent stored snapshot (Phase Sec-1) -- a rule can show up as changed even
+-          when it isn&apos;t risky by itself.
+-        </p>
++      <div className="flex items-start justify-between gap-4">
++        <div>
++          <Link href="/security" className="mb-2 inline-flex items-center gap-1.5 text-sm text-text-faint hover:text-text-dim">
++            <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} />
++            Back to Security
++          </Link>
++          <h1 className="font-display text-[22px] font-semibold text-color-text">Security groups</h1>
++          <p className="mt-1 text-sm text-text-faint">
++            Current Neutron security-group rules per host, audited against the built-in overly-permissive baseline,
++            plus drift against the most recent stored snapshot (Phase Sec-1) -- a rule can show up as changed even
++            when it isn&apos;t risky by itself. The Groups column below is every group actually attached to that
++            host right now, with the specific one(s) carrying a signal flagged.
++          </p>
++        </div>
++        <div className="flex shrink-0 items-center gap-2 pt-1">
++          <SecurityHealthBadge />
++          <SecurityRescanButton />
++        </div>
+       </div>
+ 
+       {error && (
+@@ -74,6 +83,7 @@ export default function SecurityGroupsListPage() {
+                 <tr className="border-b text-left text-xs text-text-faint" style={{ borderColor: "var(--border-soft)" }}>
+                   <th className="px-5 py-2 font-medium">Host</th>
+                   <th className="px-3 py-2 font-medium">Status</th>
++                  <th className="px-3 py-2 font-medium">Groups (current)</th>
+                   <th className="px-3 py-2 font-medium">Risky rules</th>
+                   <th className="px-3 py-2 font-medium">Drift since last snapshot</th>
+                 </tr>
+@@ -84,6 +94,8 @@ export default function SecurityGroupsListPage() {
+                   const tone = securityPillTone(sig);
+                   const riskyCount = sig.risky_rules?.length ?? null;
+                   const driftCount = sig.drift?.length ?? null;
++                  const groups = sig.data?.security_groups ?? null;
++                  const flagged = flaggedSecurityGroupKeys(sig);
+                   return (
+                     <tr key={f.hostname} className="border-b last:border-0" style={{ borderColor: "var(--border-soft)" }}>
+                       <td className="px-5 py-2.5">
+@@ -100,6 +112,33 @@ export default function SecurityGroupsListPage() {
+                           {tone.label}
+                         </span>
+                       </td>
++                      <td className="px-3 py-2.5">
++                        {groups === null ? (
++                          <span className="text-text-faint">—</span>
++                        ) : groups.length === 0 ? (
++                          <span className="text-text-faint">none attached</span>
++                        ) : (
++                          <div className="flex flex-wrap gap-1">
++                            {groups.map((g) => {
++                              const isFlagged = isSecurityGroupFlagged(g, flagged);
++                              return (
++                                <span
++                                  key={g.id}
++                                  title={`${g.rules.length} rule${g.rules.length === 1 ? "" : "s"}`}
++                                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
++                                  style={{
++                                    color: isFlagged ? "var(--crit)" : "var(--text-dim)",
++                                    background: isFlagged ? "var(--crit-soft)" : "var(--canvas)",
++                                  }}
++                                >
++                                  {isFlagged && <AlertTriangle className="h-2.5 w-2.5" strokeWidth={2.5} />}
++                                  {g.name}
++                                </span>
++                              );
++                            })}
++                          </div>
++                        )}
++                      </td>
+                       <td className="px-3 py-2.5 tabular-nums text-text-dim">{riskyCount === null ? "—" : riskyCount}</td>
+                       <td className="px-3 py-2.5 tabular-nums text-text-dim">{driftCount === null ? "—" : driftCount}</td>
+                     </tr>
+diff --git a/services/web/components/SecurityHealthBadge.tsx b/services/web/components/SecurityHealthBadge.tsx
+new file mode 100644
+index 0000000..b3a54bc
+--- /dev/null
++++ b/services/web/components/SecurityHealthBadge.tsx
+@@ -0,0 +1,75 @@
++"use client";
++
++import useSWR from "swr";
++import { RefreshCw } from "lucide-react";
++import type { SecurityHealth, TopologySyncStatus } from "@/lib/types";
++import { SYNC_STATUS_COLOR, SYNC_STATUS_LABEL, SYNC_STATUS_SOFT, formatRelative } from "@/lib/topology";
++
++const fetcher = async (url: string) => {
++  const res = await fetch(url);
++  if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
++  return res.json();
++};
++
++/** "Scanned Xm ago" badge for the Security pages, same shape and same
++ * ok/degraded/unknown/failed vocabulary TopologyHealthBadge already gives
++ * the topology page -- reusing lib/topology.ts's SYNC_STATUS_* maps
++ * rather than a second copy, since the vocabulary means the same thing
++ * here (see main.py's `_security_scan_status`).
++ *
++ * Backed by GET /api/v1/security/health (services/security_scan_cache.py
++ * + models.SecurityScanRun), i.e. actual scan-pass run history, not a
++ * live recomputation -- the whole point of Phase Sec-3's caching pass is
++ * that this can poll far more cheaply than a live scan would.
++ */
++export default function SecurityHealthBadge() {
++  const { data, error, isLoading } = useSWR<SecurityHealth>("/api/security/health", fetcher, {
++    refreshInterval: 10000,
++  });
++
++  if (isLoading) {
++    return (
++      <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium text-text-faint">
++        <RefreshCw className="h-3 w-3 animate-spin" strokeWidth={2} />
++        Checking scan…
++      </span>
++    );
++  }
++
++  if (error || !data) {
++    return (
++      <span
++        className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium"
++        style={{ color: "var(--crit)", background: "var(--crit-soft)" }}
++        title="Could not reach GET /api/v1/security/health"
++      >
++        <span className="status-dot" style={{ background: "var(--crit)" }} />
++        Health unavailable
++      </span>
++    );
++  }
++
++  const status = data.status as TopologySyncStatus;
++  const label = SYNC_STATUS_LABEL[status];
++  const color = SYNC_STATUS_COLOR[status];
++  const soft = SYNC_STATUS_SOFT[status];
++  const finishedAt = data.last_run?.finished_at ?? null;
++
++  const tooltip = data.last_run
++    ? `security scan: ${data.last_run.status} (finished ${formatRelative(data.last_run.finished_at)})`
++    : "no scan pass has run yet";
++
++  return (
++    <span
++      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium"
++      style={{ color, background: soft }}
++      title={tooltip}
++    >
++      <span
++        className={status === "ok" ? "status-dot glow-pulse" : "status-dot"}
++        style={{ background: color, ["--pulse-color" as string]: color }}
++      />
++      {finishedAt ? `Scanned ${formatRelative(finishedAt)}` : label}
++    </span>
++  );
++}
+diff --git a/services/web/components/SecurityRescanButton.tsx b/services/web/components/SecurityRescanButton.tsx
+new file mode 100644
+index 0000000..5de0dab
+--- /dev/null
++++ b/services/web/components/SecurityRescanButton.tsx
+@@ -0,0 +1,118 @@
++"use client";
++
++import { useState } from "react";
++import { useSWRConfig } from "swr";
++import { AnimatePresence, motion } from "framer-motion";
++import { ShieldCheck, Loader2, CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
++import type { SecurityScanRun } from "@/lib/types";
++
++type Phase = "idle" | "running" | "ok" | "degraded" | "failed";
++
++const PHASE_ICON: Record<Exclude<Phase, "idle" | "running">, typeof CheckCircle2> = {
++  ok: CheckCircle2,
++  degraded: AlertTriangle,
++  failed: XCircle,
++};
++
++const PHASE_COLOR: Record<Exclude<Phase, "idle" | "running">, string> = {
++  ok: "var(--ok)",
++  degraded: "var(--warn)",
++  failed: "var(--crit)",
++};
++
++const PHASE_LABEL: Record<Exclude<Phase, "idle" | "running">, string> = {
++  ok: "Rescanned",
++  degraded: "Partial rescan",
++  failed: "Rescan failed",
++};
++
++/** "Rescan" -- a manual, on-demand trigger for the same fleet-wide
++ * Security Agent scan pass main.py's periodic loop already runs every
++ * SECURITY_SCAN_INTERVAL_SECONDS (see routers/security.py's new
++ * POST /resync). Direct sibling of TopologyResyncButton's "Reconverge"
++ * control -- same idle/running/outcome animation, same "revalidate every
++ * SWR key this could have changed" cleanup -- just for the Security
++ * Agent's cache (security_finding_cache) instead of the topology graph.
++ *
++ * Revalidates every /api/security/* key on completion: /findings (the
++ * overview + security-groups list pages), /health (this button's own
++ * sibling badge), /status (the sandbox-mode/last-scan strip), and every
++ * /groups/{hostname} key currently mounted (the per-host detail page) --
++ * a rescan can change any of them, and a degraded/failed pass can still
++ * have partially refreshed some hosts' cache rows (security_scan_cache.
++ * run_security_scan keeps going after one node's sub-checks fail), so
++ * all of them should reflect whatever actually happened rather than
++ * waiting out their own poll interval.
++ */
++export default function SecurityRescanButton() {
++  const { mutate } = useSWRConfig();
++  const [phase, setPhase] = useState<Phase>("idle");
++
++  const isBusy = phase === "running";
++
++  const run = async () => {
++    if (isBusy) return;
++    setPhase("running");
++    try {
++      const res = await fetch("/api/security/resync", { method: "POST" });
++      const data = (await res.json().catch(() => null)) as (SecurityScanRun & { detail?: string }) | null;
++      if (!res.ok || !data) {
++        setPhase("failed");
++      } else {
++        setPhase(data.status === "ok" ? "ok" : data.status === "degraded" ? "degraded" : "failed");
++      }
++    } catch {
++      setPhase("failed");
++    } finally {
++      mutate("/api/security/health");
++      mutate("/api/security/status");
++      mutate("/api/security/findings");
++      mutate((key) => typeof key === "string" && key.startsWith("/api/security/groups/"));
++      setTimeout(() => setPhase("idle"), 2600);
++    }
++  };
++
++  return (
++    <button
++      onClick={run}
++      disabled={isBusy}
++      title="Trigger an immediate security scan pass across every known node"
++      className="relative inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-control)] px-3 text-sm font-medium transition-colors disabled:cursor-wait"
++      style={{
++        border: "1px solid var(--border)",
++        color: phase === "idle" || phase === "running" ? "var(--text)" : PHASE_COLOR[phase],
++      }}
++    >
++      <AnimatePresence mode="wait" initial={false}>
++        {phase === "idle" && (
++          <motion.span key="idle" className="inline-flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
++            <ShieldCheck className="h-3.5 w-3.5" strokeWidth={2} />
++            Rescan
++          </motion.span>
++        )}
++        {phase === "running" && (
++          <motion.span key="running" className="inline-flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
++            <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
++            Rescanning…
++          </motion.span>
++        )}
++        {(phase === "ok" || phase === "degraded" || phase === "failed") &&
++          (() => {
++            const Icon = PHASE_ICON[phase];
++            return (
++              <motion.span
++                key={phase}
++                className="inline-flex items-center gap-1.5"
++                initial={{ opacity: 0, y: -2 }}
++                animate={{ opacity: 1, y: 0 }}
++                exit={{ opacity: 0 }}
++              >
++                <Icon className="h-3.5 w-3.5" strokeWidth={2} />
++                {PHASE_LABEL[phase]}
++              </motion.span>
++            );
++          })()}
++      </AnimatePresence>
++    </button>
++  );
++}
+diff --git a/services/web/lib/securityStatus.ts b/services/web/lib/securityStatus.ts
+index 3cf85b3..726ec35 100644
+--- a/services/web/lib/securityStatus.ts
++++ b/services/web/lib/securityStatus.ts
+@@ -1,4 +1,4 @@
+-import type { AgentSecuritySignal } from "./types";
++import type { AgentSecGroupInfo, AgentSecGroupSignal, AgentSecuritySignal } from "./types";
+ 
+ /** Same {has_signal, degraded, restricted} -> tone/label mapping
+  * components/CopilotAgentPanels.tsx's SecuritySignalRow uses for the chat
+@@ -13,3 +13,25 @@ export function securityPillTone(signal: AgentSecuritySignal) {
+   if (signal.has_signal) return { color: "var(--crit)", soft: "var(--crit-soft)", label: "Flagged" };
+   return { color: "var(--ok)", soft: "var(--ok-soft)", label: "Clean" };
+ }
++
++/** Phase Sec-3: which of a host's *currently attached* security groups
++ * (sig.data.security_groups) are the actual one(s) carrying a signal --
++ * either a static overly-permissive rule (risky_rules, matched by group
++ * name -- that's the only identifier security_audit.diff_security_
++ * groups' risky-rule entries carry) or a change since the last snapshot
++ * (drift, matched by group id). Everything upstream of this only ever
++ * reported aggregate counts ("3 risky rules somewhere on this host"); this
++ * is what lets a page point at the specific group instead.
++ */
++export function flaggedSecurityGroupKeys(sig: AgentSecGroupSignal): { names: Set<string>; ids: Set<string> } {
++  const names = new Set((sig.risky_rules ?? []).map((r) => r.security_group));
++  const ids = new Set((sig.drift ?? []).map((d) => d.security_group_id));
++  return { names, ids };
++}
++
++export function isSecurityGroupFlagged(
++  group: AgentSecGroupInfo,
++  flagged: { names: Set<string>; ids: Set<string> },
++): boolean {
++  return flagged.names.has(group.name) || flagged.ids.has(group.id);
++}
+diff --git a/services/web/lib/types.ts b/services/web/lib/types.ts
+index 375314e..c82a8ae 100644
+--- a/services/web/lib/types.ts
++++ b/services/web/lib/types.ts
+@@ -739,6 +739,18 @@ export interface AgentSecGroupDriftEntry {
+   removed_rules: AgentSecGroupRule["rule"][];
+ }
+ 
++// Phase Sec-3: one security group actually attached to a host's
++// instance(s), with its full rule list -- services/security_audit.py's
++// `get_node_security_groups` always computed this (as `data.
++// security_groups`), but no page rendered it until now; everything below
++// risky_rules/drift only ever showed aggregate counts, never "here's
++// every group actually on this node right now".
++export interface AgentSecGroupInfo {
++  id: string;
++  name: string;
++  rules: AgentSecGroupRule["rule"][];
++}
++
+ export interface AgentSecGroupSignal extends AgentSecuritySignal {
+   risky_rules?: AgentSecGroupRule[];
+   // Phase Sec-1: this pass's live rules diffed against the most recent
+@@ -748,6 +760,20 @@ export interface AgentSecGroupSignal extends AgentSecuritySignal {
+   // same reason every other evidence field here is: a viewer account
+   // never receives it (see AgentSecuritySignal's own docstring).
+   drift?: AgentSecGroupDriftEntry[];
++  // Phase Sec-3: the full current-groups-per-node listing
++  // security_audit.get_node_security_groups already returns as `data` --
++  // an admin gets it here, a viewer never does (same restriction as
++  // risky_rules/drift above).
++  data?: {
++    hostname: string;
++    security_groups: AgentSecGroupInfo[];
++    risky_rules: AgentSecGroupRule[];
++  } | null;
++  // Phase Sec-3: when this particular signal was last computed --
++  // present on the dedicated GET /api/v1/security/groups/{hostname}
++  // response (routers/security.py), not on the per-signal fields nested
++  // inside a fleet-wide GET /findings response.
++  scanned_at?: string;
+ }
+ 
+ export interface AgentCveMatch {
+@@ -799,6 +825,10 @@ export interface SecurityFinding {
+   degraded: boolean;
+   answer: string;
+   raw_data: AgentSecurityData;
++  // Phase Sec-3: when `security_finding_cache` last refreshed this host
++  // (services/security_scan_cache.py) -- how GET /findings can now
++  // return instantly instead of scanning live on every request.
++  scanned_at: string;
+ }
+ 
+ export interface SecurityStatus {
+@@ -806,6 +836,25 @@ export interface SecurityStatus {
+   has_signal: boolean;
+   degraded: boolean;
+   node_count: number;
++  // Phase Sec-3 additions -- see routers/security.py's GET /status.
++  last_scan_at: string | null;
++  sandbox_mode: boolean;
++}
++
++// Phase Sec-3 -- same run-history shape TopologySyncRun/TopologyHealth
++// already give the topology page, backing GET /api/v1/security/health
++// and the SecurityHealthBadge/SecurityRescanButton components.
++export interface SecurityScanRun {
++  status: "ok" | "degraded" | "failed";
++  summary: Record<string, unknown> | null;
++  error: string | null;
++  started_at: string;
++  finished_at: string;
++}
++
++export interface SecurityHealth {
++  status: "ok" | "degraded" | "failed" | "unknown";
++  last_run: SecurityScanRun | null;
+ }
+ 
+ export type AgentRawData =
+-- 
+2.43.0
+

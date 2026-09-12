@@ -28,6 +28,7 @@ from .services.anomaly_detector import detect_anomalies
 from .services.quota_budget_monitor import check_quota_and_budget
 from .services.baseline_builder import compute_baselines
 from .services.security_snapshot_builder import capture_security_group_snapshots
+from .services.security_scan_cache import run_security_scan
 from .services.node_seeder import seed_nodes_from_file_sd
 from .services.forecast_dataset_builder import build_dataset
 from .routers import forecast
@@ -58,6 +59,20 @@ BASELINE_REFRESH_INTERVAL_SECONDS = int(os.getenv("BASELINE_REFRESH_INTERVAL_SEC
 # group rule can change at any moment and the whole point of this phase is
 # to notice that promptly.
 SECURITY_SNAPSHOT_INTERVAL_SECONDS = int(os.getenv("SECURITY_SNAPSHOT_INTERVAL_SECONDS", "900"))
+
+# How often run_security_scan() (services/security_scan_cache.py) re-runs
+# the Security Agent's four sub-checks for every known node and refreshes
+# `security_finding_cache` -- what GET /api/v1/security/findings and the
+# /security, /security/security-groups dashboard pages actually read.
+# Deliberately its own interval, much shorter than
+# SECURITY_SNAPSHOT_INTERVAL_SECONDS above: the snapshot job only feeds
+# *drift* history and doesn't need to run often, but this cache is the
+# thing a person is staring at waiting for it to update, the same
+# "shouldn't feel stale while you're looking at it" bar
+# PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS sets for the topology page.
+# POST /api/v1/security/resync (the Security page's manual "Rescan" button)
+# triggers an out-of-band pass on top of this without waiting for the tick.
+SECURITY_SCAN_INTERVAL_SECONDS = int(os.getenv("SECURITY_SCAN_INTERVAL_SECONDS", "45"))
 
 # How often the forecasting dataset (cpu/memory/disk history CSV) is rebuilt
 # from Prometheus. build_dataset() is incremental (it only fetches since the
@@ -165,18 +180,40 @@ def _prometheus_health_status(summary: dict) -> str:
     return "degraded"
 
 
-async def _run_periodic_recorded(fn, interval_seconds: float, name: str, sync_type: str, status_fn) -> None:
-    """Same shape as _run_periodic, but for the two OpenStack/Prometheus
-    sync loops (topology_sync.sync_topology, prometheus_health.
-    sync_prometheus_health) whose outcome now also gets appended to the
-    `topology_sync_runs` table (see models.TopologySyncRun and
-    crud.record_topology_sync_run) so GET /api/v1/topology/health has
-    real run history to answer from, not just a snapshot of the graph.
+def _security_scan_status(summary: dict) -> str:
+    """run_security_scan()'s summary (services/security_scan_cache.py)
+    carries `degraded` -- True if any known node's scan had at least one
+    sub-check fail/time out this pass, or the pass itself couldn't reach
+    a node at all. Same "ran, but incompletely" vs. "ran cleanly"
+    distinction _topology_sync_status/_prometheus_health_status already
+    draw for their own loops.
+    """
+    if summary.get("degraded"):
+        return "degraded"
+    return "ok"
+
+
+async def _run_periodic_recorded(
+    fn, interval_seconds: float, name: str, sync_type: str, status_fn, record_fn=None,
+) -> None:
+    """Same shape as _run_periodic, but for periodic passes whose outcome
+    also gets appended to a run-history table so a `/health` endpoint has
+    real run history to answer from, not just a snapshot of whatever the
+    pass produces (see models.TopologySyncRun / models.SecurityScanRun's
+    own docstrings for why that distinction matters).
 
     `status_fn(summary) -> "ok"|"degraded"` classifies a successful pass's
     own summary dict; a pass that raises is always recorded as "failed"
     regardless of status_fn, since there's no summary to classify.
+
+    `record_fn` defaults to `crud.record_topology_sync_run` (this
+    function's original two callers, the OpenStack/Prometheus sync
+    loops, both write to `topology_sync_runs` keyed by `sync_type`) --
+    pass `crud.record_security_scan_run` instead for a loop that writes
+    to its own table with no `sync_type` column at all (there's only one
+    kind of security scan pass, so a discriminator would be constant).
     """
+    record_fn = record_fn or crud.record_topology_sync_run
     while True:
         started_at = datetime.utcnow()
         db = SessionLocal()
@@ -192,15 +229,25 @@ async def _run_periodic_recorded(fn, interval_seconds: float, name: str, sync_ty
         finally:
             finished_at = datetime.utcnow()
             try:
-                crud.record_topology_sync_run(
-                    db,
-                    sync_type=sync_type,
-                    status=run_status,
-                    summary=summary,
-                    error=error,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                )
+                if record_fn is crud.record_topology_sync_run:
+                    record_fn(
+                        db,
+                        sync_type=sync_type,
+                        status=run_status,
+                        summary=summary,
+                        error=error,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                    )
+                else:
+                    record_fn(
+                        db,
+                        status=run_status,
+                        summary=summary,
+                        error=error,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                    )
             except Exception:
                 # Recording the run is itself best-effort: a Postgres hiccup
                 # here shouldn't take the sync loop down, and the next tick
@@ -261,6 +308,20 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    # Best-effort initial security scan so `security_finding_cache` isn't
+    # empty for the first person to load /security after a fresh deploy --
+    # without this, GET /findings' per-host fallback in routers/security.py
+    # still covers it (an on-demand live scan per host), just slower than
+    # having the fleet already warm. Same "seed once at startup, then let
+    # the periodic loop take over" idiom as seed_nodes_from_file_sd above.
+    db = SessionLocal()
+    try:
+        await asyncio.to_thread(run_security_scan, db)
+    except Exception:
+        logger.exception("startup security scan failed")
+    finally:
+        db.close()
+
     try:
         await asyncio.to_thread(graph_db.apply_schema_constraints)
     except Exception:
@@ -309,6 +370,16 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(
             _run_periodic(
                 check_quota_and_budget, QUOTA_BUDGET_CHECK_INTERVAL_SECONDS, "quota/budget check"
+            )
+        ),
+        asyncio.create_task(
+            _run_periodic_recorded(
+                run_security_scan,
+                SECURITY_SCAN_INTERVAL_SECONDS,
+                "security scan",
+                sync_type="security_scan",
+                status_fn=_security_scan_status,
+                record_fn=crud.record_security_scan_run,
             )
         ),
     ]

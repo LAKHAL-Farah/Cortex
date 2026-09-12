@@ -5,6 +5,7 @@ import Link from "next/link";
 import useSWR from "swr";
 import {
   ShieldAlert,
+  Shield,
   Terminal,
   Network as NetworkIcon,
   ScrollText,
@@ -14,12 +15,15 @@ import {
   FileClock,
   RefreshCw,
   AlertTriangle,
+  ChevronRight,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { SecurityFinding, AgentSecuritySignal } from "@/lib/types";
-import { securityPillTone } from "@/lib/securityStatus";
+import { securityPillTone, overallSecurityTone } from "@/lib/securityStatus";
 import { Card } from "@/components/ui/Card";
 import MetricCard from "@/components/ui/MetricCard";
+import SecurityHealthBadge from "@/components/SecurityHealthBadge";
+import SecurityRescanButton from "@/components/SecurityRescanButton";
 
 const fetcher = async (url: string) => {
   const res = await fetch(url);
@@ -38,6 +42,16 @@ function StatusPill({ signal }: { signal: AgentSecuritySignal }) {
     </span>
   );
 }
+
+// One sub-check row inside a host's big card -- icon + label on the left,
+// StatusPill on the right, same four sub-checks the old table's columns
+// were, just laid out for a card instead of a table cell.
+const SIGNAL_ROWS: { key: "auth_signal" | "sec_group_signal" | "cve_signal" | "ebpf_signal"; label: string; icon: LucideIcon }[] = [
+  { key: "auth_signal", label: "Auth activity", icon: Terminal },
+  { key: "sec_group_signal", label: "Security groups", icon: NetworkIcon },
+  { key: "cve_signal", label: "Known CVEs", icon: ScrollText },
+  { key: "ebpf_signal", label: "Kernel signals", icon: Cpu },
+];
 
 // Sub-pages this overview links to -- only "Security groups" has a real
 // page behind it (Phase Sec-1's stored-snapshot diff); the rest route to
@@ -58,7 +72,13 @@ export default function SecurityOverviewPage() {
   const { data, error, isLoading, mutate } = useSWR<{ findings: SecurityFinding[] }>(
     "/api/security/findings",
     fetcher,
-    { refreshInterval: 20000, revalidateOnFocus: true },
+    // Phase Sec-3: /findings now reads a cache the backend refreshes on
+    // its own schedule (SECURITY_SCAN_INTERVAL_SECONDS, default 45s) --
+    // a plain indexed Postgres read, not a live per-request scan -- so
+    // this can poll noticeably tighter than it used to without adding
+    // real load. SecurityRescanButton below covers "I don't want to
+    // wait even that long" with an explicit on-demand trigger.
+    { refreshInterval: 15000, revalidateOnFocus: true },
   );
 
   const findings = useMemo(() => data?.findings ?? [], [data]);
@@ -86,17 +106,22 @@ export default function SecurityOverviewPage() {
           <p className="mt-1 text-sm text-text-faint">
             The Security Agent&apos;s four sub-checks (auth activity, security groups, known CVEs, kernel-level
             signals), polled directly -- the same findings the Copilot gives you in chat, without asking a question
-            first.
+            first. Refreshes automatically as the scan pass below completes; use Rescan to trigger one right now.
           </p>
         </div>
-        <button
-          onClick={() => mutate()}
-          type="button"
-          className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] px-3 py-1.5 text-sm font-medium text-text-dim hover:bg-[var(--surface)]"
-        >
-          <RefreshCw className="h-3.5 w-3.5" strokeWidth={2} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <SecurityHealthBadge />
+          <SecurityRescanButton />
+          <button
+            onClick={() => mutate()}
+            type="button"
+            title="Re-fetch the current cache without triggering a new scan pass"
+            className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] px-3 py-1.5 text-sm font-medium text-text-dim hover:bg-[var(--surface)]"
+          >
+            <RefreshCw className="h-3.5 w-3.5" strokeWidth={2} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -119,75 +144,84 @@ export default function SecurityOverviewPage() {
         <MetricCard title="Kernel-level alerts" value={isLoading ? "…" : summary.ebpfFlags} unit="hosts" icon={Cpu} iconColor="var(--chart-5)" />
       </div>
 
-      <Card padding="p-0">
-        <div className="flex items-center gap-2 border-b px-5 py-3" style={{ borderColor: "var(--border-soft)" }}>
+      <div>
+        <div className="mb-2 flex items-center gap-2 px-1">
           <ShieldAlert className="h-4 w-4" style={{ color: "var(--accent)" }} strokeWidth={2} />
           <span className="font-display text-[14px] font-semibold text-color-text">Per-host posture</span>
         </div>
         {isLoading ? (
-          <div className="flex items-center gap-2 p-5 text-sm text-text-faint">
-            <RefreshCw className="h-4 w-4 animate-spin" strokeWidth={2} />
-            Checking every known node…
-          </div>
+          <Card>
+            <div className="flex items-center gap-2 text-sm text-text-faint">
+              <RefreshCw className="h-4 w-4 animate-spin" strokeWidth={2} />
+              Checking every known node…
+            </div>
+          </Card>
         ) : findings.length === 0 ? (
-          <div className="p-5 text-sm text-text-faint">No monitored nodes yet -- add one under Infrastructure → Nodes.</div>
+          <Card>
+            <div className="text-sm text-text-faint">No monitored nodes yet -- add one under Infrastructure → Nodes.</div>
+          </Card>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b text-left text-xs text-text-faint" style={{ borderColor: "var(--border-soft)" }}>
-                  <th className="px-5 py-2 font-medium">Host</th>
-                  <th className="px-3 py-2 font-medium">Auth</th>
-                  <th className="px-3 py-2 font-medium">Security groups</th>
-                  <th className="px-3 py-2 font-medium">CVEs</th>
-                  <th className="px-3 py-2 font-medium">eBPF</th>
-                </tr>
-              </thead>
-              <tbody>
-                {findings.map((f) => (
-                  <tr key={f.hostname} className="border-b last:border-0" style={{ borderColor: "var(--border-soft)" }}>
-                    <td className="px-5 py-2.5">
-                      <Link href={`/security/security-groups/${encodeURIComponent(f.hostname)}`} className="font-medium text-color-text hover:underline">
-                        {f.hostname}
-                      </Link>
-                      <span className="ml-2 text-xs text-text-faint">{f.role}</span>
-                    </td>
-                    <td className="px-3 py-2.5"><StatusPill signal={f.raw_data.auth_signal} /></td>
-                    <td className="px-3 py-2.5"><StatusPill signal={f.raw_data.sec_group_signal} /></td>
-                    <td className="px-3 py-2.5"><StatusPill signal={f.raw_data.cve_signal} /></td>
-                    <td className="px-3 py-2.5"><StatusPill signal={f.raw_data.ebpf_signal} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            {findings.map((f) => {
+              const tone = overallSecurityTone(f.raw_data);
+              return (
+                <Link key={f.hostname} href={`/security/security-groups/${encodeURIComponent(f.hostname)}`} className="block">
+                  <div
+                    className="tile-card tile-card--interactive flex h-full flex-col gap-4 p-5"
+                    style={{ ["--tile-color" as string]: tone.color }}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <span className="tile-icon h-11 w-11">
+                          <Shield className="h-5 w-5" style={{ color: tone.color }} strokeWidth={2} />
+                        </span>
+                        <div>
+                          <div className="font-display text-[15px] font-semibold text-color-text">{f.hostname}</div>
+                          <div className="text-xs text-text-faint">{f.role}</div>
+                        </div>
+                      </div>
+                      <ChevronRight className="mt-1.5 h-4 w-4 shrink-0 text-text-faint" strokeWidth={2} />
+                    </div>
+                    <div className="grid grid-cols-1 gap-2 border-t pt-3" style={{ borderColor: "var(--border-soft)" }}>
+                      {SIGNAL_ROWS.map((row) => (
+                        <div key={row.key} className="flex items-center justify-between gap-2">
+                          <span className="flex items-center gap-2 text-xs text-text-dim">
+                            <row.icon className="h-3.5 w-3.5" strokeWidth={2} />
+                            {row.label}
+                          </span>
+                          <StatusPill signal={f.raw_data[row.key]} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </Link>
+              );
+            })}
           </div>
         )}
-      </Card>
+      </div>
 
       <div>
         <div className="eyebrow mb-2 px-1">Browse by category</div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {CATEGORIES.map((cat) => (
             <Link key={cat.href} href={cat.href} className="block">
-              <Card interactive padding="p-0" className="relative overflow-hidden">
-                <span className="absolute inset-y-0 left-0 w-[3px]" style={{ background: cat.color }} />
-                <div className="flex items-center justify-between gap-3 p-4 pl-6">
-                  <div className="flex items-center gap-3">
-                    <span
-                      className="inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)]"
-                      style={{ background: `color-mix(in srgb, ${cat.color} 14%, transparent)` }}
-                    >
-                      <cat.icon className="h-4.5 w-4.5" style={{ color: cat.color }} strokeWidth={2} />
-                    </span>
-                    <span className="font-display text-[14px] font-medium text-color-text">{cat.label}</span>
-                  </div>
-                  {!cat.available && (
-                    <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-text-faint" style={{ background: "var(--canvas)" }}>
-                      Coming soon
-                    </span>
-                  )}
+              <div
+                className="tile-card tile-card--interactive flex items-center justify-between gap-3 p-4"
+                style={{ ["--tile-color" as string]: cat.color }}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="tile-icon h-9 w-9">
+                    <cat.icon className="h-4.5 w-4.5" style={{ color: cat.color }} strokeWidth={2} />
+                  </span>
+                  <span className="font-display text-[14px] font-medium text-color-text">{cat.label}</span>
                 </div>
-              </Card>
+                {!cat.available && (
+                  <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-text-faint" style={{ background: "var(--canvas)" }}>
+                    Coming soon
+                  </span>
+                )}
+              </div>
             </Link>
           ))}
         </div>

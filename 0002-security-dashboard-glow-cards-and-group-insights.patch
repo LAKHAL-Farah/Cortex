@@ -1,0 +1,974 @@
+From 3391449514ad7f9b1e9d527195b656b5e3afc859 Mon Sep 17 00:00:00 2001
+From: Cortex Security Patch <cortex-agent@local>
+Date: Sat, 12 Sep 2026 22:34:26 +0000
+Subject: [PATCH] feat(security): notion/github-style glow cards + merged
+ per-group insight cards
+
+Phase Sec-4 -- follow-up to the previous security-agent-visibility
+commit, addressing UI feedback on it directly.
+
+- globals.css: new .tile-card / .tile-icon component classes -- a
+  16px-radius card plus a small colored icon glow (radial background +
+  soft box-shadow halo via --tile-color), restrained the same way every
+  other glow effect in this file already is (a wash + a hairline ring,
+  not a neon card). This is the 'big card with a small glow' language
+  the /security pages now use throughout, in place of the previous plain
+  tables.
+- /security: 'Per-host posture' is now a grid of big host cards (icon
+  glow tinted by aggregate status, host/role, a 2x2 grid of the four
+  sub-check pills) instead of a table row per host. The category
+  browse tiles below it now use the same tile-card/tile-icon treatment.
+- /security/security-groups: same big-card treatment per host, each card
+  showing its status pill, every currently-attached group as a chip
+  (flagged red when it's the specific one carrying a signal), and a
+  risky-rules/drift-count summary row.
+- /security/security-groups/{hostname}: the three previously-separate
+  sections (current groups / overly-permissive rules / drift) are now
+  one detailed card per security group -- every rule the group actually
+  holds, each tagged inline 'Risky' (with its specific reason) and/or
+  'Added' if it's new since the last snapshot, plus any rule the last
+  snapshot had that's gone now, shown struck through as 'Removed'. This
+  replaces the old 'three counts, cross-reference them yourself' view
+  with one place that shows exactly what a group contains and why it's
+  flagged.
+- lib/securityStatus.ts: new buildGroupInsights() -- matches a rule
+  across data.security_groups/risky_rules/drift by its
+  (direction, protocol, ports, remote_cidr) identity, since none of the
+  three carry a shared rule id, and folds them into one annotated list
+  per group (plus overallSecurityTone() for the new host cards' single
+  aggregate color).
+
+Verified with tsc --noEmit, eslint, and a full 'next build' (all
+/security* routes compile and prerender/build cleanly).
+---
+ services/web/app/globals.css                  |  36 +++
+ services/web/app/security/page.tsx            | 131 +++++----
+ .../security-groups/[hostname]/page.tsx       | 271 +++++++++---------
+ .../web/app/security/security-groups/page.tsx | 186 ++++++------
+ services/web/lib/securityStatus.ts            | 111 ++++++-
+ 5 files changed, 450 insertions(+), 285 deletions(-)
+
+diff --git a/services/web/app/globals.css b/services/web/app/globals.css
+index 6f1428a..4bb2ce9 100644
+--- a/services/web/app/globals.css
++++ b/services/web/app/globals.css
+@@ -296,6 +296,42 @@ select {
+     0 0 18px -6px var(--ring-color, var(--accent));
+ }
+ 
++/* ---- Security dashboard "big cards" (Phase Sec-4) ----
++   Notion/GitHub-flavored card grid for the Security pages' per-host and
++   per-group listings: a slightly larger radius than the standard .panel,
++   plus a small colored icon glow reminiscent of an integrations-
++   marketplace card -- restrained on purpose (a soft radial wash + a
++   hairline ring on hover, not a neon halo) so it still reads as part of
++   the same design language as every other glow effect in this file, just
++   applied to a bigger card. Color comes from --tile-color, set inline
++   per card (crit/warn/ok/chart-N depending on what the card represents). */
++@layer components {
++  .tile-card {
++    position: relative;
++    background: var(--surface);
++    border: 1px solid var(--border);
++    border-radius: 16px;
++    box-shadow: var(--shadow);
++    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
++  }
++  .tile-card--interactive:hover {
++    transform: translateY(-2px);
++    border-color: color-mix(in srgb, var(--border) 55%, var(--tile-color, var(--accent)));
++    box-shadow: 0 14px 30px -14px color-mix(in srgb, var(--tile-color, var(--accent)) 40%, transparent);
++  }
++  .tile-icon {
++    position: relative;
++    display: inline-flex;
++    align-items: center;
++    justify-content: center;
++    border-radius: 12px;
++    background: color-mix(in srgb, var(--tile-color, var(--accent)) 16%, var(--surface));
++    box-shadow:
++      0 0 0 1px color-mix(in srgb, var(--tile-color, var(--accent)) 24%, transparent),
++      0 8px 20px -8px color-mix(in srgb, var(--tile-color, var(--accent)) 55%, transparent);
++  }
++}
++
+ /* ---- Copilot panel ambient background ----
+    A fixed, low-opacity wash behind the whole chat panel so the surface
+    reads as "alive" without competing with message text. Same accent/medium
+diff --git a/services/web/app/security/page.tsx b/services/web/app/security/page.tsx
+index 89f5c54..220fab7 100644
+--- a/services/web/app/security/page.tsx
++++ b/services/web/app/security/page.tsx
+@@ -5,6 +5,7 @@ import Link from "next/link";
+ import useSWR from "swr";
+ import {
+   ShieldAlert,
++  Shield,
+   Terminal,
+   Network as NetworkIcon,
+   ScrollText,
+@@ -14,10 +15,11 @@ import {
+   FileClock,
+   RefreshCw,
+   AlertTriangle,
++  ChevronRight,
+ } from "lucide-react";
+ import type { LucideIcon } from "lucide-react";
+ import type { SecurityFinding, AgentSecuritySignal } from "@/lib/types";
+-import { securityPillTone } from "@/lib/securityStatus";
++import { securityPillTone, overallSecurityTone } from "@/lib/securityStatus";
+ import { Card } from "@/components/ui/Card";
+ import MetricCard from "@/components/ui/MetricCard";
+ import SecurityHealthBadge from "@/components/SecurityHealthBadge";
+@@ -41,6 +43,16 @@ function StatusPill({ signal }: { signal: AgentSecuritySignal }) {
+   );
+ }
+ 
++// One sub-check row inside a host's big card -- icon + label on the left,
++// StatusPill on the right, same four sub-checks the old table's columns
++// were, just laid out for a card instead of a table cell.
++const SIGNAL_ROWS: { key: "auth_signal" | "sec_group_signal" | "cve_signal" | "ebpf_signal"; label: string; icon: LucideIcon }[] = [
++  { key: "auth_signal", label: "Auth activity", icon: Terminal },
++  { key: "sec_group_signal", label: "Security groups", icon: NetworkIcon },
++  { key: "cve_signal", label: "Known CVEs", icon: ScrollText },
++  { key: "ebpf_signal", label: "Kernel signals", icon: Cpu },
++];
++
+ // Sub-pages this overview links to -- only "Security groups" has a real
+ // page behind it (Phase Sec-1's stored-snapshot diff); the rest route to
+ // a plain "not available yet" placeholder rather than pretending there's
+@@ -132,75 +144,84 @@ export default function SecurityOverviewPage() {
+         <MetricCard title="Kernel-level alerts" value={isLoading ? "…" : summary.ebpfFlags} unit="hosts" icon={Cpu} iconColor="var(--chart-5)" />
+       </div>
+ 
+-      <Card padding="p-0">
+-        <div className="flex items-center gap-2 border-b px-5 py-3" style={{ borderColor: "var(--border-soft)" }}>
++      <div>
++        <div className="mb-2 flex items-center gap-2 px-1">
+           <ShieldAlert className="h-4 w-4" style={{ color: "var(--accent)" }} strokeWidth={2} />
+           <span className="font-display text-[14px] font-semibold text-color-text">Per-host posture</span>
+         </div>
+         {isLoading ? (
+-          <div className="flex items-center gap-2 p-5 text-sm text-text-faint">
+-            <RefreshCw className="h-4 w-4 animate-spin" strokeWidth={2} />
+-            Checking every known node…
+-          </div>
++          <Card>
++            <div className="flex items-center gap-2 text-sm text-text-faint">
++              <RefreshCw className="h-4 w-4 animate-spin" strokeWidth={2} />
++              Checking every known node…
++            </div>
++          </Card>
+         ) : findings.length === 0 ? (
+-          <div className="p-5 text-sm text-text-faint">No monitored nodes yet -- add one under Infrastructure → Nodes.</div>
++          <Card>
++            <div className="text-sm text-text-faint">No monitored nodes yet -- add one under Infrastructure → Nodes.</div>
++          </Card>
+         ) : (
+-          <div className="overflow-x-auto">
+-            <table className="w-full text-sm">
+-              <thead>
+-                <tr className="border-b text-left text-xs text-text-faint" style={{ borderColor: "var(--border-soft)" }}>
+-                  <th className="px-5 py-2 font-medium">Host</th>
+-                  <th className="px-3 py-2 font-medium">Auth</th>
+-                  <th className="px-3 py-2 font-medium">Security groups</th>
+-                  <th className="px-3 py-2 font-medium">CVEs</th>
+-                  <th className="px-3 py-2 font-medium">eBPF</th>
+-                </tr>
+-              </thead>
+-              <tbody>
+-                {findings.map((f) => (
+-                  <tr key={f.hostname} className="border-b last:border-0" style={{ borderColor: "var(--border-soft)" }}>
+-                    <td className="px-5 py-2.5">
+-                      <Link href={`/security/security-groups/${encodeURIComponent(f.hostname)}`} className="font-medium text-color-text hover:underline">
+-                        {f.hostname}
+-                      </Link>
+-                      <span className="ml-2 text-xs text-text-faint">{f.role}</span>
+-                    </td>
+-                    <td className="px-3 py-2.5"><StatusPill signal={f.raw_data.auth_signal} /></td>
+-                    <td className="px-3 py-2.5"><StatusPill signal={f.raw_data.sec_group_signal} /></td>
+-                    <td className="px-3 py-2.5"><StatusPill signal={f.raw_data.cve_signal} /></td>
+-                    <td className="px-3 py-2.5"><StatusPill signal={f.raw_data.ebpf_signal} /></td>
+-                  </tr>
+-                ))}
+-              </tbody>
+-            </table>
++          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
++            {findings.map((f) => {
++              const tone = overallSecurityTone(f.raw_data);
++              return (
++                <Link key={f.hostname} href={`/security/security-groups/${encodeURIComponent(f.hostname)}`} className="block">
++                  <div
++                    className="tile-card tile-card--interactive flex h-full flex-col gap-4 p-5"
++                    style={{ ["--tile-color" as string]: tone.color }}
++                  >
++                    <div className="flex items-start justify-between gap-3">
++                      <div className="flex items-center gap-3">
++                        <span className="tile-icon h-11 w-11">
++                          <Shield className="h-5 w-5" style={{ color: tone.color }} strokeWidth={2} />
++                        </span>
++                        <div>
++                          <div className="font-display text-[15px] font-semibold text-color-text">{f.hostname}</div>
++                          <div className="text-xs text-text-faint">{f.role}</div>
++                        </div>
++                      </div>
++                      <ChevronRight className="mt-1.5 h-4 w-4 shrink-0 text-text-faint" strokeWidth={2} />
++                    </div>
++                    <div className="grid grid-cols-1 gap-2 border-t pt-3" style={{ borderColor: "var(--border-soft)" }}>
++                      {SIGNAL_ROWS.map((row) => (
++                        <div key={row.key} className="flex items-center justify-between gap-2">
++                          <span className="flex items-center gap-2 text-xs text-text-dim">
++                            <row.icon className="h-3.5 w-3.5" strokeWidth={2} />
++                            {row.label}
++                          </span>
++                          <StatusPill signal={f.raw_data[row.key]} />
++                        </div>
++                      ))}
++                    </div>
++                  </div>
++                </Link>
++              );
++            })}
+           </div>
+         )}
+-      </Card>
++      </div>
+ 
+       <div>
+         <div className="eyebrow mb-2 px-1">Browse by category</div>
+         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+           {CATEGORIES.map((cat) => (
+             <Link key={cat.href} href={cat.href} className="block">
+-              <Card interactive padding="p-0" className="relative overflow-hidden">
+-                <span className="absolute inset-y-0 left-0 w-[3px]" style={{ background: cat.color }} />
+-                <div className="flex items-center justify-between gap-3 p-4 pl-6">
+-                  <div className="flex items-center gap-3">
+-                    <span
+-                      className="inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[var(--radius-control)]"
+-                      style={{ background: `color-mix(in srgb, ${cat.color} 14%, transparent)` }}
+-                    >
+-                      <cat.icon className="h-4.5 w-4.5" style={{ color: cat.color }} strokeWidth={2} />
+-                    </span>
+-                    <span className="font-display text-[14px] font-medium text-color-text">{cat.label}</span>
+-                  </div>
+-                  {!cat.available && (
+-                    <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-text-faint" style={{ background: "var(--canvas)" }}>
+-                      Coming soon
+-                    </span>
+-                  )}
++              <div
++                className="tile-card tile-card--interactive flex items-center justify-between gap-3 p-4"
++                style={{ ["--tile-color" as string]: cat.color }}
++              >
++                <div className="flex items-center gap-3">
++                  <span className="tile-icon h-9 w-9">
++                    <cat.icon className="h-4.5 w-4.5" style={{ color: cat.color }} strokeWidth={2} />
++                  </span>
++                  <span className="font-display text-[14px] font-medium text-color-text">{cat.label}</span>
+                 </div>
+-              </Card>
++                {!cat.available && (
++                  <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-text-faint" style={{ background: "var(--canvas)" }}>
++                    Coming soon
++                  </span>
++                )}
++              </div>
+             </Link>
+           ))}
+         </div>
+diff --git a/services/web/app/security/security-groups/[hostname]/page.tsx b/services/web/app/security/security-groups/[hostname]/page.tsx
+index 03b5a6d..b090866 100644
+--- a/services/web/app/security/security-groups/[hostname]/page.tsx
++++ b/services/web/app/security/security-groups/[hostname]/page.tsx
+@@ -8,7 +8,6 @@ import {
+   ArrowLeft,
+   RefreshCw,
+   AlertTriangle,
+-  ShieldOff,
+   Lock,
+   Plus,
+   Minus,
+@@ -16,9 +15,10 @@ import {
+   Info,
+   FlaskConical,
+   Loader2,
++  ShieldOff,
+ } from "lucide-react";
+ import type { AgentSecGroupSignal, AgentSecGroupRule, SecurityStatus } from "@/lib/types";
+-import { securityPillTone, flaggedSecurityGroupKeys, isSecurityGroupFlagged } from "@/lib/securityStatus";
++import { securityPillTone, buildGroupInsights } from "@/lib/securityStatus";
+ import { Card } from "@/components/ui/Card";
+ import SecurityHealthBadge from "@/components/SecurityHealthBadge";
+ import SecurityRescanButton from "@/components/SecurityRescanButton";
+@@ -41,21 +41,15 @@ function formatRule(rule: AgentSecGroupRule["rule"]) {
+   return `${rule.direction} · ${proto} · ${ports} · ${from}`;
+ }
+ 
+-/** Sandbox-only "simulate a real drift" control (Phase Sec-3). Only ever
+- * rendered when GET /api/security/status' `sandbox_mode` is true (i.e.
+- * CORTEX_ENV=sandbox on the API side, see services/security_sandbox.py) --
+- * the backend endpoints this calls 404 outside the sandbox regardless,
++/** Sandbox-only "simulate a real drift" control (Phase Sec-3/4). Only
++ * ever rendered when GET /api/security/status' `sandbox_mode` is true
++ * (CORTEX_ENV=sandbox on the API side, see services/security_sandbox.py)
++ * -- the backend endpoints this calls 404 outside the sandbox regardless,
+  * this just avoids showing a button that can't work in a real deployment.
+- *
+- * Exists because exercising Phase Sec-1's drift detection end to end used
+- * to mean hand-running scripts/run_security_snapshot.py plus a raw curl
+- * against openstack-sim's own fault-injection endpoints, in the right
+- * order, from a terminal -- see that script's docstring. This wraps the
+- * same two steps (snapshot, then inject) behind one click.
+  */
+ function SandboxDriftDemo({ hostname, onChanged }: { hostname: string; onChanged: () => void }) {
+   const [busy, setBusy] = useState(false);
+-  const [injected, setInjected] = useState<{ ruleId: string; detail: string; securityGroup: string } | null>(null);
++  const [injected, setInjected] = useState<{ ruleId: string; detail: string } | null>(null);
+   const [error, setError] = useState<string | null>(null);
+ 
+   const inject = async () => {
+@@ -67,7 +61,7 @@ function SandboxDriftDemo({ hostname, onChanged }: { hostname: string; onChanged
+       if (!res.ok) {
+         setError(body.detail ?? `Request failed (${res.status}).`);
+       } else {
+-        setInjected({ ruleId: body.rule_id, detail: body.detail, securityGroup: body.security_group });
++        setInjected({ ruleId: body.rule_id, detail: body.detail });
+         onChanged();
+       }
+     } catch {
+@@ -101,30 +95,31 @@ function SandboxDriftDemo({ hostname, onChanged }: { hostname: string; onChanged
+   };
+ 
+   return (
+-    <Card padding="p-0" className="border-dashed">
+-      <div className="flex items-center gap-2 border-b px-5 py-3" style={{ borderColor: "var(--border-soft)" }}>
+-        <FlaskConical className="h-4 w-4" style={{ color: "var(--warn)" }} strokeWidth={2} />
+-        <span className="font-display text-[14px] font-semibold text-color-text">Simulate drift (sandbox)</span>
++    <div className="tile-card p-5" style={{ ["--tile-color" as string]: "var(--warn)", borderStyle: "dashed" }}>
++      <div className="flex items-center gap-2">
++        <span className="tile-icon h-9 w-9">
++          <FlaskConical className="h-4 w-4" style={{ color: "var(--warn)" }} strokeWidth={2} />
++        </span>
++        <span className="font-display text-[14px] font-semibold text-color-text">Simulate drift</span>
+         <span className="ml-auto rounded-full px-2 py-0.5 text-[10px] font-medium" style={{ color: "var(--warn)", background: "var(--warn-soft)" }}>
+           Sandbox only
+         </span>
+       </div>
+-      <div className="space-y-3 p-5">
+-        <p className="text-sm text-text-faint">
+-          Takes a fresh baseline snapshot of this host right now, then adds one real ingress rule (an
+-          internal-only port, via openstack-sim&apos;s own fault-injection endpoint) to whichever security group
+-          is actually attached here. Nothing is faked in the UI -- the rule really is added to the simulated
+-          OpenStack backend, so it shows up below under Drift since last snapshot the same way a real
+-          configuration change would.
++      <p className="mt-3 text-sm text-text-faint">
++        Takes a fresh baseline snapshot of this host right now, then adds one real ingress rule (an internal-only
++        port, via openstack-sim&apos;s own fault-injection endpoint) to whichever security group is actually
++        attached here. Nothing is faked in the UI -- the rule really is added to the simulated OpenStack backend,
++        so it shows up below, on the group it was added to, the same way a real configuration change would.
++      </p>
++      {error && (
++        <p className="mt-2 text-xs" style={{ color: "var(--crit)" }}>
++          {error}
+         </p>
+-        {error && (
+-          <p className="text-xs" style={{ color: "var(--crit)" }}>
+-            {error}
+-          </p>
+-        )}
++      )}
++      <div className="mt-3">
+         {injected ? (
+           <>
+-            <p className="text-xs text-text-dim">{injected.detail}</p>
++            <p className="mb-2 text-xs text-text-dim">{injected.detail}</p>
+             <button
+               onClick={reset}
+               disabled={busy}
+@@ -149,7 +144,7 @@ function SandboxDriftDemo({ hostname, onChanged }: { hostname: string; onChanged
+           </button>
+         )}
+       </div>
+-    </Card>
++    </div>
+   );
+ }
+ 
+@@ -166,8 +161,7 @@ export default function SecurityGroupDetailPage() {
+   const { data: status } = useSWR<SecurityStatus>("/api/security/status", fetcher, { refreshInterval: 15000 });
+ 
+   const tone = data ? securityPillTone(data) : null;
+-  const groups = data?.data?.security_groups ?? null;
+-  const flagged = data ? flaggedSecurityGroupKeys(data) : { names: new Set<string>(), ids: new Set<string>() };
++  const insights = data ? buildGroupInsights(data) : [];
+ 
+   return (
+     <div className="space-y-6">
+@@ -232,119 +226,112 @@ export default function SecurityGroupDetailPage() {
+             </Card>
+           )}
+ 
+-          <Card padding="p-0">
+-            <div className="flex items-center gap-2 border-b px-5 py-3" style={{ borderColor: "var(--border-soft)" }}>
+-              <Layers className="h-4 w-4" style={{ color: "var(--chart-3)" }} strokeWidth={2} />
+-              <span className="font-display text-[14px] font-semibold text-color-text">Current security groups</span>
+-              {data.scanned_at && (
+-                <span className="ml-auto text-xs text-text-faint">as of last scan</span>
+-              )}
+-            </div>
+-            {groups === null ? (
+-              <div className="p-5 text-sm text-text-faint">No group data available for this host.</div>
+-            ) : groups.length === 0 ? (
+-              <div className="p-5 text-sm text-text-faint">No security group attached to any instance on this host.</div>
+-            ) : (
+-              <ul className="divide-y" style={{ borderColor: "var(--border-soft)" }}>
+-                {groups.map((g) => {
+-                  const isFlagged = isSecurityGroupFlagged(g, flagged);
+-                  return (
+-                    <li key={g.id} className="px-5 py-3">
+-                      <div className="flex items-center justify-between gap-3">
+-                        <span className="text-sm font-medium text-color-text">{g.name}</span>
+-                        <span
+-                          className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
+-                          style={{
+-                            color: isFlagged ? "var(--crit)" : "var(--ok)",
+-                            background: isFlagged ? "var(--crit-soft)" : "var(--ok-soft)",
+-                          }}
+-                        >
+-                          {isFlagged ? "Flagged" : "Clean"}
++          <div className="flex items-start gap-2 rounded-[var(--radius-panel)] border px-4 py-3 text-xs text-text-faint" style={{ borderColor: "var(--border-soft)", background: "var(--surface)" }}>
++            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={2} />
++            <span>
++              One card per security group actually attached to this host right now. Every rule the group holds is
++              listed; a rule gets a red <strong>Risky</strong> tag if it trips the built-in overly-permissive
++              baseline (with the specific reason), and an amber <strong>Added</strong>/<strong>Removed</strong> tag
++              if it changed since the last stored snapshot -- a periodic job that runs every
++              SECURITY_SNAPSHOT_INTERVAL_SECONDS, so a rule can be flagged as drift even when it isn&apos;t itself
++              risky.
++            </span>
++          </div>
++
++          {insights.length === 0 ? (
++            <Card>
++              <div className="text-sm text-text-faint">No security group attached to any instance on this host.</div>
++            </Card>
++          ) : (
++            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
++              {insights.map((insight) => {
++                const groupTone = insight.isFlagged ? "var(--crit)" : "var(--ok)";
++                return (
++                  <div
++                    key={insight.group.id}
++                    className="tile-card flex flex-col gap-3 p-5"
++                    style={{ ["--tile-color" as string]: groupTone }}
++                  >
++                    <div className="flex items-center justify-between gap-3">
++                      <div className="flex items-center gap-3">
++                        <span className="tile-icon h-10 w-10">
++                          <Layers className="h-4.5 w-4.5" style={{ color: groupTone }} strokeWidth={2} />
+                         </span>
++                        <div>
++                          <div className="font-display text-[15px] font-semibold text-color-text">{insight.group.name}</div>
++                          <div className="text-xs text-text-faint">
++                            {insight.group.rules.length} rule{insight.group.rules.length === 1 ? "" : "s"}
++                          </div>
++                        </div>
+                       </div>
+-                      <p className="mt-0.5 text-xs text-text-faint">
+-                        {g.rules.length} rule{g.rules.length === 1 ? "" : "s"}
+-                      </p>
+-                      {g.rules.length > 0 && (
+-                        <ul className="mt-1.5 space-y-0.5">
+-                          {g.rules.map((rule, j) => (
+-                            <li key={j} className="text-xs text-text-dim">
+-                              {formatRule(rule)}
+-                            </li>
+-                          ))}
+-                        </ul>
+-                      )}
+-                    </li>
+-                  );
+-                })}
+-              </ul>
+-            )}
+-          </Card>
++                      <span
++                        className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
++                        style={{ color: groupTone, background: insight.isFlagged ? "var(--crit-soft)" : "var(--ok-soft)" }}
++                      >
++                        {insight.isFlagged ? "Flagged" : "Clean"}
++                      </span>
++                    </div>
+ 
+-          <Card padding="p-0">
+-            <div className="flex items-center gap-2 border-b px-5 py-3" style={{ borderColor: "var(--border-soft)" }}>
+-              <ShieldOff className="h-4 w-4" style={{ color: "var(--crit)" }} strokeWidth={2} />
+-              <span className="font-display text-[14px] font-semibold text-color-text">Overly-permissive rules</span>
+-            </div>
+-            {(data.risky_rules?.length ?? 0) === 0 ? (
+-              <div className="p-5 text-sm text-text-faint">None found against the built-in baseline.</div>
+-            ) : (
+-              <ul className="divide-y" style={{ borderColor: "var(--border-soft)" }}>
+-                {data.risky_rules!.map((r, i) => (
+-                  <li key={i} className="flex flex-col gap-0.5 px-5 py-3">
+-                    <span className="text-sm font-medium text-color-text">{r.security_group}</span>
+-                    <span className="text-xs" style={{ color: "var(--crit)" }}>{r.reason}</span>
+-                    <span className="text-xs text-text-faint">{formatRule(r.rule)}</span>
+-                  </li>
+-                ))}
+-              </ul>
+-            )}
+-          </Card>
++                    {insight.rules.length === 0 && insight.removedRules.length === 0 ? (
++                      <p className="text-sm text-text-faint">No rules on this group.</p>
++                    ) : (
++                      <ul className="divide-y" style={{ borderColor: "var(--border-soft)" }}>
++                        {insight.rules.map((ar, i) => (
++                          <li key={i} className="flex flex-col gap-1 py-2">
++                            <div className="flex flex-wrap items-center gap-1.5">
++                              <span className="text-xs text-text-dim">{formatRule(ar.rule)}</span>
++                              {ar.riskyReason && (
++                                <span
++                                  className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
++                                  style={{ color: "var(--crit)", background: "var(--crit-soft)" }}
++                                  title={ar.riskyReason}
++                                >
++                                  <ShieldOff className="h-2.5 w-2.5" strokeWidth={2.5} />
++                                  Risky
++                                </span>
++                              )}
++                              {ar.driftStatus === "added" && (
++                                <span
++                                  className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
++                                  style={{ color: "var(--warn)", background: "var(--warn-soft)" }}
++                                >
++                                  <Plus className="h-2.5 w-2.5" strokeWidth={2.5} />
++                                  Added
++                                </span>
++                              )}
++                            </div>
++                            {ar.riskyReason && (
++                              <span className="pl-0 text-[11px]" style={{ color: "var(--crit)" }}>
++                                {ar.riskyReason}
++                              </span>
++                            )}
++                          </li>
++                        ))}
++                        {insight.removedRules.map((rule, i) => (
++                          <li key={`removed-${i}`} className="flex items-center gap-1.5 py-2">
++                            <span
++                              className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
++                              style={{ color: "var(--text-faint)", background: "var(--canvas)" }}
++                            >
++                              <Minus className="h-2.5 w-2.5" strokeWidth={2.5} />
++                              Removed
++                            </span>
++                            <span className="text-xs text-text-faint line-through decoration-text-faint/60">{formatRule(rule)}</span>
++                          </li>
++                        ))}
++                      </ul>
++                    )}
+ 
+-          <Card padding="p-0">
+-            <div className="flex items-center gap-2 border-b px-5 py-3" style={{ borderColor: "var(--border-soft)" }}>
+-              <RefreshCw className="h-4 w-4" style={{ color: "var(--warn)" }} strokeWidth={2} />
+-              <span className="font-display text-[14px] font-semibold text-color-text">Drift since last snapshot</span>
+-            </div>
+-            <div className="flex items-start gap-2 border-b px-5 py-3 text-xs text-text-faint" style={{ borderColor: "var(--border-soft)" }}>
+-              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={2} />
+-              <span>
+-                A periodic job stores a snapshot of every host&apos;s security-group rules (every
+-                SECURITY_SNAPSHOT_INTERVAL_SECONDS). This section compares this host&apos;s rules right now
+-                against that last stored snapshot, so it can flag a change even when the new rule isn&apos;t
+-                risky by the overly-permissive baseline above -- e.g. a newly-opened internal port is worth
+-                knowing about even if it&apos;s not itself a security hole.
+-              </span>
++                    {insight.driftSince && (
++                      <p className="text-[11px] text-text-faint">
++                        Compared against the snapshot taken {new Date(insight.driftSince).toLocaleString()}.
++                      </p>
++                    )}
++                  </div>
++                );
++              })}
+             </div>
+-            {(data.drift?.length ?? 0) === 0 ? (
+-              <div className="p-5 text-sm text-text-faint">
+-                No change since the last stored snapshot (or no snapshot has been taken for this host yet).
+-              </div>
+-            ) : (
+-              <ul className="divide-y" style={{ borderColor: "var(--border-soft)" }}>
+-                {data.drift!.map((d, i) => (
+-                  <li key={i} className="flex flex-col gap-1.5 px-5 py-3">
+-                    <div className="flex items-center justify-between">
+-                      <span className="text-sm font-medium text-color-text">{d.security_group}</span>
+-                      <span className="text-xs text-text-faint">since {new Date(d.previous_captured_at).toLocaleString()}</span>
+-                    </div>
+-                    {d.added_rules.map((rule, j) => (
+-                      <div key={`add-${j}`} className="flex items-center gap-1.5 text-xs" style={{ color: "var(--warn)" }}>
+-                        <Plus className="h-3 w-3 shrink-0" strokeWidth={2.5} />
+-                        {formatRule(rule)}
+-                      </div>
+-                    ))}
+-                    {d.removed_rules.map((rule, j) => (
+-                      <div key={`rem-${j}`} className="flex items-center gap-1.5 text-xs text-text-faint">
+-                        <Minus className="h-3 w-3 shrink-0" strokeWidth={2.5} />
+-                        {formatRule(rule)}
+-                      </div>
+-                    ))}
+-                  </li>
+-                ))}
+-              </ul>
+-            )}
+-          </Card>
++          )}
+ 
+           {status?.sandbox_mode && hostname && <SandboxDriftDemo hostname={hostname} onChanged={() => mutate()} />}
+         </>
+diff --git a/services/web/app/security/security-groups/page.tsx b/services/web/app/security/security-groups/page.tsx
+index 1a0e6de..a7c9cd1 100644
+--- a/services/web/app/security/security-groups/page.tsx
++++ b/services/web/app/security/security-groups/page.tsx
+@@ -2,7 +2,7 @@
+ 
+ import Link from "next/link";
+ import useSWR from "swr";
+-import { ArrowLeft, RefreshCw, AlertTriangle, Network as NetworkIcon } from "lucide-react";
++import { ArrowLeft, RefreshCw, AlertTriangle, Network as NetworkIcon, ChevronRight, ShieldOff, History } from "lucide-react";
+ import type { SecurityFinding } from "@/lib/types";
+ import { securityPillTone, flaggedSecurityGroupKeys, isSecurityGroupFlagged } from "@/lib/securityStatus";
+ import { Card } from "@/components/ui/Card";
+@@ -19,7 +19,15 @@ const fetcher = async (url: string) => {
+  * every node's four sub-checks in one pass) rather than a second
+  * findings-list endpoint scoped to just sec_group_signal -- the payload
+  * this page actually needs (sec_group_signal, has_signal, restricted) is
+- * already a subset of what /findings returns. */
++ * already a subset of what /findings returns.
++ *
++ * Phase Sec-4: rendered as a grid of "tile-card" cards (see globals.css)
++ * instead of a table row per host -- each card carries the same tone
++ * color the host's overall pill uses through into a small icon glow, and
++ * shows every group actually attached to that host as its own chip
++ * (flagged in red when it's the specific group carrying the signal)
++ * rather than only an aggregate risky/drift count.
++ */
+ export default function SecurityGroupsListPage() {
+   const { data, error, isLoading, mutate } = useSWR<{ findings: SecurityFinding[] }>(
+     "/api/security/findings",
+@@ -40,9 +48,9 @@ export default function SecurityGroupsListPage() {
+           <h1 className="font-display text-[22px] font-semibold text-color-text">Security groups</h1>
+           <p className="mt-1 text-sm text-text-faint">
+             Current Neutron security-group rules per host, audited against the built-in overly-permissive baseline,
+-            plus drift against the most recent stored snapshot (Phase Sec-1) -- a rule can show up as changed even
+-            when it isn&apos;t risky by itself. The Groups column below is every group actually attached to that
+-            host right now, with the specific one(s) carrying a signal flagged.
++            plus drift against the most recent stored snapshot -- a rule can show up as changed even when it isn&apos;t
++            risky by itself. Every group chip below is a group actually attached to that host right now; the
++            specific one(s) carrying a signal are flagged red instead of only showing an aggregate count.
+           </p>
+         </div>
+         <div className="flex shrink-0 items-center gap-2 pt-1">
+@@ -64,91 +72,95 @@ export default function SecurityGroupsListPage() {
+         </Card>
+       )}
+ 
+-      <Card padding="p-0">
+-        <div className="flex items-center gap-2 border-b px-5 py-3" style={{ borderColor: "var(--border-soft)" }}>
+-          <NetworkIcon className="h-4 w-4" style={{ color: "var(--chart-3)" }} strokeWidth={2} />
+-          <span className="font-display text-[14px] font-semibold text-color-text">By host</span>
+-        </div>
+-        {isLoading ? (
+-          <div className="flex items-center gap-2 p-5 text-sm text-text-faint">
++      {isLoading ? (
++        <Card>
++          <div className="flex items-center gap-2 text-sm text-text-faint">
+             <RefreshCw className="h-4 w-4 animate-spin" strokeWidth={2} />
+             Checking every known node…
+           </div>
+-        ) : findings.length === 0 ? (
+-          <div className="p-5 text-sm text-text-faint">No monitored nodes yet -- add one under Infrastructure → Nodes.</div>
+-        ) : (
+-          <div className="overflow-x-auto">
+-            <table className="w-full text-sm">
+-              <thead>
+-                <tr className="border-b text-left text-xs text-text-faint" style={{ borderColor: "var(--border-soft)" }}>
+-                  <th className="px-5 py-2 font-medium">Host</th>
+-                  <th className="px-3 py-2 font-medium">Status</th>
+-                  <th className="px-3 py-2 font-medium">Groups (current)</th>
+-                  <th className="px-3 py-2 font-medium">Risky rules</th>
+-                  <th className="px-3 py-2 font-medium">Drift since last snapshot</th>
+-                </tr>
+-              </thead>
+-              <tbody>
+-                {findings.map((f) => {
+-                  const sig = f.raw_data.sec_group_signal;
+-                  const tone = securityPillTone(sig);
+-                  const riskyCount = sig.risky_rules?.length ?? null;
+-                  const driftCount = sig.drift?.length ?? null;
+-                  const groups = sig.data?.security_groups ?? null;
+-                  const flagged = flaggedSecurityGroupKeys(sig);
+-                  return (
+-                    <tr key={f.hostname} className="border-b last:border-0" style={{ borderColor: "var(--border-soft)" }}>
+-                      <td className="px-5 py-2.5">
+-                        <Link href={`/security/security-groups/${encodeURIComponent(f.hostname)}`} className="font-medium text-color-text hover:underline">
+-                          {f.hostname}
+-                        </Link>
+-                        <span className="ml-2 text-xs text-text-faint">{f.role}</span>
+-                      </td>
+-                      <td className="px-3 py-2.5">
+-                        <span
+-                          className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium"
+-                          style={{ color: tone.color, background: tone.soft }}
+-                        >
+-                          {tone.label}
+-                        </span>
+-                      </td>
+-                      <td className="px-3 py-2.5">
+-                        {groups === null ? (
+-                          <span className="text-text-faint">—</span>
+-                        ) : groups.length === 0 ? (
+-                          <span className="text-text-faint">none attached</span>
+-                        ) : (
+-                          <div className="flex flex-wrap gap-1">
+-                            {groups.map((g) => {
+-                              const isFlagged = isSecurityGroupFlagged(g, flagged);
+-                              return (
+-                                <span
+-                                  key={g.id}
+-                                  title={`${g.rules.length} rule${g.rules.length === 1 ? "" : "s"}`}
+-                                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
+-                                  style={{
+-                                    color: isFlagged ? "var(--crit)" : "var(--text-dim)",
+-                                    background: isFlagged ? "var(--crit-soft)" : "var(--canvas)",
+-                                  }}
+-                                >
+-                                  {isFlagged && <AlertTriangle className="h-2.5 w-2.5" strokeWidth={2.5} />}
+-                                  {g.name}
+-                                </span>
+-                              );
+-                            })}
+-                          </div>
+-                        )}
+-                      </td>
+-                      <td className="px-3 py-2.5 tabular-nums text-text-dim">{riskyCount === null ? "—" : riskyCount}</td>
+-                      <td className="px-3 py-2.5 tabular-nums text-text-dim">{driftCount === null ? "—" : driftCount}</td>
+-                    </tr>
+-                  );
+-                })}
+-              </tbody>
+-            </table>
+-          </div>
+-        )}
+-      </Card>
++        </Card>
++      ) : findings.length === 0 ? (
++        <Card>
++          <div className="text-sm text-text-faint">No monitored nodes yet -- add one under Infrastructure → Nodes.</div>
++        </Card>
++      ) : (
++        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
++          {findings.map((f) => {
++            const sig = f.raw_data.sec_group_signal;
++            const tone = securityPillTone(sig);
++            const riskyCount = sig.risky_rules?.length ?? null;
++            const driftCount = sig.drift?.length ?? null;
++            const groups = sig.data?.security_groups ?? null;
++            const flagged = flaggedSecurityGroupKeys(sig);
++            return (
++              <Link key={f.hostname} href={`/security/security-groups/${encodeURIComponent(f.hostname)}`} className="block">
++                <div
++                  className="tile-card tile-card--interactive flex h-full flex-col gap-4 p-5"
++                  style={{ ["--tile-color" as string]: tone.color }}
++                >
++                  <div className="flex items-start justify-between gap-3">
++                    <div className="flex items-center gap-3">
++                      <span className="tile-icon h-11 w-11">
++                        <NetworkIcon className="h-5 w-5" style={{ color: tone.color }} strokeWidth={2} />
++                      </span>
++                      <div>
++                        <div className="font-display text-[15px] font-semibold text-color-text">{f.hostname}</div>
++                        <div className="text-xs text-text-faint">{f.role}</div>
++                      </div>
++                    </div>
++                    <div className="flex items-center gap-2">
++                      <span
++                        className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium"
++                        style={{ color: tone.color, background: tone.soft }}
++                      >
++                        {tone.label}
++                      </span>
++                      <ChevronRight className="h-4 w-4 shrink-0 text-text-faint" strokeWidth={2} />
++                    </div>
++                  </div>
++
++                  <div className="flex flex-wrap gap-1.5 border-t pt-3" style={{ borderColor: "var(--border-soft)" }}>
++                    {groups === null ? (
++                      <span className="text-xs text-text-faint">Group details are admin-only.</span>
++                    ) : groups.length === 0 ? (
++                      <span className="text-xs text-text-faint">No security group attached.</span>
++                    ) : (
++                      groups.map((g) => {
++                        const isFlagged = isSecurityGroupFlagged(g, flagged);
++                        return (
++                          <span
++                            key={g.id}
++                            title={`${g.rules.length} rule${g.rules.length === 1 ? "" : "s"}`}
++                            className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
++                            style={{
++                              color: isFlagged ? "var(--crit)" : "var(--text-dim)",
++                              background: isFlagged ? "var(--crit-soft)" : "var(--canvas)",
++                            }}
++                          >
++                            {isFlagged && <AlertTriangle className="h-2.5 w-2.5" strokeWidth={2.5} />}
++                            {g.name}
++                          </span>
++                        );
++                      })
++                    )}
++                  </div>
++
++                  <div className="flex items-center gap-4 text-xs text-text-dim">
++                    <span className="flex items-center gap-1.5">
++                      <ShieldOff className="h-3.5 w-3.5" style={{ color: "var(--crit)" }} strokeWidth={2} />
++                      {riskyCount === null ? "—" : riskyCount} risky rule{riskyCount === 1 ? "" : "s"}
++                    </span>
++                    <span className="flex items-center gap-1.5">
++                      <History className="h-3.5 w-3.5" style={{ color: "var(--warn)" }} strokeWidth={2} />
++                      {driftCount === null ? "—" : driftCount} changed since last snapshot
++                    </span>
++                  </div>
++                </div>
++              </Link>
++            );
++          })}
++        </div>
++      )}
+     </div>
+   );
+ }
+diff --git a/services/web/lib/securityStatus.ts b/services/web/lib/securityStatus.ts
+index 726ec35..509555a 100644
+--- a/services/web/lib/securityStatus.ts
++++ b/services/web/lib/securityStatus.ts
+@@ -1,4 +1,4 @@
+-import type { AgentSecGroupInfo, AgentSecGroupSignal, AgentSecuritySignal } from "./types";
++import type { AgentSecGroupInfo, AgentSecGroupRule, AgentSecGroupSignal, AgentSecurityData, AgentSecuritySignal } from "./types";
+ 
+ /** Same {has_signal, degraded, restricted} -> tone/label mapping
+  * components/CopilotAgentPanels.tsx's SecuritySignalRow uses for the chat
+@@ -35,3 +35,112 @@ export function isSecurityGroupFlagged(
+ ): boolean {
+   return flagged.names.has(group.name) || flagged.ids.has(group.id);
+ }
++
++/** Phase Sec-4: one tone for a whole host's card on the /security and
++ * /security/security-groups grids, aggregated across all four sub-checks
++ * the same worst-first ordering securityPillTone applies to a single
++ * signal -- any signal fired anywhere on this host outranks any signal
++ * merely being degraded, which outranks a fully clean host.
++ */
++export function overallSecurityTone(raw: AgentSecurityData) {
++  const signals = [raw.auth_signal, raw.sec_group_signal, raw.cve_signal, raw.ebpf_signal];
++  if (signals.some((s) => s.has_signal)) return { color: "var(--crit)", soft: "var(--crit-soft)", label: "Flagged" };
++  if (signals.some((s) => s.degraded)) return { color: "var(--warn)", soft: "var(--warn-soft)", label: "Degraded" };
++  return { color: "var(--ok)", soft: "var(--ok-soft)", label: "Clean" };
++}
++
++/** Phase Sec-4: a stable identity for one security-group rule, used to
++ * cross-reference the *same* rule across three differently-shaped places
++ * it can show up -- `data.security_groups[].rules` (current state),
++ * `risky_rules[].rule` (static baseline hit), and
++ * `drift[].added_rules`/`removed_rules` (change vs. last snapshot).
++ * None of those three carry a shared rule id (Neutron rules don't have
++ * one exposed here), so identity is the tuple that actually defines a
++ * rule's meaning: direction, protocol, port range, and remote CIDR.
++ */
++function ruleKey(rule: AgentSecGroupRule["rule"]): string {
++  return [rule.direction, rule.protocol ?? "*", rule.port_range_min ?? "*", rule.port_range_max ?? "*", rule.remote_ip_prefix ?? "*"].join("|");
++}
++
++export interface AnnotatedRule {
++  rule: AgentSecGroupRule["rule"];
++  riskyReason: string | null;
++  driftStatus: "added" | null;
++}
++
++export interface GroupInsight {
++  group: AgentSecGroupInfo;
++  isFlagged: boolean;
++  rules: AnnotatedRule[];
++  // Rules the last stored snapshot had for this group that aren't in its
++  // current rule list any more -- only knowable from `drift`, since a
++  // removed rule by definition isn't in `data.security_groups` any more.
++  removedRules: AgentSecGroupRule["rule"][];
++  driftSince: string | null;
++}
++
++/** Phase Sec-4: the single "what does this group actually contain, right
++ * now, and why should I care" view -- merges what used to be three
++ * separate, harder-to-cross-reference sections (the plain current-groups
++ * listing, the overly-permissive rules list, and the drift list) into one
++ * card per group: every current rule, with the specific reason inline
++ * wherever it's also a risky_rules hit, plus anything added or removed
++ * since the last snapshot for that same group.
++ */
++export function buildGroupInsights(sig: AgentSecGroupSignal): GroupInsight[] {
++  const groups = sig.data?.security_groups ?? [];
++  const flagged = flaggedSecurityGroupKeys(sig);
++
++  const riskyByGroup = new Map<string, Map<string, string>>(); // group name -> ruleKey -> reason
++  for (const r of sig.risky_rules ?? []) {
++    if (!riskyByGroup.has(r.security_group)) riskyByGroup.set(r.security_group, new Map());
++    riskyByGroup.get(r.security_group)!.set(ruleKey(r.rule), r.reason);
++  }
++
++  const driftByGroupId = new Map<string, { addedKeys: Set<string>; removed: AgentSecGroupRule["rule"][]; since: string }>();
++  for (const d of sig.drift ?? []) {
++    driftByGroupId.set(d.security_group_id, {
++      addedKeys: new Set(d.added_rules.map(ruleKey)),
++      removed: d.removed_rules,
++      since: d.previous_captured_at,
++    });
++  }
++
++  const insights: GroupInsight[] = groups.map((group) => {
++    const riskyMap = riskyByGroup.get(group.name);
++    const drift = driftByGroupId.get(group.id);
++    return {
++      group,
++      isFlagged: isSecurityGroupFlagged(group, flagged),
++      rules: group.rules.map((rule) => {
++        const key = ruleKey(rule);
++        return {
++          rule,
++          riskyReason: riskyMap?.get(key) ?? null,
++          driftStatus: drift?.addedKeys.has(key) ? "added" : null,
++        };
++      }),
++      removedRules: drift?.removed ?? [],
++      driftSince: drift?.since ?? null,
++    } as GroupInsight;
++  });
++
++  // A drift entry can reference a group id that isn't in `groups` any
++  // more (the whole security group was deleted between the last snapshot
++  // and now, not just one of its rules) -- rare, but silently dropping it
++  // would mean a real change never shows up anywhere on this page.
++  const knownGroupIds = new Set(groups.map((g) => g.id));
++  for (const d of sig.drift ?? []) {
++    if (knownGroupIds.has(d.security_group_id)) continue;
++    insights.push({
++      group: { id: d.security_group_id, name: `${d.security_group} (deleted since last snapshot)`, rules: [] },
++      isFlagged: true,
++      rules: [],
++      removedRules: d.removed_rules,
++      driftSince: d.previous_captured_at,
++    });
++    knownGroupIds.add(d.security_group_id);
++  }
++
++  return insights;
++}
+-- 
+2.43.0
+
