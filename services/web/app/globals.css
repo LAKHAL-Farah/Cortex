@@ -332,6 +332,56 @@ select {
   }
 }
 
+/* ---- Security "Browse by category" integration-style cards (Phase Sec-5) ----
+   Modeled on a SaaS integrations-marketplace tile rather than the compact
+   .tile-card row above: a colored gradient wash fading down from the top
+   edge, an oversized near-transparent "ghost" duplicate of the category
+   icon bleeding off the top-right corner, a solid icon chip big enough to
+   read as the card's main visual, then a title + one-line description.
+   The footer intentionally uses a status chip (dot + label) rather than a
+   toggle switch -- these are internal nav categories the person can't
+   actually connect/disconnect, and a toggle-looking control that doesn't
+   toggle anything would be a dishonest affordance. Color comes from
+   --card-color, set inline per category the same way .tile-card's
+   --tile-color already is. */
+@layer components {
+  .category-card {
+    position: relative;
+    overflow: hidden;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    box-shadow: var(--shadow);
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  }
+  .category-card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--card-color, var(--accent)) 20%, transparent) 0%,
+      transparent 62%
+    );
+    pointer-events: none;
+  }
+  .category-card--interactive:hover {
+    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--border) 45%, var(--card-color, var(--accent)));
+    box-shadow: 0 16px 36px -16px color-mix(in srgb, var(--card-color, var(--accent)) 45%, transparent);
+  }
+  .category-card__ghost-icon {
+    position: absolute;
+    top: -20px;
+    right: -18px;
+    width: 128px;
+    height: 128px;
+    color: var(--card-color, var(--accent));
+    opacity: 0.09;
+    pointer-events: none;
+  }
+}
+
 /* ---- Copilot panel ambient background ----
    A fixed, low-opacity wash behind the whole chat panel so the surface
    reads as "alive" without competing with message text. Same accent/medium

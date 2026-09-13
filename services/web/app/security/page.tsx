@@ -1,11 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
-import Link from "next/link";
 import useSWR from "swr";
 import {
   ShieldAlert,
-  Shield,
   Terminal,
   Network as NetworkIcon,
   ScrollText,
@@ -15,15 +13,14 @@ import {
   FileClock,
   RefreshCw,
   AlertTriangle,
-  ChevronRight,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-import type { SecurityFinding, AgentSecuritySignal } from "@/lib/types";
-import { securityPillTone, overallSecurityTone } from "@/lib/securityStatus";
+import type { SecurityFinding } from "@/lib/types";
 import { Card } from "@/components/ui/Card";
 import MetricCard from "@/components/ui/MetricCard";
 import SecurityHealthBadge from "@/components/SecurityHealthBadge";
 import SecurityRescanButton from "@/components/SecurityRescanButton";
+import SecurityPostureTable from "@/components/SecurityPostureTable";
+import SecurityCategoryCard, { type SecurityCategory } from "@/components/SecurityCategoryCard";
 
 const fetcher = async (url: string) => {
   const res = await fetch(url);
@@ -31,41 +28,70 @@ const fetcher = async (url: string) => {
   return res.json();
 };
 
-function StatusPill({ signal }: { signal: AgentSecuritySignal }) {
-  const tone = securityPillTone(signal);
-  return (
-    <span
-      className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium"
-      style={{ color: tone.color, background: tone.soft }}
-    >
-      {tone.label}
-    </span>
-  );
-}
-
-// One sub-check row inside a host's big card -- icon + label on the left,
-// StatusPill on the right, same four sub-checks the old table's columns
-// were, just laid out for a card instead of a table cell.
-const SIGNAL_ROWS: { key: "auth_signal" | "sec_group_signal" | "cve_signal" | "ebpf_signal"; label: string; icon: LucideIcon }[] = [
-  { key: "auth_signal", label: "Auth activity", icon: Terminal },
-  { key: "sec_group_signal", label: "Security groups", icon: NetworkIcon },
-  { key: "cve_signal", label: "Known CVEs", icon: ScrollText },
-  { key: "ebpf_signal", label: "Kernel signals", icon: Cpu },
-];
-
 // Sub-pages this overview links to -- only "Security groups" has a real
 // page behind it (Phase Sec-1's stored-snapshot diff); the rest route to
 // a plain "not available yet" placeholder rather than pretending there's
 // a built page (or worse, real data) behind them. See each page's own
-// ComingSoon `blockedOn` text for exactly what's missing.
-const CATEGORIES: { label: string; href: string; icon: LucideIcon; color: string; available: boolean }[] = [
-  { label: "Auth activity", href: "/security/auth-activity", icon: Terminal, color: "var(--chart-1)", available: false },
-  { label: "Security groups", href: "/security/security-groups", icon: NetworkIcon, color: "var(--chart-3)", available: true },
-  { label: "Vulnerabilities (CVE)", href: "/security/vulnerabilities", icon: ScrollText, color: "var(--chart-4)", available: false },
-  { label: "Kernel signals (eBPF)", href: "/security/kernel-signals", icon: Cpu, color: "var(--chart-5)", available: false },
-  { label: "Exposed ports", href: "/security/exposed-ports", icon: Globe, color: "var(--chart-2)", available: false },
-  { label: "Keystone tokens", href: "/security/keystone-tokens", icon: KeyRound, color: "var(--chart-1)", available: false },
-  { label: "Audit log", href: "/security/audit-log", icon: FileClock, color: "var(--chart-2)", available: false },
+// ComingSoon `blockedOn` text for exactly what's missing. `description`
+// is what the integration-style card in "Browse by category" shows under
+// the title -- one line on what that category actually checks.
+const CATEGORIES: SecurityCategory[] = [
+  {
+    label: "Auth activity",
+    description: "SSH and login anomalies pulled straight from each host's auth log, via Loki.",
+    href: "/security/auth-activity",
+    icon: Terminal,
+    color: "var(--chart-1)",
+    available: false,
+  },
+  {
+    label: "Security groups",
+    description: "Neutron ingress/egress rules audited against the risky baseline, plus drift since the last snapshot.",
+    href: "/security/security-groups",
+    icon: NetworkIcon,
+    color: "var(--chart-3)",
+    available: true,
+  },
+  {
+    label: "Vulnerabilities (CVE)",
+    description: "Installed package versions on every monitored node, matched against known CVEs.",
+    href: "/security/vulnerabilities",
+    icon: ScrollText,
+    color: "var(--chart-4)",
+    available: false,
+  },
+  {
+    label: "Kernel signals (eBPF)",
+    description: "Falco alerts for suspicious syscalls, capability use, and container escapes.",
+    href: "/security/kernel-signals",
+    icon: Cpu,
+    color: "var(--chart-5)",
+    available: false,
+  },
+  {
+    label: "Exposed ports",
+    description: "Every listening port per host, flagged when it's reachable from outside its security group.",
+    href: "/security/exposed-ports",
+    icon: Globe,
+    color: "var(--chart-2)",
+    available: false,
+  },
+  {
+    label: "Keystone tokens",
+    description: "Token issuance and reuse patterns across every OpenStack service call.",
+    href: "/security/keystone-tokens",
+    icon: KeyRound,
+    color: "var(--chart-1)",
+    available: false,
+  },
+  {
+    label: "Audit log",
+    description: "Every Keystone/Nova/Neutron API call, searchable by actor, project, and action.",
+    href: "/security/audit-log",
+    icon: FileClock,
+    color: "var(--chart-2)",
+    available: false,
+  },
 ];
 
 export default function SecurityOverviewPage() {
@@ -161,68 +187,15 @@ export default function SecurityOverviewPage() {
             <div className="text-sm text-text-faint">No monitored nodes yet -- add one under Infrastructure → Nodes.</div>
           </Card>
         ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {findings.map((f) => {
-              const tone = overallSecurityTone(f.raw_data);
-              return (
-                <Link key={f.hostname} href={`/security/security-groups/${encodeURIComponent(f.hostname)}`} className="block">
-                  <div
-                    className="tile-card tile-card--interactive flex h-full flex-col gap-4 p-5"
-                    style={{ ["--tile-color" as string]: tone.color }}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-3">
-                        <span className="tile-icon h-11 w-11">
-                          <Shield className="h-5 w-5" style={{ color: tone.color }} strokeWidth={2} />
-                        </span>
-                        <div>
-                          <div className="font-display text-[15px] font-semibold text-color-text">{f.hostname}</div>
-                          <div className="text-xs text-text-faint">{f.role}</div>
-                        </div>
-                      </div>
-                      <ChevronRight className="mt-1.5 h-4 w-4 shrink-0 text-text-faint" strokeWidth={2} />
-                    </div>
-                    <div className="grid grid-cols-1 gap-2 border-t pt-3" style={{ borderColor: "var(--border-soft)" }}>
-                      {SIGNAL_ROWS.map((row) => (
-                        <div key={row.key} className="flex items-center justify-between gap-2">
-                          <span className="flex items-center gap-2 text-xs text-text-dim">
-                            <row.icon className="h-3.5 w-3.5" strokeWidth={2} />
-                            {row.label}
-                          </span>
-                          <StatusPill signal={f.raw_data[row.key]} />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </Link>
-              );
-            })}
-          </div>
+          <SecurityPostureTable findings={findings} />
         )}
       </div>
 
       <div>
         <div className="eyebrow mb-2 px-1">Browse by category</div>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {CATEGORIES.map((cat) => (
-            <Link key={cat.href} href={cat.href} className="block">
-              <div
-                className="tile-card tile-card--interactive flex items-center justify-between gap-3 p-4"
-                style={{ ["--tile-color" as string]: cat.color }}
-              >
-                <div className="flex items-center gap-3">
-                  <span className="tile-icon h-9 w-9">
-                    <cat.icon className="h-4.5 w-4.5" style={{ color: cat.color }} strokeWidth={2} />
-                  </span>
-                  <span className="font-display text-[14px] font-medium text-color-text">{cat.label}</span>
-                </div>
-                {!cat.available && (
-                  <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-text-faint" style={{ background: "var(--canvas)" }}>
-                    Coming soon
-                  </span>
-                )}
-              </div>
-            </Link>
+            <SecurityCategoryCard key={cat.href} category={cat} />
           ))}
         </div>
       </div>
