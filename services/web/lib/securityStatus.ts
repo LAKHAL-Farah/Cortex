@@ -243,3 +243,56 @@ export function buildCveHostStatuses(findings: SecurityFinding[]): CveHostStatus
     matchCount: f.raw_data.cve_signal.matches?.length ?? 0,
   }));
 }
+
+/** One row per (host, correlated auth-failure log line) -- the flat shape
+ * /security/auth-activity's table renders, straight off
+ * AgentAuthAnomalySignal.entries (nodes/security.py's
+ * `_check_auth_anomaly`) plus the host each entry came from. Capped at
+ * whatever `entries` itself already is -- that sub-check only ever
+ * returns its 5 most recent matches even when more exist in the lookback
+ * window (see its own docstring), so this is "5 most recent per host",
+ * not "every match"; `detail` on the underlying signal (surfaced via
+ * buildAuthHostStatuses below) is what carries the true total count.
+ */
+export interface AuthLogRow {
+  hostname: string;
+  role: string;
+  ts: number;
+  line: string;
+  service: string | null;
+}
+
+export function flattenAuthFindings(findings: SecurityFinding[]): AuthLogRow[] {
+  const rows: AuthLogRow[] = [];
+  for (const f of findings) {
+    for (const entry of f.raw_data.auth_signal.entries ?? []) {
+      rows.push({ hostname: f.hostname, role: f.role, ts: entry.ts, line: entry.line, service: entry.service });
+    }
+  }
+  return rows.sort((a, b) => b.ts - a.ts);
+}
+
+/** Every monitored host's auth-anomaly status, independent of whether it
+ * actually has a flagged entry right now -- same reasoning
+ * buildCveHostStatuses' own docstring gives: a flat entries table on its
+ * own would only ever show hosts *with* a finding, making a clean,
+ * degraded (Loki didn't respond), or restricted (viewer role) host
+ * indistinguishable from one that was never checked at all.
+ */
+export interface AuthHostStatus {
+  hostname: string;
+  role: string;
+  tone: ReturnType<typeof securityPillTone>;
+  entryCount: number;
+  detail?: string;
+}
+
+export function buildAuthHostStatuses(findings: SecurityFinding[]): AuthHostStatus[] {
+  return findings.map((f) => ({
+    hostname: f.hostname,
+    role: f.role,
+    tone: securityPillTone(f.raw_data.auth_signal),
+    entryCount: f.raw_data.auth_signal.entries?.length ?? 0,
+    detail: f.raw_data.auth_signal.detail,
+  }));
+}

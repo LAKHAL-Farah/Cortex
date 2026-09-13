@@ -29,9 +29,10 @@ const fetcher = async (url: string) => {
 };
 
 // Sub-pages this overview links to -- "Security groups" (Phase Sec-1's
-// stored-snapshot diff) and "Vulnerabilities" (Phase Sec-3's
-// package-inventory collector) have real pages behind them now; the rest
-// route to a plain "not available yet" placeholder rather than pretending
+// stored-snapshot diff), "Vulnerabilities" (Phase Sec-3's
+// package-inventory collector), and "Auth activity" (Phase Sec-6's Loki
+// auth-log entries, already part of GET /findings' auth_signal) have real
+// pages behind them now; the rest route to a plain "not available yet" placeholder rather than pretending
 // there's a built page (or worse, real data) behind them. See each page's
 // own ComingSoon `blockedOn` text for exactly what's missing. `description`
 // is what the integration-style card in "Browse by category" shows under
@@ -47,7 +48,7 @@ const CATEGORIES: SecurityCategory[] = [
     href: "/security/auth-activity",
     icon: Terminal,
     color: "var(--chart-1)",
-    available: false,
+    available: true,
     scope: "node",
   },
   {
