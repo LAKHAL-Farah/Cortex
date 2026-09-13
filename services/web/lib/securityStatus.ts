@@ -1,4 +1,4 @@
-import type { AgentSecGroupInfo, AgentSecGroupRule, AgentSecGroupSignal, AgentSecurityData, AgentSecuritySignal } from "./types";
+import type { AgentCveMatch, AgentSecGroupInfo, AgentSecGroupRule, AgentSecGroupSignal, AgentSecurityData, AgentSecuritySignal, SecurityFinding } from "./types";
 
 /** Same {has_signal, degraded, restricted} -> tone/label mapping
  * components/CopilotAgentPanels.tsx's SecuritySignalRow uses for the chat
@@ -143,4 +143,103 @@ export function buildGroupInsights(sig: AgentSecGroupSignal): GroupInsight[] {
   }
 
   return insights;
+}
+
+// --- Phase Sec-3 (vulnerabilities page): CVE severity vocabulary --------
+//
+// cve_feed._CVE_DATABASE only ever hand-picks entries at these four
+// severities (services/api/app/services/cve_feed.py), but AgentCveMatch's
+// own type keeps `severity: ... | string` since this table is explicitly
+// described there as "small, hand-picked, illustrative" and expected to
+// grow -- so every helper below falls back to a neutral, still-labeled
+// tone instead of silently mis-coloring or crashing on a severity string
+// it doesn't recognize yet.
+export const CVE_SEVERITY_ORDER = ["critical", "high", "medium", "low"] as const;
+export type KnownCveSeverity = (typeof CVE_SEVERITY_ORDER)[number];
+
+const CVE_SEVERITY_COLOR: Record<KnownCveSeverity, string> = {
+  critical: "var(--crit)",
+  high: "var(--warn)",
+  medium: "var(--medium)",
+  low: "var(--text-muted)",
+};
+
+const CVE_SEVERITY_SOFT: Record<KnownCveSeverity, string> = {
+  critical: "var(--crit-soft)",
+  high: "var(--warn-soft)",
+  medium: "var(--medium-soft)",
+  low: "var(--canvas)",
+};
+
+function isKnownCveSeverity(severity: string): severity is KnownCveSeverity {
+  return (CVE_SEVERITY_ORDER as readonly string[]).includes(severity);
+}
+
+export function cveSeverityTone(severity: string): { color: string; soft: string; label: string } {
+  if (isKnownCveSeverity(severity)) {
+    return { color: CVE_SEVERITY_COLOR[severity], soft: CVE_SEVERITY_SOFT[severity], label: severity[0].toUpperCase() + severity.slice(1) };
+  }
+  // An unrecognized severity string (a future _CVE_DATABASE entry outside
+  // today's four) still renders, just without pretending to know how
+  // dangerous it is relative to the known four.
+  return { color: "var(--text-dim)", soft: "var(--canvas)", label: severity || "Unknown" };
+}
+
+/** Sorts by severity first (worst first, unknown severities last), then
+ * by CVE id for a stable order within the same severity -- used by the
+ * matches table so "worst finding first" doesn't depend on whatever
+ * order match_cves happened to walk the package list in. */
+export function cveSeverityRank(severity: string): number {
+  const idx = CVE_SEVERITY_ORDER.indexOf(severity as KnownCveSeverity);
+  return idx === -1 ? CVE_SEVERITY_ORDER.length : idx;
+}
+
+/** One row per (host, matched CVE) -- the flat shape the /security/
+ * vulnerabilities table actually renders, straight off match_cves'
+ * existing AgentCveMatch shape (cve_feed.py) plus the host it was found
+ * on, since a single AgentCveMatch on its own doesn't say which node it
+ * came from. */
+export interface CveFindingRow extends AgentCveMatch {
+  hostname: string;
+  role: string;
+}
+
+/** Flattens every finding's cve_signal.matches into one row list across
+ * the whole fleet, sorted worst-severity-first. A restricted (viewer)
+ * signal or a degraded (collector-unreachable) one contributes no rows
+ * here by construction -- both have `matches` undefined, never a
+ * fabricated empty-but-clean list -- see buildCveHostStatuses below for
+ * how those hosts are still represented instead of silently vanishing.
+ */
+export function flattenCveFindings(findings: SecurityFinding[]): CveFindingRow[] {
+  const rows: CveFindingRow[] = [];
+  for (const f of findings) {
+    for (const match of f.raw_data.cve_signal.matches ?? []) {
+      rows.push({ ...match, hostname: f.hostname, role: f.role });
+    }
+  }
+  return rows.sort((a, b) => cveSeverityRank(a.severity) - cveSeverityRank(b.severity) || a.cve_id.localeCompare(b.cve_id));
+}
+
+/** Phase Sec-3: every monitored host's CVE-match status, independent of
+ * whether it actually has a match right now -- a flat matches table on
+ * its own would only ever show hosts *with* a finding, making a clean or
+ * degraded host indistinguishable from one that was never checked at
+ * all. This is what lets the page say "these N hosts were checked and
+ * are clean" instead of just going quiet about them.
+ */
+export interface CveHostStatus {
+  hostname: string;
+  role: string;
+  tone: ReturnType<typeof securityPillTone>;
+  matchCount: number;
+}
+
+export function buildCveHostStatuses(findings: SecurityFinding[]): CveHostStatus[] {
+  return findings.map((f) => ({
+    hostname: f.hostname,
+    role: f.role,
+    tone: securityPillTone(f.raw_data.cve_signal),
+    matchCount: f.raw_data.cve_signal.matches?.length ?? 0,
+  }));
 }

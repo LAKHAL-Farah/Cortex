@@ -801,6 +801,73 @@ def list_security_group_rules():
     return {"security_group_rules": list(_SECURITY_GROUP_RULES_LIVE.values())}
 
 
+# ---- Phase Sec-3: package-inventory collector (node layer only) ---------
+# Not a real OpenStack API -- this stands in for whatever collector
+# CORTEX_PACKAGE_INVENTORY_URL ends up pointing at in a real deployment
+# (an Ansible-facts scraper, a node_exporter textfile collector publishing
+# dpkg/rpm output, osquery/Fleet -- see services/cve_feed.py's module
+# docstring for the tradeoffs). Serving it from openstack-sim rather than
+# standing up a fifth container is "whichever is less infra" per the
+# roadmap doc's own §6 table -- docker-compose.sandbox.yml just points
+# CORTEX_PACKAGE_INVENTORY_URL at this host:port instead of the
+# package-inventory:9111 production default.
+#
+# Deliberately mirrors the SERVERS/PORTS convention above: one node
+# (controller-sim) seeded with a real, known-vulnerable version
+# (openssh-server 9.6, below cve_feed.py's fixed_version of 9.8p1) so
+# `_check_cve_match` always has a genuine matched/clean finding to
+# demonstrate against a fresh sandbox, exactly like SECURITY_GROUP_RULES
+# seeds one deliberately world-open rule. The remaining three nodes (and
+# controller-sim's other packages) are seeded clean -- versions comfortably
+# newer than every fixed_version in cve_feed.py's _CVE_DATABASE -- so a
+# scan across the whole fleet shows a mix of "vulnerable" and "clean"
+# rather than either extreme.
+PACKAGE_INVENTORY: dict[str, list[dict]] = {
+    "controller-sim": [
+        {"name": "openssh-server", "version": "9.6"},
+        {"name": "openssl", "version": "3.2.1"},
+        {"name": "sudo", "version": "1.10.0"},
+        {"name": "runc", "version": "1.2.0"},
+        {"name": "libvirt", "version": "10.2.0"},
+    ],
+    "compute1-sim": [
+        {"name": "openssh-server", "version": "10.0"},
+        {"name": "openssl", "version": "3.2.1"},
+        {"name": "sudo", "version": "1.10.0"},
+        {"name": "runc", "version": "1.2.0"},
+        {"name": "libvirt", "version": "10.2.0"},
+    ],
+    "compute2-sim": [
+        {"name": "openssh-server", "version": "10.0"},
+        {"name": "openssl", "version": "3.2.1"},
+        {"name": "sudo", "version": "1.10.0"},
+        {"name": "runc", "version": "1.2.0"},
+        {"name": "libvirt", "version": "10.2.0"},
+    ],
+    "storage-sim": [
+        {"name": "openssh-server", "version": "10.0"},
+        {"name": "openssl", "version": "3.2.1"},
+        {"name": "sudo", "version": "1.10.0"},
+        {"name": "runc", "version": "1.2.0"},
+        {"name": "libvirt", "version": "10.2.0"},
+    ],
+}
+
+
+@app.get("/packages")
+def get_packages(host: str):
+    """`GET /packages?host=<node hostname>` -- the exact shape
+    cve_feed.get_package_inventory() already expects and already calls:
+    `[{"name": str, "version": str}, ...]`. An unknown hostname returns an
+    empty list (a real collector would report "nothing installed on a host
+    I've never heard of" the same way, not a 404) so `_check_cve_match`
+    degrades to "no known-vulnerable packages found" rather than "collector
+    unreachable" for a node this sim doesn't seed -- a different, real
+    state, not a connection error.
+    """
+    return PACKAGE_INVENTORY.get(host, [])
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}

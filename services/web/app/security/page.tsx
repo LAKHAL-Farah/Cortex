@@ -28,11 +28,12 @@ const fetcher = async (url: string) => {
   return res.json();
 };
 
-// Sub-pages this overview links to -- only "Security groups" has a real
-// page behind it (Phase Sec-1's stored-snapshot diff); the rest route to
-// a plain "not available yet" placeholder rather than pretending there's
-// a built page (or worse, real data) behind them. See each page's own
-// ComingSoon `blockedOn` text for exactly what's missing. `description`
+// Sub-pages this overview links to -- "Security groups" (Phase Sec-1's
+// stored-snapshot diff) and "Vulnerabilities" (Phase Sec-3's
+// package-inventory collector) have real pages behind them now; the rest
+// route to a plain "not available yet" placeholder rather than pretending
+// there's a built page (or worse, real data) behind them. See each page's
+// own ComingSoon `blockedOn` text for exactly what's missing. `description`
 // is what the integration-style card in "Browse by category" shows under
 // the title -- one line on what that category actually checks. `scope`
 // (Phase 0, security scope-clarification roadmap) says which of
@@ -64,7 +65,7 @@ const CATEGORIES: SecurityCategory[] = [
     href: "/security/vulnerabilities",
     icon: ScrollText,
     color: "var(--chart-4)",
-    available: false,
+    available: true,
     scope: "node",
   },
   {

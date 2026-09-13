@@ -5,16 +5,20 @@ Two independent pieces, deliberately kept separate:
 
 1. `get_package_inventory(hostname)` -- an HTTP client, same
    configurable-real-endpoint shape as ebpf_signal.py/loki_client.py, this
-   time against `CORTEX_PACKAGE_INVENTORY_URL`. Nothing in this codebase
-   collects a per-node package inventory yet (see security.py's module
-   docstring for the honest state of that), so in a fresh openstack-sim
-   checkout this call fails with a connection error -- same as
-   ebpf_signal.py, the caller degrades that into "no signal, unknown"
-   rather than treating an absent collector as a crash. Point
-   CORTEX_PACKAGE_INVENTORY_URL at a real fact-gathering source (an
+   time against `CORTEX_PACKAGE_INVENTORY_URL`. As of Phase Sec-3, the
+   sandbox (infra/docker-compose.sandbox.yml) points this at openstack-sim's
+   own `/packages?host=` route -- seeded with a real known-vulnerable
+   openssh-server version on controller-sim and clean versions elsewhere,
+   so `_check_cve_match` returns a genuine matched/clean finding instead of
+   degrading, without a fifth sandbox container. Outside the sandbox,
+   nothing production-shaped collects a per-node package inventory yet --
+   point CORTEX_PACKAGE_INVENTORY_URL at a real fact-gathering source (an
    Ansible-facts scraper, an osquery/Fleet endpoint, a Prometheus
    node_exporter textfile collector publishing dpkg/rpm versions -- any of
-   these would work) and this starts reading real installed versions.
+   these would work) and this starts reading real installed versions there
+   too. A host with no collector reachable still fails with a connection
+   error, which the caller (same as ebpf_signal.py) degrades into "no
+   signal, unknown" rather than a crash.
 2. `match_cves(packages)` -- a pure function, no network calls, matching
    an already-fetched package list against `_CVE_DATABASE` below. Kept
    pure and separate from the fetch specifically so it's trivially unit-

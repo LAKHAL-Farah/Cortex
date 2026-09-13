@@ -46,17 +46,25 @@ which alone is conclusive:
 
 Honesty about what's real vs. illustrative in an openstack-sim checkout:
 `_check_auth_anomaly` and `_check_sec_group_diff` read genuinely live data
-(the same Loki/Neutron this project already runs). `_check_cve_match` and
-`_check_ebpf_signal` are real HTTP clients (services/cve_feed.py,
-services/ebpf_signal.py) against endpoints (`CORTEX_PACKAGE_INVENTORY_URL`,
-`CORTEX_EBPF_ALERTS_URL`) nothing in this repo stands up yet -- point them
-at a real package-inventory collector / Falco or Tetragon deployment and
-they read real data; until then they simply fail to connect, which (same
-as every other external read in this codebase) degrades that one sub-check
-to "unknown" via resilience.get_breaker rather than crashing the turn or
-silently reporting "clean". `_CVE_DATABASE` itself (cve_feed.py) is a
-small, real, but deliberately finite hand-picked table, same tradeoff
-openstack_expert_catalog.py already makes for its runbook entries.
+(the same Loki/Neutron this project already runs). `_check_cve_match` is a
+real HTTP client (services/cve_feed.py) against `CORTEX_PACKAGE_INVENTORY_URL`
+-- as of Phase Sec-3, the sandbox points this at openstack-sim's own
+`/packages` route (seeded: a real known-vulnerable openssh-server version
+on controller-sim, clean versions on the other three nodes), so this
+sub-check returns a genuine matched/clean finding in a fresh sandbox
+checkout rather than degrading. `_check_ebpf_signal` is the same shape of
+HTTP client (services/ebpf_signal.py) against `CORTEX_EBPF_ALERTS_URL`,
+still nothing in this repo stands up yet (Phase Sec-4) -- point it at a
+real Falco or Tetragon deployment and it reads real data; until then it
+simply fails to connect, which (same as every other external read in this
+codebase) degrades that one sub-check to "unknown" via
+resilience.get_breaker rather than crashing the turn or silently reporting
+"clean". Outside the sandbox, CORTEX_PACKAGE_INVENTORY_URL still needs a
+real collector too (see cve_feed.py's module docstring) -- the sandbox
+route is a stand-in, not a production data source. `_CVE_DATABASE` itself
+(cve_feed.py) is a small, real, but deliberately finite hand-picked table,
+same tradeoff openstack_expert_catalog.py already makes for its runbook
+entries.
 
 RBAC note: this agent's raw findings (which CVEs, which security-group
 rules, which specific eBPF alert lines) are sensitive in a way Monitoring/

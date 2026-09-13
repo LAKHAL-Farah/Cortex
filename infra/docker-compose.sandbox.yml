@@ -47,6 +47,16 @@ services:
       # control) both show up within a couple of polls instead of
       # waiting a full production-length tick.
       SECURITY_SCAN_INTERVAL_SECONDS: '20'
+      # Phase Sec-3: no dedicated package-inventory collector container in
+      # this sandbox -- openstack-sim's own /packages route (see its
+      # app.py, "Phase Sec-3" section) stands in for one, seeded with a
+      # real vulnerable version on controller-sim and clean versions
+      # everywhere else. Overrides the http://package-inventory:9111
+      # production default (cve_feed.py), which has nothing listening on
+      # it in this sandbox by design -- pointing this at a real collector
+      # is the only change needed to make CVE-match read real data outside
+      # the sandbox.
+      CORTEX_PACKAGE_INVENTORY_URL: http://openstack-sim:5000
       # Reachable from the api container on the cortex-sandbox network --
       # same host:port openstacksdk's clouds.yaml already points at, just
       # addressed directly for the sandbox-only /_sandbox/... fault-
