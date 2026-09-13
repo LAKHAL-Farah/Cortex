@@ -40,6 +40,21 @@ What this scopes to, and what it deliberately doesn't:
   but can still host instances with a broken port, and that's just as
   much this node's "network health" as a down agent is.
 
+A note on node roles (Phase 0, security scope-clarification roadmap):
+there is no dedicated "network" role in this project's schema --
+`models.Node`'s role CheckConstraint only allows
+controller/compute/storage/monitoring -- so every Neutron agent above
+runs on one of those four. In this sandbox's current topology that's
+`controller-sim` for neutron-l3-agent/neutron-dhcp-agent and
+`compute{1,2}-sim` for neutron-openvswitch-agent (see
+infra/openstack-sim/app.py's `NEUTRON_AGENTS` fixture); nothing in this
+module or in the topology_sync.py SERVES-edge sync assumes that specific
+placement, since both resolve agents by whichever node's hostname a
+`host` label actually matches, not by a hardcoded role. Whether l3/dhcp
+should instead run on a compute node in some future deployment is an
+open decision (tracked separately), not something this module -- or its
+"typically the controller" phrasing above -- takes a position on.
+
 Deliberately **not** modeled here: security groups, floating-IP
 association read directly off an instance's own port (covered instead by
 the FloatingIP vertex's own `fixed_ip_address`/`router_id`, same as

@@ -10,6 +10,7 @@ import SecurityHealthBadge from "@/components/SecurityHealthBadge";
 import SecurityRescanButton from "@/components/SecurityRescanButton";
 import SecurityGroupsTable from "@/components/SecurityGroupsTable";
 import SecurityGroupsChart from "@/components/SecurityGroupsChart";
+import SecurityScopeTag from "@/components/SecurityScopeTag";
 
 const fetcher = async (url: string) => {
   const res = await fetch(url);
@@ -48,7 +49,10 @@ export default function SecurityGroupsListPage() {
             <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} />
             Back to Security
           </Link>
-          <h1 className="font-display text-[22px] font-semibold text-color-text">Security groups</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="font-display text-[22px] font-semibold text-color-text">Security groups</h1>
+            <SecurityScopeTag scope="instance" />
+          </div>
           <p className="mt-1 text-sm text-text-faint">
             Current Neutron security-group rules per host, audited against the built-in overly-permissive baseline,
             plus drift against the most recent stored snapshot -- a rule can show up as changed even when it isn&apos;t

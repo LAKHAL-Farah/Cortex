@@ -13,12 +13,14 @@ import {
   Plus,
   Minus,
   Layers,
+  Server,
   Info,
   ShieldOff,
 } from "lucide-react";
 import type { AgentSecGroupSignal, AgentSecGroupRule } from "@/lib/types";
 import { securityPillTone, buildGroupInsights } from "@/lib/securityStatus";
 import { Card } from "@/components/ui/Card";
+import SecurityScopeTag from "@/components/SecurityScopeTag";
 import SecurityHealthBadge from "@/components/SecurityHealthBadge";
 import SecurityRescanButton from "@/components/SecurityRescanButton";
 
@@ -70,6 +72,7 @@ export default function SecurityGroupDetailPage() {
                 {tone.label}
               </span>
             )}
+            <SecurityScopeTag scope="instance" />
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-1">
@@ -124,7 +127,8 @@ export default function SecurityGroupDetailPage() {
               One table per security group in use by an instance actually hosted on this node right now (via
               Nova&apos;s <code>hypervisor_hostname</code>) -- OpenStack attaches security groups to an instance&apos;s
               own port, never to the compute node itself, so this is a union across every VM scheduled here, not a
-              property of the hardware. A rule is tagged{" "}
+              property of the hardware; each group&apos;s card names exactly which of those instances actually
+              carry it. A rule is tagged{" "}
               <strong>Risky</strong> and called out below it if it trips the built-in overly-permissive baseline,
               and <strong>Added</strong>/<strong>Removed</strong> if it changed since the last stored snapshot -- a
               periodic job that runs every SECURITY_SNAPSHOT_INTERVAL_SECONDS, so a rule can be flagged as drift
@@ -142,16 +146,33 @@ export default function SecurityGroupDetailPage() {
                 const groupTone = insight.isFlagged ? "var(--crit)" : "var(--ok)";
                 return (
                   <div key={insight.group.id} className="panel flex flex-col gap-3 p-5">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-3">
                         <span className="grid h-9 w-9 flex-shrink-0 place-items-center rounded-[var(--radius-control)]" style={{ background: "var(--canvas)" }}>
                           <Layers className="h-4 w-4" style={{ color: groupTone }} strokeWidth={1.75} />
                         </span>
-                        <div>
+                        <div className="min-w-0">
                           <div className="font-display text-[15px] font-semibold text-color-text">{insight.group.name}</div>
-                          <div className="text-xs text-text-faint">
+                          <div className="mt-0.5 text-xs text-text-faint">
                             {insight.group.rules.length} rule{insight.group.rules.length === 1 ? "" : "s"}
                           </div>
+                          {insight.group.instances && insight.group.instances.length > 0 && (
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                              <Server className="h-3 w-3 shrink-0 text-text-faint" strokeWidth={2} />
+                              {insight.group.instances.slice(0, 6).map((name) => (
+                                <span
+                                  key={name}
+                                  className="rounded-md px-1.5 py-0.5 text-[10px] font-medium text-text-dim"
+                                  style={{ background: "var(--canvas)" }}
+                                >
+                                  {name}
+                                </span>
+                              ))}
+                              {insight.group.instances.length > 6 && (
+                                <span className="text-[10px] text-text-faint">+{insight.group.instances.length - 6} more</span>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                       <span

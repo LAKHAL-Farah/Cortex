@@ -8,7 +8,8 @@ export default function KeystoneTokensPage() {
     <ComingSoon
       icon={KeyRound}
       title="Keystone tokens"
-      blockedOn="Phase Sec-5 hasn't shipped -- there's no backend check for this yet"
+      scope="identity"
+      blockedOn="Phase Sec-5c hasn't shipped -- there's no backend check for this yet"
     />
   );
 }

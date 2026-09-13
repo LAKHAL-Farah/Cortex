@@ -24,6 +24,8 @@ from app.services.anomaly_detector import (
     MIN_BASELINE_SAMPLES,
     MIN_BASELINE_DAYS,
     MIN_MAD_FLOOR,
+    MIN_ROLE_BASELINE_SAMPLES,
+    MIN_ROLE_BASELINE_HOSTS,
 )
 
 
@@ -52,6 +54,35 @@ def make_baseline(db, hostname="host1", metric_name="cpu_usage", weekday=2, hour
     db.add(b)
     db.commit()
     return b
+
+
+def make_node(db, hostname="new-compute-host", role="compute"):
+    # Built directly against models.Node (bypassing schemas.NodeCreate's
+    # ip-subnet validation) since these tests only care that
+    # score_current_value() can resolve *some* role for the hostname, not
+    # that the row would pass the API's own create-node validation.
+    node = models.Node(hostname=hostname, ip_address="10.0.9.9", role=role, exporter_port=9100)
+    db.add(node)
+    db.commit()
+    return node
+
+
+def make_role_baseline(db, role="compute", metric_name="cpu_usage", weekday=2, hour=13,
+                        median=25.0, mad=1.5, sample_count=None, distinct_hosts=None):
+    # Defaults comfortably clear MIN_ROLE_BASELINE_SAMPLES/HOSTS the same way
+    # make_baseline()'s defaults clear the host-level thresholds.
+    if sample_count is None:
+        sample_count = MIN_ROLE_BASELINE_SAMPLES + 10
+    if distinct_hosts is None:
+        distinct_hosts = MIN_ROLE_BASELINE_HOSTS + 1
+    rb = models.RoleBaseline(
+        role=role, metric_name=metric_name, weekday=weekday, hour=hour,
+        mean=median, stddev=mad, median=median, mad=mad,
+        sample_count=sample_count, distinct_hosts=distinct_hosts,
+    )
+    db.add(rb)
+    db.commit()
+    return rb
 
 
 # --- severity thresholds ---
@@ -130,6 +161,65 @@ def test_falls_back_to_ewma_when_baseline_too_thin(db):
     make_baseline(db, sample_count=MIN_BASELINE_SAMPLES - 1)  # below the trust threshold
     z, severity, method, baseline_n = score_current_value(
         db, "host1", "cpu_usage", 25.0, weekday=2, hour=13
+    )
+    assert method == "ewma_fallback"
+
+
+# --- fallback path: host baseline sparse, role baseline picked up instead (Phase 0 gap-closer) ---
+#
+# The tier ladder itself (score_current_value's docstring: robust_zscore ->
+# role_zscore -> ewma_fallback) was implemented for story 3.8, but until now
+# nothing here actually exercised the middle tier -- every existing fallback
+# test above goes straight to "no Node row at all" -> ewma_fallback, which
+# never gives Tier 2 a chance to fire. These close that gap, per the Phase 0
+# roadmap item asking to confirm the host->role->EWMA ladder actually falls
+# through under sparse data rather than skipping a tier.
+
+def test_uses_role_zscore_when_host_baseline_absent_but_role_baseline_is_populated(db):
+    make_node(db, hostname="new-compute-host", role="compute")
+    make_role_baseline(db, role="compute", median=25.0, mad=1.5)
+    # No models.Baseline row for "new-compute-host" at all -- Tier 1 must miss.
+    current_value = 25.0 + 4.1 * (1.4826 * 1.5)  # same offset as the robust_zscore "critical" test
+    z, severity, method, baseline_n = score_current_value(
+        db, "new-compute-host", "cpu_usage", current_value, weekday=2, hour=13
+    )
+    assert method == "role_zscore"
+    assert baseline_n == MIN_ROLE_BASELINE_SAMPLES + 10
+    assert severity == "critical"
+
+
+def test_uses_role_zscore_when_host_baseline_too_thin_but_role_baseline_is_populated(db):
+    # Tier 1 present but under MIN_BASELINE_SAMPLES -- must still fall through
+    # to Tier 2 rather than dropping straight to EWMA once a Baseline row
+    # exists at all.
+    make_baseline(db, hostname="host1", sample_count=MIN_BASELINE_SAMPLES - 1)
+    make_node(db, hostname="host1", role="compute")
+    make_role_baseline(db, role="compute", median=25.0, mad=1.5)
+    z, severity, method, _ = score_current_value(db, "host1", "cpu_usage", 25.5, weekday=2, hour=13)
+    assert method == "role_zscore"
+
+
+def test_role_zscore_skipped_when_role_baseline_also_too_thin(db):
+    """Both tiers present but under their own thresholds -- must fall all the
+    way through to EWMA, not stop at a role baseline that isn't trusted yet
+    (e.g. a role with too few distinct hosts reporting)."""
+    make_node(db, hostname="new-compute-host", role="compute")
+    make_role_baseline(db, role="compute", sample_count=MIN_ROLE_BASELINE_SAMPLES + 10,
+                        distinct_hosts=MIN_ROLE_BASELINE_HOSTS - 1)
+    z, severity, method, _ = score_current_value(
+        db, "new-compute-host", "cpu_usage", 50.0, weekday=2, hour=13
+    )
+    assert method == "ewma_fallback"
+
+
+def test_role_zscore_skipped_when_no_role_baseline_exists_for_that_role(db):
+    """A role baseline exists, but for a different role/metric/slot than the
+    one being scored -- must not match the wrong row and must fall through
+    to EWMA instead."""
+    make_node(db, hostname="new-storage-host", role="storage")
+    make_role_baseline(db, role="compute", median=25.0, mad=1.5)  # wrong role
+    z, severity, method, _ = score_current_value(
+        db, "new-storage-host", "cpu_usage", 50.0, weekday=2, hour=13
     )
     assert method == "ewma_fallback"
 

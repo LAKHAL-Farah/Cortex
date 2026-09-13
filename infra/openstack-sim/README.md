@@ -65,7 +65,7 @@ plain RUNS_ON services. Edit the lists at the top of `app.py` directly if
 you need different/more topology to test against -- there's no database
 backing this, it's just Python literals.
 
-Plus three VMs (`SERVERS`) on `sandbox-net`, wired to it via three ports
+Plus five VMs (`SERVERS`) on `sandbox-net`, wired to it via five ports
 (`PORTS`) -- `sandbox-vm-1` on `compute1-sim`, `sandbox-vm-2` on
 `compute2-sim` (so a sync exercises the Instance-[:RUNS_ON]->Node edge
 against both hypervisors), and `sandbox-vm-3-broken`, deliberately seeded
@@ -74,7 +74,31 @@ realistic broken pairing (a failed port bind commonly leaves the instance
 stuck in `ERROR` too) so there's always a real problem for the planned
 network-topology visualization to show, the same way `ROUTERS[0]`/
 `NEUTRON_AGENTS` above always have one real, healthy structural edge to
-test against.
+test against. `sandbox-vm-4-web` (`compute1-sim`) and `sandbox-vm-5-db`
+(`compute2-sim`) exist purely for the security-group seed data below --
+see that paragraph for why.
+
+Security groups (`SECURITY_GROUPS`/`SECURITY_GROUP_RULES`, Phase Sec-1/
+Sec-2/Sec-5): three groups, not one, so `security_audit.
+get_node_security_groups`'s per-host union has more than a single
+repeated case to show. `default` carries a world-open SSH rule (the
+textbook `_risk_reason` hit) and is attached to all three of
+compute1-sim's instances (`sandbox-vm-1`, `-3-broken`, `-4-web`) --
+that's also what makes it the group `security_sandbox.inject_demo_drift`
+targets (`groups[0]`, sorted by id, which `default`'s id sorts first
+against). `web-frontend` (`sandbox-vm-4-web` only) carries a world-open
+HTTPS rule -- deliberately *not* flagged, since 443 isn't in
+`_SENSITIVE_PORTS`, so the sandbox always has one real "world-open but
+correctly not risky" example alongside the risky ones. `database`
+(`sandbox-vm-5-db` only, and deliberately *not* also on `default`, so
+compute2-sim's group set doesn't just overlap compute1-sim's) carries a
+world-open MySQL rule -- the same kind of hit as `default`'s SSH one, on
+a different port, so the two compute nodes don't show the identical
+finding twice. `/_sandbox/security-group-rule/add`/`/remove` (below) let
+a test -- or a person poking at the sandbox -- mutate any of these three
+groups on demand to exercise the Sec-1 drift path end to end: add a rule,
+wait for the next snapshot pass (or trigger one via
+`run_security_snapshot.py`), ask the Security Agent again, see the diff.
 
 ## Running it standalone (without the rest of the sandbox stack)
 

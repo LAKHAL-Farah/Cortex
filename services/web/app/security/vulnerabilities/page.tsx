@@ -8,6 +8,7 @@ export default function VulnerabilitiesPage() {
     <ComingSoon
       icon={ScrollText}
       title="Vulnerabilities (CVE)"
+      scope="node"
       blockedOn="Phase Sec-3 (the package-inventory collector) hasn't shipped, so there's no real per-host package data behind this yet"
     />
   );

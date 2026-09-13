@@ -114,6 +114,21 @@ _DEGRADED_CONFIDENCE_CAP = 0.6
 # --------------------------------------------------------------------
 
 def _check_auth_anomaly(node: KnownNode) -> dict:
+    """Confirmed (Phase 0, security scope-clarification roadmap, §4 item 5):
+    this is a standalone keyword match against raw Loki log lines
+    (_AUTH_LOG_SIGNAL_PATTERN) and does NOT read anomaly_detector.py's
+    odd-hour/baseline scoring (models.AnomalyFlag, the host->role->EWMA
+    tier ladder) at all -- that scoring only ever feeds the generic
+    Anomaly agent (agents/nodes/anomaly.py) via the periodic
+    detect_anomalies() job in main.py, over ssh_failed_logins_5min /
+    ssh_successful_logins_5min. The two checks are genuinely independent:
+    this one says "a failed-login pattern showed up in the last
+    _AUTH_LOG_WINDOW_MINUTES", the other says "the volume of successful/
+    failed logins this hour is statistically unusual for this host (or its
+    role)". A question routed to the Security agent gets only the former;
+    getting the latter's odd-hour signal folded in here as well is a real,
+    not-yet-built capability, not a bug in either agent as it stands today.
+    """
     now = time.time()
     start = now - _AUTH_LOG_WINDOW_MINUTES * 60
     logql = f'{{host="{node["hostname"]}"}} |~ "{_AUTH_LOG_SIGNAL_PATTERN}"'
@@ -192,6 +207,16 @@ def _diff_against_last_snapshot(hostname: str, current_groups: list[dict]) -> li
 
 
 def _check_sec_group_diff(node: KnownNode) -> dict:
+    # Re-confirmed (Phase 0, security scope-clarification roadmap, §4 item
+    # 4): this is a plain, unmodified use of the shared breaker
+    # (agents/resilience.py) -- closed -> open after 2 consecutive
+    # failures -> half-open retry after 30s, same as every other
+    # get_breaker() call site in this codebase. Nothing in this call path
+    # is special-cased or overridden. This confirms the breaker's *code*
+    # behaves as documented; it doesn't confirm anything about a specific
+    # live incident, since that would need that deployment's own logs
+    # (grep for "security.neutron" in the API's log output), which aren't
+    # available from a static read of this repo.
     breaker = get_breaker("security.neutron", timeout_seconds=10.0, max_retries=1, failure_threshold=2)
     call_result = breaker.call(security_audit.get_node_security_groups, node["hostname"])
 

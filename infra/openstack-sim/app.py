@@ -35,12 +35,12 @@ HYPERVISORS = [
         "state": "up",
         "status": "enabled",
         "vcpus": 8,
-        "vcpus_used": 2,
+        "vcpus_used": 3,
         "memory_mb": 16384,
-        "memory_mb_used": 4096,
+        "memory_mb_used": 6144,
         "local_gb": 200,
-        "local_gb_used": 40,
-        "running_vms": 2,
+        "local_gb_used": 60,
+        "running_vms": 3,
         "hypervisor_type": "QEMU",
         "hypervisor_version": 2011000,
     },
@@ -51,12 +51,12 @@ HYPERVISORS = [
         "state": "up",
         "status": "enabled",
         "vcpus": 8,
-        "vcpus_used": 1,
+        "vcpus_used": 2,
         "memory_mb": 16384,
-        "memory_mb_used": 2048,
+        "memory_mb_used": 4096,
         "local_gb": 200,
-        "local_gb_used": 20,
-        "running_vms": 1,
+        "local_gb_used": 40,
+        "running_vms": 2,
         "hypervisor_type": "QEMU",
         "hypervisor_version": 2011000,
     },
@@ -192,6 +192,17 @@ FLOATING_IPS = [
 ]
 
 NEUTRON_AGENTS = [
+    # Phase 0 (security scope-clarification roadmap, §1.1): this placement
+    # -- l3-agent/dhcp-agent on the controller, OVS on the computes -- is a
+    # sandbox-topology choice, not an architectural requirement. This
+    # project's Node schema has no dedicated "network" role (only
+    # controller/compute/storage/monitoring), so these control-plane
+    # agents have to live on one of those four; every downstream reader
+    # (network_health.py, topology_sync.py's SERVES-edge sync) resolves an
+    # agent by matching its `host` label against a real Node hostname, not
+    # by assuming which role hosts which agent -- so moving these two
+    # entries to compute{1,2}-sim, if a future deployment wants that
+    # instead, is a one-line change here with no code change required.
     {"id": "a1", "binary": "neutron-l3-agent", "host": "controller-sim", "agent_type": "L3 agent", "alive": True, "admin_state_up": True},
     {"id": "a2", "binary": "neutron-dhcp-agent", "host": "controller-sim", "agent_type": "DHCP agent", "alive": True, "admin_state_up": True},
     {"id": "a3", "binary": "neutron-openvswitch-agent", "host": "compute1-sim", "agent_type": "Open vSwitch agent", "alive": True, "admin_state_up": True},
@@ -233,6 +244,31 @@ SERVERS = [
         "status": "ERROR",
         "tenant_id": "sandbox-project",
         "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute1-sim",
+        "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
+    },
+    {
+        # Phase Sec-5 seed: a second instance on compute1-sim that's on a
+        # *different* security group than sandbox-vm-1/-3-broken (below),
+        # so this node has more than one group to show, and each group's
+        # "which instance(s) actually carry this" list isn't just "all of
+        # them" every time.
+        "id": "8f3f0f4a-0000-0000-0000-000000000044",
+        "name": "sandbox-vm-4-web",
+        "status": "ACTIVE",
+        "tenant_id": "sandbox-project",
+        "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute1-sim",
+        "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
+    },
+    {
+        # And one on compute2-sim with its own group, carrying a *different*
+        # sensitive-port hit (MySQL, not SSH) -- so the two compute nodes
+        # don't just show the same finding twice, and the demo proves the
+        # baseline catches more than one specific port.
+        "id": "8f3f0f4a-0000-0000-0000-000000000045",
+        "name": "sandbox-vm-5-db",
+        "status": "ACTIVE",
+        "tenant_id": "sandbox-project",
+        "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute2-sim",
         "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
     },
 ]
@@ -285,6 +321,43 @@ PORTS = [
         "security_group_ids": ["8f3f0f4a-0000-0000-0000-0000000000e1"],
     },
     {
+        # sandbox-vm-4-web: on *both* "default" and the new "web-frontend"
+        # group, so "default" reads as compute1-sim's shared baseline group
+        # (all three of its VMs carry it) while "web-frontend" is scoped to
+        # just this one instance.
+        "id": "8f3f0f4a-0000-0000-0000-000000000055",
+        "name": "sandbox-vm-4-web-port",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:55",
+        "device_id": SERVERS[3]["id"],
+        "device_owner": "compute:nova",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.104"}],
+        "tenant_id": "sandbox-project",
+        "security_group_ids": [
+            "8f3f0f4a-0000-0000-0000-0000000000e1",
+            "8f3f0f4a-0000-0000-0000-0000000000e2",
+        ],
+    },
+    {
+        # sandbox-vm-5-db: "database" only -- deliberately *not* on
+        # "default", so compute2-sim shows a group set with no overlap
+        # against compute1-sim's, instead of every node just being a
+        # variation on the same one group.
+        "id": "8f3f0f4a-0000-0000-0000-000000000056",
+        "name": "sandbox-vm-5-db-port",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:56",
+        "device_id": SERVERS[4]["id"],
+        "device_owner": "compute:nova",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.105"}],
+        "tenant_id": "sandbox-project",
+        "security_group_ids": ["8f3f0f4a-0000-0000-0000-0000000000e3"],
+    },
+    {
         # sandbox-router's internal interface onto sandbox-net's subnet --
         # device_owner starts with "network:router_interface" and
         # device_id is the router's own id, exactly the shape
@@ -323,6 +396,25 @@ SECURITY_GROUPS = [
         "description": "Default security group for the sandbox project",
         "project_id": "sandbox-project",
     },
+    {
+        # Phase Sec-5 seed: world-open HTTPS is normal for a public web
+        # tier, so this group is a deliberate *negative* example -- one
+        # rule below is world-open and still correctly reads "Clean" in
+        # the UI, since 443 isn't in security_audit._SENSITIVE_PORTS.
+        "id": "8f3f0f4a-0000-0000-0000-0000000000e2",
+        "name": "web-frontend",
+        "description": "Public HTTPS ingress for the sandbox web tier",
+        "project_id": "sandbox-project",
+    },
+    {
+        # And a second real positive example, on a different sensitive
+        # port than "default"'s SSH hit, so the demo doesn't just repeat
+        # the same one finding on every group.
+        "id": "8f3f0f4a-0000-0000-0000-0000000000e3",
+        "name": "database",
+        "description": "MySQL ingress for the sandbox database tier",
+        "project_id": "sandbox-project",
+    },
 ]
 
 SECURITY_GROUP_RULES = [
@@ -351,6 +443,51 @@ SECURITY_GROUP_RULES = [
         # Open egress is normal/expected (see security_audit._risk_reason's
         # own "ingress-only" docstring note) -- kept here so the rule-set
         # isn't unrealistically ingress-only.
+        "remote_ip_prefix": "0.0.0.0/0",
+    },
+    {
+        # web-frontend: world-open HTTPS -- expected for a public web tier,
+        # not in _SENSITIVE_PORTS, so this is the sim's one deliberately
+        # *unflagged* world-open rule (see SECURITY_GROUPS' comment above).
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f3",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e2",
+        "direction": "ingress",
+        "ethertype": "IPv4",
+        "protocol": "tcp",
+        "port_range_min": 443,
+        "port_range_max": 443,
+        "remote_ip_prefix": "0.0.0.0/0",
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f4",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e2",
+        "direction": "egress",
+        "ethertype": "IPv4",
+        "protocol": None,
+        "port_range_min": None,
+        "port_range_max": None,
+        "remote_ip_prefix": "0.0.0.0/0",
+    },
+    {
+        # database: world-open MySQL -- the second real "overly-permissive"
+        # finding, on a different port than "default"'s SSH one.
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f5",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e3",
+        "direction": "ingress",
+        "ethertype": "IPv4",
+        "protocol": "tcp",
+        "port_range_min": 3306,
+        "port_range_max": 3306,
+        "remote_ip_prefix": "0.0.0.0/0",
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f6",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e3",
+        "direction": "egress",
+        "ethertype": "IPv4",
+        "protocol": None,
+        "port_range_min": None,
+        "port_range_max": None,
         "remote_ip_prefix": "0.0.0.0/0",
     },
 ]

@@ -8,7 +8,8 @@ export default function KernelSignalsPage() {
     <ComingSoon
       icon={Cpu}
       title="Kernel-level signals (eBPF)"
-      blockedOn="Phase Sec-4 (a Falco/Tetragon-style sensor deployment) hasn't shipped, so there's no real kernel-alert feed behind this yet"
+      scope="node"
+      blockedOn="Phase Sec-4 (a Falco/Tetragon-style sensor deployment) hasn't shipped, so there's no real kernel-alert feed behind this yet -- and even once it has, it can only ever see this node's own kernel, never inside a guest VM's"
     />
   );
 }

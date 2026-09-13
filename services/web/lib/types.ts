@@ -749,6 +749,12 @@ export interface AgentSecGroupInfo {
   id: string;
   name: string;
   rules: AgentSecGroupRule["rule"][];
+  // Names of every instance hosted on this node whose port actually
+  // carries this group -- a group here is already a union across every
+  // VM scheduled onto the hypervisor (see get_node_security_groups'
+  // docstring), so this is what tells a viewer whether a group belongs
+  // to one VM or several.
+  instances?: string[];
 }
 
 export interface AgentSecGroupSignal extends AgentSecuritySignal {

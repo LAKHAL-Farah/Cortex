@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import SecurityScopeTag, { type SecurityScope } from "./SecurityScopeTag";
 
 export interface SecurityCategory {
   label: string;
@@ -11,6 +12,7 @@ export interface SecurityCategory {
   icon: LucideIcon;
   color: string;
   available: boolean;
+  scope: SecurityScope;
 }
 
 /** Phase Sec-5: "Browse by category" tile, reworked from the compact
@@ -20,7 +22,7 @@ export interface SecurityCategory {
  * a small one, a title with a one-line description of what that category
  * actually checks, and a footer status chip instead of a fake toggle. */
 export default function SecurityCategoryCard({ category }: { category: SecurityCategory }) {
-  const { label, description, href, icon: Icon, color, available } = category;
+  const { label, description, href, icon: Icon, color, available, scope } = category;
 
   return (
     <Link href={href} className="block h-full">
@@ -51,6 +53,7 @@ export default function SecurityCategoryCard({ category }: { category: SecurityC
         <div className="relative">
           <div className="font-display text-[16px] font-semibold text-color-text">{label}</div>
           <p className="mt-1.5 text-[13px] leading-snug text-text-faint">{description}</p>
+          <SecurityScopeTag scope={scope} className="mt-2" />
         </div>
 
         <div

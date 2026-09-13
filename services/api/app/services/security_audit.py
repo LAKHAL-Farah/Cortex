@@ -89,20 +89,31 @@ def _risk_reason(rule: dict) -> str | None:
 
 def get_node_security_groups(hostname: str, conn=None) -> dict:
     """Every security group attached to any instance hosted on this node,
-    with each group's own rules, plus which of those rules look overly
-    permissive by `_risk_reason`'s baseline. Scoped by
-    `server.hypervisor_hostname`, same field network_health.py's
-    Phase C instance reads already key on."""
+    with each group's own rules, which of those rules look overly
+    permissive by `_risk_reason`'s baseline, and -- since a group here is
+    already a union across every VM scheduled onto this hypervisor, see
+    this function's own callers -- which of those instances (by name)
+    actually carry it, so a caller isn't left guessing whether a group
+    belongs to one VM or all of them. Scoped by `server.hypervisor_
+    hostname`, same field network_health.py's Phase C instance reads
+    already key on."""
     conn = conn or _connect()
 
     all_servers = list(conn.compute.servers())
-    hosted_ids = {s.id for s in all_servers if getattr(s, "hypervisor_hostname", None) == hostname}
+    hosted_names = {
+        s.id: (getattr(s, "name", None) or s.id)
+        for s in all_servers
+        if getattr(s, "hypervisor_hostname", None) == hostname
+    }
 
     all_ports = list(conn.network.ports())
-    sg_ids: set[str] = set()
+    sg_instances: dict[str, set[str]] = defaultdict(set)
     for port in all_ports:
-        if getattr(port, "device_id", None) in hosted_ids:
-            sg_ids.update(getattr(port, "security_group_ids", None) or [])
+        instance_name = hosted_names.get(getattr(port, "device_id", None))
+        if instance_name is None:
+            continue
+        for sg_id in getattr(port, "security_group_ids", None) or []:
+            sg_instances[sg_id].add(instance_name)
 
     all_rules = list(conn.network.security_group_rules())
     rules_by_sg: dict[str, list] = defaultdict(list)
@@ -113,13 +124,18 @@ def get_node_security_groups(hostname: str, conn=None) -> dict:
 
     groups: list[dict] = []
     risky_rules: list[dict] = []
-    for sg_id in sorted(sg_ids):
+    for sg_id in sorted(sg_instances):
         sg = all_sgs.get(sg_id)
         if sg is None:
             continue
         sg_name = getattr(sg, "name", None) or sg_id
         rule_dicts = [_rule_to_dict(r) for r in rules_by_sg.get(sg_id, [])]
-        groups.append({"id": sg_id, "name": sg_name, "rules": rule_dicts})
+        groups.append({
+            "id": sg_id,
+            "name": sg_name,
+            "rules": rule_dicts,
+            "instances": sorted(sg_instances[sg_id]),
+        })
         for rule_dict in rule_dicts:
             reason = _risk_reason(rule_dict)
             if reason:

@@ -34,7 +34,11 @@ const fetcher = async (url: string) => {
 // a built page (or worse, real data) behind them. See each page's own
 // ComingSoon `blockedOn` text for exactly what's missing. `description`
 // is what the integration-style card in "Browse by category" shows under
-// the title -- one line on what that category actually checks.
+// the title -- one line on what that category actually checks. `scope`
+// (Phase 0, security scope-clarification roadmap) says which of
+// OpenStack's three layers that check actually reads from -- see
+// SecurityScopeTag's own docstring and this roadmap's §2 master table for
+// why each category below is tagged the way it is.
 const CATEGORIES: SecurityCategory[] = [
   {
     label: "Auth activity",
@@ -43,6 +47,7 @@ const CATEGORIES: SecurityCategory[] = [
     icon: Terminal,
     color: "var(--chart-1)",
     available: false,
+    scope: "node",
   },
   {
     label: "Security groups",
@@ -51,6 +56,7 @@ const CATEGORIES: SecurityCategory[] = [
     icon: NetworkIcon,
     color: "var(--chart-3)",
     available: true,
+    scope: "instance",
   },
   {
     label: "Vulnerabilities (CVE)",
@@ -59,6 +65,7 @@ const CATEGORIES: SecurityCategory[] = [
     icon: ScrollText,
     color: "var(--chart-4)",
     available: false,
+    scope: "node",
   },
   {
     label: "Kernel signals (eBPF)",
@@ -67,6 +74,7 @@ const CATEGORIES: SecurityCategory[] = [
     icon: Cpu,
     color: "var(--chart-5)",
     available: false,
+    scope: "node",
   },
   {
     label: "Exposed ports",
@@ -75,6 +83,7 @@ const CATEGORIES: SecurityCategory[] = [
     icon: Globe,
     color: "var(--chart-2)",
     available: false,
+    scope: "node",
   },
   {
     label: "Keystone tokens",
@@ -83,6 +92,7 @@ const CATEGORIES: SecurityCategory[] = [
     icon: KeyRound,
     color: "var(--chart-1)",
     available: false,
+    scope: "identity",
   },
   {
     label: "Audit log",
@@ -91,6 +101,7 @@ const CATEGORIES: SecurityCategory[] = [
     icon: FileClock,
     color: "var(--chart-2)",
     available: false,
+    scope: "identity",
   },
 ];
 
@@ -169,6 +180,20 @@ export default function SecurityOverviewPage() {
         <MetricCard title="Known CVEs flagged" value={isLoading ? "…" : summary.cveFlags} unit="hosts" icon={ScrollText} iconColor="var(--chart-4)" />
         <MetricCard title="Kernel-level alerts" value={isLoading ? "…" : summary.ebpfFlags} unit="hosts" icon={Cpu} iconColor="var(--chart-5)" />
       </div>
+      {/* Phase 0: the four cards above read from three physically different
+          places -- Loki auth logs and eBPF/kernel alerts are Node-scoped,
+          CVE-match is Node-scoped (host OS packages), and security groups
+          are Instance-scoped data rolled up per hosting node. All four are
+          shown together as "per-host posture" below because Cortex only
+          resolves security questions against a node today (see Phase Sec-7's
+          open question on a real instance-scoped entry point) -- this line
+          says so explicitly rather than letting the shared per-host framing
+          imply they're all reading the same kind of thing. */}
+      <p className="-mt-2 px-1 text-[11px] text-text-faint">
+        Auth activity, known CVEs, and kernel-level alerts are all <span className="font-medium text-text-dim">Node</span>-scoped
+        (the host itself); security groups are <span className="font-medium text-text-dim">Instance</span>-scoped data rolled up
+        under whichever node hosts the affected VM. See each category below for details.
+      </p>
 
       <div>
         <div className="mb-2 flex items-center gap-2 px-1">

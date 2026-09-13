@@ -8,6 +8,7 @@ export default function AuthActivityPage() {
     <ComingSoon
       icon={Terminal}
       title="Auth activity"
+      scope="node"
       blockedOn="this needs its own correlated-burst timeline endpoint, not just the pass/fail summary GET /api/v1/security/findings already returns per host"
     />
   );

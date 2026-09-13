@@ -4,6 +4,7 @@ import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Card } from "./ui/Card";
+import SecurityScopeTag, { type SecurityScope } from "./SecurityScopeTag";
 
 /** Placeholder for a Security sub-page whose backend phase (Sec-3, Sec-4,
  * Sec-5, or the RBAC-audit-log view) hasn't shipped yet. Deliberately
@@ -14,15 +15,22 @@ import { Card } from "./ui/Card";
  * overview's category cards and the sidebar don't link to a 404) but
  * says exactly that, honestly, instead of implying data that isn't
  * there.
+ *
+ * `scope` (Phase 0) states up front which of Node/Instance/Identity this
+ * not-yet-built check will read from, once it exists -- so "not built
+ * yet" and "which layer will this even be about" are both answered on
+ * the same screen instead of only the first.
  */
 export default function ComingSoon({
   icon: Icon,
   title,
   blockedOn,
+  scope,
 }: {
   icon: LucideIcon;
   title: string;
   blockedOn: string;
+  scope: SecurityScope;
 }) {
   return (
     <div className="mx-auto max-w-2xl">
@@ -37,7 +45,10 @@ export default function ComingSoon({
         >
           <Icon className="h-6 w-6 text-text-faint" strokeWidth={1.75} />
         </span>
-        <div className="font-display text-[17px] font-semibold text-color-text">{title}</div>
+        <div className="flex items-center gap-2">
+          <div className="font-display text-[17px] font-semibold text-color-text">{title}</div>
+          <SecurityScopeTag scope={scope} />
+        </div>
         <p className="max-w-sm text-sm text-text-faint">
           Not available yet -- {blockedOn}. This page will fill in once that backend work ships, in the same PR
           rather than ahead of it.

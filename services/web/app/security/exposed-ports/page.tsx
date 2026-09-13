@@ -8,7 +8,8 @@ export default function ExposedPortsPage() {
     <ComingSoon
       icon={Globe}
       title="Exposed ports"
-      blockedOn="Phase Sec-5 hasn't shipped -- there's no backend check for this yet"
+      scope="node"
+      blockedOn="Phase Sec-5a (a host's own listening ports, cross-checked against its declared posture) hasn't shipped -- there's no backend check for this yet. A separate, not-yet-committed instance-scoped version (whether a VM itself is reachable) is tracked as Phase Sec-5b"
     />
   );
 }
