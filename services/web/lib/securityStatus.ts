@@ -296,3 +296,167 @@ export function buildAuthHostStatuses(findings: SecurityFinding[]): AuthHostStat
     detail: f.raw_data.auth_signal.detail,
   }));
 }
+
+// --- Phase Sec-6 add-on: top-of-page insight summary ---------------------
+//
+// Everything below is derived strictly from fields already on the wire
+// (AuthHostStatus.detail/entryCount, AuthLogRow.line/service/ts) -- no new
+// endpoint, no numbers invented. The point is to turn "here's a table, go
+// read it" into "here's what's actually going on", the same way a human
+// triaging this page would summarize it to a teammate.
+
+// `_check_auth_anomaly` (nodes/security.py) always writes its `detail`
+// string starting "<N> correlated auth-failure entr{y,ies} for <host> in
+// the last 60 minutes, most recent: ...". The table only ever renders the
+// 5 most recent matches (`entries: top = entries[:5]`), so a host with
+// more than 5 real matches would otherwise silently look identical to one
+// with exactly 5 -- this recovers the true count from the sentence the
+// backend already computed it into, rather than duplicating that logic.
+function parseTrueAuthCount(detail: string | undefined, fallback: number): number {
+  const m = detail?.match(/^(\d+)\s+correlated/);
+  return m ? parseInt(m[1], 10) : fallback;
+}
+
+// Mirrors _AUTH_LOG_SIGNAL_PATTERN's own vocabulary (nodes/security.py) --
+// sudo checked first since a failed `sudo` attempt is logged via PAM as
+// "authentication failure", which would otherwise also match the generic
+// catch-all and get mislabeled as a plain login failure instead of a
+// privilege-escalation attempt.
+const AUTH_LINE_CATEGORIES: { label: string; re: RegExp }[] = [
+  { label: "repeated sudo failures", re: /\bsudo\b/i },
+  { label: "invalid-user probes", re: /invalid user/i },
+  { label: "failed-password attempts", re: /failed password/i },
+  { label: "permission-denied errors", re: /permission denied/i },
+];
+
+function classifyAuthLine(line: string): string {
+  for (const { label, re } of AUTH_LINE_CATEGORIES) {
+    if (re.test(line)) return label;
+  }
+  return "other authentication failures";
+}
+
+function timeAgo(ts: number, now: number): string {
+  const minutes = Math.max(0, Math.round((now - ts) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes === 1) return "1 minute ago";
+  if (minutes < 60) return `${minutes} minutes ago`;
+  const hours = Math.round(minutes / 60);
+  return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+}
+
+export interface AuthInsightHost {
+  hostname: string;
+  role: string;
+  count: number;
+  cappedDisplay: boolean; // true count exceeds the 5 rows actually shown for this host
+  topCategory: string | null;
+  mostRecentTs: number | null;
+}
+
+export interface AuthInsight {
+  tone: "critical" | "warning" | "clean";
+  headline: string;
+  bullets: string[];
+  hosts: AuthInsightHost[];
+  totalFlaggedEntries: number;
+  categoryBreakdown: { label: string; count: number }[];
+}
+
+/** The single narrative summary /security/auth-activity renders at the
+ * top of the page -- which host(s), what kind of activity, how much, and
+ * how fresh, plus what couldn't be checked at all. Returns null only when
+ * there are no monitored hosts to say anything about (mirrors the page's
+ * own "No monitored nodes yet" branch).
+ */
+export function buildAuthInsight(hostStatuses: AuthHostStatus[], rows: AuthLogRow[]): AuthInsight | null {
+  if (hostStatuses.length === 0) return null;
+
+  const now = Date.now();
+  const flagged = hostStatuses.filter((h) => h.tone.label === "Flagged");
+  const degraded = hostStatuses.filter((h) => h.tone.label === "Unknown");
+  const restricted = hostStatuses.filter((h) => h.tone.label === "Admin only");
+
+  const rowsByHost = new Map<string, AuthLogRow[]>();
+  const categoryCounts = new Map<string, number>();
+  for (const row of rows) {
+    if (!rowsByHost.has(row.hostname)) rowsByHost.set(row.hostname, []);
+    rowsByHost.get(row.hostname)!.push(row);
+    const category = classifyAuthLine(row.line);
+    categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + 1);
+  }
+
+  const hosts: AuthInsightHost[] = flagged
+    .map((h) => {
+      const hostRows = rowsByHost.get(h.hostname) ?? [];
+      const count = parseTrueAuthCount(h.detail, h.entryCount);
+
+      const perHostCategoryCounts = new Map<string, number>();
+      for (const row of hostRows) {
+        const c = classifyAuthLine(row.line);
+        perHostCategoryCounts.set(c, (perHostCategoryCounts.get(c) ?? 0) + 1);
+      }
+      let topCategory: string | null = null;
+      let topCategoryCount = 0;
+      for (const [c, n] of perHostCategoryCounts) {
+        if (n > topCategoryCount) {
+          topCategory = c;
+          topCategoryCount = n;
+        }
+      }
+
+      return {
+        hostname: h.hostname,
+        role: h.role,
+        count,
+        cappedDisplay: count > hostRows.length,
+        topCategory,
+        mostRecentTs: hostRows[0]?.ts ?? null,
+      };
+    })
+    .sort((a, b) => b.count - a.count);
+
+  const totalFlaggedEntries = hosts.reduce((sum, h) => sum + h.count, 0);
+  const categoryBreakdown = Array.from(categoryCounts.entries())
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count);
+
+  const tone: AuthInsight["tone"] = flagged.length > 0 ? "critical" : degraded.length > 0 ? "warning" : "clean";
+
+  let headline: string;
+  if (flagged.length === 0) {
+    headline =
+      degraded.length > 0
+        ? `No confirmed auth-failure activity, but ${degraded.length} host${
+            degraded.length === 1 ? "" : "s"
+          } couldn't be checked this pass -- that's unknown, not clean.`
+        : `All ${hostStatuses.length} monitored host${hostStatuses.length === 1 ? "" : "s"} clean -- no correlated auth-failure activity in the last 60 minutes.`;
+  } else {
+    const worst = hosts[0];
+    const worstCategory = worst.topCategory ?? categoryBreakdown[0]?.label ?? "auth failures";
+    const spread = flagged.length > 1 ? `, ${flagged.length - 1} other host${flagged.length - 1 === 1 ? "" : "s"} also flagged` : "";
+    headline = `${flagged.length} of ${hostStatuses.length} host${
+      hostStatuses.length === 1 ? "" : "s"
+    } show correlated auth-failure activity -- heaviest on ${worst.hostname} (${worst.count} ${
+      worst.count === 1 ? "entry" : "entries"
+    }, mostly ${worstCategory})${spread}.`;
+  }
+
+  const bullets: string[] = [];
+  for (const h of hosts) {
+    const recency = h.mostRecentTs ? `, most recent ${timeAgo(h.mostRecentTs, now)}` : "";
+    const category = h.topCategory ? ` -- mostly ${h.topCategory}` : "";
+    const capNote = h.cappedDisplay ? " (table shows 5 most recent)" : "";
+    bullets.push(`${h.hostname} (${h.role}): ${h.count} ${h.count === 1 ? "entry" : "entries"}${category}${recency}${capNote}`);
+  }
+  if (degraded.length > 0) {
+    bullets.push(
+      `Could not check: ${degraded.map((h) => h.hostname).join(", ")} -- the log store didn't respond in time, treated as unknown rather than clean.`,
+    );
+  }
+  if (restricted.length > 0) {
+    bullets.push(`${restricted.length} host${restricted.length === 1 ? "" : "s"} restricted to admin accounts for this view.`);
+  }
+
+  return { tone, headline, bullets, hosts, totalFlaggedEntries, categoryBreakdown };
+}

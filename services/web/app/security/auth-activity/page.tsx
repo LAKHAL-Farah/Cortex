@@ -10,7 +10,8 @@ import SecurityHealthBadge from "@/components/SecurityHealthBadge";
 import SecurityRescanButton from "@/components/SecurityRescanButton";
 import SecurityScopeTag from "@/components/SecurityScopeTag";
 import AuthActivityTable from "@/components/AuthActivityTable";
-import { buildAuthHostStatuses, flattenAuthFindings } from "@/lib/securityStatus";
+import AuthActivityInsight from "@/components/AuthActivityInsight";
+import { buildAuthHostStatuses, buildAuthInsight, flattenAuthFindings } from "@/lib/securityStatus";
 
 const fetcher = async (url: string) => {
   const res = await fetch(url);
@@ -50,6 +51,7 @@ export default function AuthActivityPage() {
   const findings = useMemo(() => data?.findings ?? [], [data]);
   const rows = useMemo(() => flattenAuthFindings(findings), [findings]);
   const hostStatuses = useMemo(() => buildAuthHostStatuses(findings), [findings]);
+  const insight = useMemo(() => buildAuthInsight(hostStatuses, rows), [hostStatuses, rows]);
 
   const flaggedHosts = hostStatuses.filter((h) => h.tone.label === "Flagged");
   const degradedHosts = hostStatuses.filter((h) => h.tone.label === "Unknown");
@@ -106,6 +108,8 @@ export default function AuthActivityPage() {
         </Card>
       ) : (
         <>
+          {insight && <AuthActivityInsight insight={insight} />}
+
           <p className="px-1 text-sm text-text-faint">
             <span className="font-medium text-text-dim">{flaggedHosts.length}</span> of{" "}
             <span className="font-medium text-text-dim">{hostStatuses.length}</span> monitored host
