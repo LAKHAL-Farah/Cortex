@@ -30,9 +30,10 @@ const fetcher = async (url: string) => {
 
 // Sub-pages this overview links to -- "Security groups" (Phase Sec-1's
 // stored-snapshot diff), "Vulnerabilities" (Phase Sec-3's
-// package-inventory collector), and "Auth activity" (Phase Sec-6's Loki
-// auth-log entries, already part of GET /findings' auth_signal) have real
-// pages behind them now; the rest route to a plain "not available yet" placeholder rather than pretending
+// package-inventory collector), "Auth activity" (Phase Sec-6's Loki
+// auth-log entries, already part of GET /findings' auth_signal), and
+// "Kernel signals" (Phase Sec-4's Falco/Tetragon-bridge sensor, compute
+// nodes only for now) have real pages behind them now; the rest route to a plain "not available yet" placeholder rather than pretending
 // there's a built page (or worse, real data) behind them. See each page's
 // own ComingSoon `blockedOn` text for exactly what's missing. `description`
 // is what the integration-style card in "Browse by category" shows under
@@ -71,11 +72,11 @@ const CATEGORIES: SecurityCategory[] = [
   },
   {
     label: "Kernel signals (eBPF)",
-    description: "Falco alerts for suspicious syscalls, capability use, and container escapes.",
+    description: "Falco alerts for suspicious syscalls, capability use, and container escapes (compute-only pilot).",
     href: "/security/kernel-signals",
     icon: Cpu,
     color: "var(--chart-5)",
-    available: false,
+    available: true,
     scope: "node",
   },
   {

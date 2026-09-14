@@ -1,0 +1,36 @@
+---
+# SANDBOX ONLY. Phase Sec-4 (eBPF sensor deployment). Deploys a background
+# alert generator + an on-demand trigger script onto every `computes` host
+# so `services/api/app/services/ebpf_signal.py` (via
+# tetragon-bridge-sim, see infra/tetragon-bridge-sim) has real, current
+# eBPF-style alerts to read for at least one node without a real Falco/
+# Tetragon deployment.
+#
+# Compute-only, not `monitoring` (== controllers+computes+storages): this
+# matches the roadmap doc's own §13 recommendation -- VM attack surface
+# lives on compute hosts, so that's where an eBPF sensor pilot starts.
+# `controller-sim`/`storage-sim` deliberately get no sensor here; a
+# `_check_ebpf_signal` read against them will honestly report "no signal"
+# (not degraded -- tetragon-bridge-sim itself is still reachable, it just
+# has nothing recorded for a host nothing is watching), which is the
+# correct state for an unpiloted node, not a gap. Widening this to
+# `monitoring` is Phase Sec-6's job, once this pilot has proven the bridge
+# format and alert volume are sane.
+#
+# Deliberately kept out of site.yml, same reasoning as simulate-logs.yml:
+# never run against real infra by accident.
+#
+# Run:    ansible-playbook simulate-ebpf.yml
+# Stop:   ansible computes -b -m systemd -a "name=ebpf-sensor-simulator state=stopped"
+#
+# For a deterministic test event instead of waiting on the background
+# daemon's random schedule, use the trigger script it deploys alongside
+# itself -- this is also Phase Sec-4's own acceptance test:
+#   ansible compute1-sim -b -m command -a "/usr/local/bin/trigger_ebpf_event.sh"
+#   ansible compute2-sim -b -m command -a "/usr/local/bin/trigger_ebpf_event.sh warning"
+
+- name: Deploy fake eBPF/Falco alert generator (Phase Sec-4 pilot, compute nodes only)
+  hosts: computes
+  become: true
+  roles:
+    - ebpf_sensor_simulator

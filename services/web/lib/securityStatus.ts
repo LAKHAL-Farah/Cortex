@@ -1,4 +1,4 @@
-import type { AgentCveMatch, AgentSecGroupInfo, AgentSecGroupRule, AgentSecGroupSignal, AgentSecurityData, AgentSecuritySignal, SecurityFinding } from "./types";
+import type { AgentCveMatch, AgentEbpfAlert, AgentSecGroupInfo, AgentSecGroupRule, AgentSecGroupSignal, AgentSecurityData, AgentSecuritySignal, SecurityFinding } from "./types";
 
 /** Same {has_signal, degraded, restricted} -> tone/label mapping
  * components/CopilotAgentPanels.tsx's SecuritySignalRow uses for the chat
@@ -241,6 +241,111 @@ export function buildCveHostStatuses(findings: SecurityFinding[]): CveHostStatus
     role: f.role,
     tone: securityPillTone(f.raw_data.cve_signal),
     matchCount: f.raw_data.cve_signal.matches?.length ?? 0,
+  }));
+}
+
+// --- Phase Sec-4 (kernel signals / eBPF page): priority vocabulary -------
+//
+// Mirrors the CVE severity section immediately above: a small, known
+// vocabulary with color/label/rank, falling back to a neutral, still-
+// labeled tone for anything outside it instead of crashing or silently
+// mis-coloring. `ebpf_signal.py`'s own `_PRIORITY_RANK` recognizes more
+// synonyms server-side (emergency/alert as aliases for critical,
+// informational as an alias for info) purely to rank a real Falco/
+// Tetragon feed's exact wording; the four buckets below are what this
+// dashboard actually renders, since every alert this sandbox (or a real
+// Falco deployment's common rule set) produces already normalizes to one
+// of these.
+export const EBPF_PRIORITY_ORDER = ["critical", "warning", "notice", "info"] as const;
+export type KnownEbpfPriority = (typeof EBPF_PRIORITY_ORDER)[number];
+
+const EBPF_PRIORITY_COLOR: Record<KnownEbpfPriority, string> = {
+  critical: "var(--crit)",
+  warning: "var(--warn)",
+  notice: "var(--medium)",
+  info: "var(--text-muted)",
+};
+
+const EBPF_PRIORITY_SOFT: Record<KnownEbpfPriority, string> = {
+  critical: "var(--crit-soft)",
+  warning: "var(--warn-soft)",
+  notice: "var(--medium-soft)",
+  info: "var(--canvas)",
+};
+
+function isKnownEbpfPriority(priority: string): priority is KnownEbpfPriority {
+  return (EBPF_PRIORITY_ORDER as readonly string[]).includes(priority.toLowerCase());
+}
+
+export function ebpfPriorityTone(priority: string): { color: string; soft: string; label: string } {
+  const normalized = priority.toLowerCase();
+  if (isKnownEbpfPriority(normalized)) {
+    return { color: EBPF_PRIORITY_COLOR[normalized], soft: EBPF_PRIORITY_SOFT[normalized], label: normalized[0].toUpperCase() + normalized.slice(1) };
+  }
+  return { color: "var(--text-dim)", soft: "var(--canvas)", label: priority || "Unknown" };
+}
+
+/** Sorts by priority first (most severe first, unrecognized priorities
+ * last), then most-recent-first within the same priority -- matches
+ * `ebpf_signal.get_node_ebpf_alerts`'s own "most severe first" contract
+ * (it already re-sorts by `_PRIORITY_RANK` before returning), so the
+ * fleet-wide table reads the same order a single-host chat answer would.
+ */
+export function ebpfPriorityRank(priority: string): number {
+  const idx = EBPF_PRIORITY_ORDER.indexOf(priority.toLowerCase() as KnownEbpfPriority);
+  return idx === -1 ? EBPF_PRIORITY_ORDER.length : idx;
+}
+
+/** One row per (host, currently-active eBPF alert) -- the flat shape
+ * /security/kernel-signals' table renders, straight off
+ * AgentEbpfSignal.alerts (nodes/security.py's `_check_ebpf_signal`,
+ * services/ebpf_signal.py) plus the host each alert came from. A
+ * restricted (viewer) or degraded (sensor bridge unreachable) signal
+ * contributes no rows here by construction -- both have `alerts`
+ * undefined, never a fabricated empty-but-clean list -- see
+ * buildEbpfHostStatuses below for how those hosts are still represented
+ * instead of silently vanishing.
+ */
+export interface EbpfAlertRow extends AgentEbpfAlert {
+  hostname: string;
+  role: string;
+}
+
+export function flattenEbpfFindings(findings: SecurityFinding[]): EbpfAlertRow[] {
+  const rows: EbpfAlertRow[] = [];
+  for (const f of findings) {
+    for (const alert of f.raw_data.ebpf_signal.alerts ?? []) {
+      rows.push({ ...alert, hostname: f.hostname, role: f.role });
+    }
+  }
+  return rows.sort((a, b) => ebpfPriorityRank(a.priority) - ebpfPriorityRank(b.priority) || new Date(b.time).getTime() - new Date(a.time).getTime());
+}
+
+/** Every monitored host's eBPF-signal status, independent of whether it
+ * actually has an active alert right now -- same reasoning
+ * buildCveHostStatuses' own docstring gives: a flat alerts table on its
+ * own would only ever show hosts *with* a finding, making a clean host
+ * (checked, sensor deployed, nothing fired), a degraded one (no sensor
+ * reachable for this host -- "unknown", not "clean"), and a restricted
+ * one (viewer role) indistinguishable from a host nobody's watching at
+ * all. Phase Sec-4 is a compute-only pilot, so controller/storage hosts
+ * are expected to show "Clean" here (a reachable bridge with genuinely
+ * nothing recorded for them), not "Unknown" -- only a bridge that can't
+ * be reached at all degrades.
+ */
+export interface EbpfHostStatus {
+  hostname: string;
+  role: string;
+  tone: ReturnType<typeof securityPillTone>;
+  alertCount: number;
+}
+
+export function buildEbpfHostStatuses(findings: SecurityFinding[]): EbpfHostStatus[] {
+  return findings.map((f) => ({
+    hostname: f.hostname,
+    role: f.role,
+    tone: securityPillTone(f.raw_data.ebpf_signal),
+    alertCount: f.raw_data.ebpf_signal.alerts?.length ?? 0,
   }));
 }
 

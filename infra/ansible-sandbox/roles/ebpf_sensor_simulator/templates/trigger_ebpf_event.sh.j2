@@ -1,0 +1,50 @@
+#!/bin/bash
+# Cortex sandbox eBPF simulator -- manual trigger. SANDBOX ONLY.
+#
+# This is the script Phase Sec-4's own acceptance criterion asks for: "a
+# deliberately-triggered test event (e.g., an unexpected shell spawned
+# inside a test VM)". It actually spawns a real, detached, harmless shell
+# process on this host (not just a fabricated API call) with a parent
+# process id that isn't a normal login shell -- the same *shape* of event
+# a real Falco "Terminal shell in container"/"Terminal shell in pod" rule
+# fires on -- then reports it to tetragon-bridge-sim so
+# `_check_ebpf_signal` reads back a real, current alert instead of a
+# connection-error degrade.
+#
+# Usage (run on the sim host, e.g. via `ansible <host> -b -m command -a
+# "/usr/local/bin/trigger_ebpf_event.sh"`):
+#
+#   trigger_ebpf_event.sh                # default critical shell-spawn event
+#   trigger_ebpf_event.sh warning         # same event, lower priority
+#
+# Undo with (removes just this one alert, via the id this script prints):
+#   ansible <host> -b -m command -a \
+#     "curl -s -X DELETE {{ ebpf_bridge_url }}/_sandbox/ebpf/alert/<id>"
+{% raw %}
+set -euo pipefail
+
+PRIORITY="${1:-critical}"
+{% endraw %}
+BRIDGE_URL="{{ ebpf_bridge_url }}"
+HOSTNAME_LABEL="{{ inventory_hostname }}"
+{% raw %}
+# The actual "unexpected shell spawned" event: a detached, backgrounded
+# sh process with no controlling terminal, launched from this trigger
+# script rather than an interactive login -- a real process Falco's own
+# `spawned_process` rule family (parent/child exec pairs) would see on a
+# real sensor, harmless (it just sleeps briefly and exits) but genuinely
+# running, not simulated after the fact.
+setsid sh -c 'sleep 5' < /dev/null > /dev/null 2>&1 &
+SHELL_PID=$!
+disown "$SHELL_PID" 2>/dev/null || true
+
+OUTPUT="A shell was spawned with a parent process that is not a shell itself (user=root shell=sh parent=trigger_ebpf_event.sh pid=${SHELL_PID} host=${HOSTNAME_LABEL})"
+
+RESPONSE=$(curl -sf -X POST "${BRIDGE_URL}/_sandbox/ebpf/trigger" \
+  -H 'Content-Type: application/json' \
+  -d "$(printf '{"host":"%s","rule":"Terminal shell in container","priority":"%s","output":"%s"}' \
+        "$HOSTNAME_LABEL" "$PRIORITY" "$OUTPUT")")
+
+echo "Spawned detached shell (pid ${SHELL_PID}) on ${HOSTNAME_LABEL} and reported it to ${BRIDGE_URL}."
+echo "Alert: ${RESPONSE}"
+{% endraw %}

@@ -64,6 +64,17 @@ services:
       # (see services/security_sandbox.py and openstack-sim/app.py's own
       # "sandbox-only fault injection" section).
       OPENSTACK_SIM_BASE_URL: http://openstack-sim:5000
+      # Phase Sec-4: no real Falco/Tetragon sensor in this sandbox --
+      # tetragon-bridge-sim (see its own README, "Phase Sec-4" section)
+      # stands in for one, seeded with a real alert on compute1-sim
+      # (compute-only pilot, per the roadmap doc's §13 recommendation) and
+      # nothing on the other three nodes. Overrides the
+      # http://tetragon-bridge:9110 production default (ebpf_signal.py),
+      # which has nothing listening on it in this sandbox by design --
+      # pointing this at a real sensor bridge is the only change needed to
+      # make the eBPF-signal sub-check read real kernel-level data outside
+      # the sandbox.
+      CORTEX_EBPF_ALERTS_URL: http://tetragon-bridge-sim:9110
 
     volumes:
       - ../ansible-sandbox:/infra/ansible-sandbox
@@ -157,6 +168,34 @@ services:
     networks:
       cortex-sandbox:
         ipv4_address: 10.0.1.30
+
+  tetragon-bridge-sim:
+    # Phase Sec-4: fake Falco-HTTP-output/Tetragon-bridge endpoint -- see
+    # tetragon-bridge-sim/README.md. Not real eBPF; just enough of a
+    # GET /alerts[?host=] surface for ebpf_signal.py's HTTP client to read
+    # real (if synthetic) kernel-signal data instead of failing the
+    # breaker on every call. A separate container rather than a route on
+    # openstack-sim, unlike Sec-3's package-inventory collector -- a
+    # kernel-level sensor bridge isn't an OpenStack API in any deployment,
+    # real or simulated (see that module's own docstring for the full
+    # reasoning).
+    build: ./tetragon-bridge-sim
+    hostname: tetragon-bridge-sim
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9110/healthz')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      CORTEX_ENV: sandbox
+    ports:
+      # Host-published for local curl testing only (see README's
+      # "Verifying it directly" section) -- the api container reaches
+      # this over the internal cortex-sandbox network by service name.
+      - "127.0.0.1:9110:9110"
+    networks:
+      cortex-sandbox:
+        ipv4_address: 10.0.1.31
 
   prometheus:
     image: prom/prometheus:v2.55.1

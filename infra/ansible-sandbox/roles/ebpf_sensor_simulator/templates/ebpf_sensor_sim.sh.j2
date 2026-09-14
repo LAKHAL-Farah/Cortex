@@ -1,0 +1,42 @@
+#!/bin/bash
+# Cortex sandbox eBPF/Falco simulator -- background daemon. SANDBOX ONLY.
+#
+# Posts an occasional, low-severity synthetic alert to tetragon-bridge-sim
+# (see infra/tetragon-bridge-sim) so the sandbox has *some* eBPF signal
+# variety without anyone running the deterministic trigger script -- the
+# same "quiet trickle, rare spontaneous event" shape
+# ssh_auth_simulator's own background daemon uses for auth logs.
+#
+# For a deterministic, on-demand "unexpected shell spawned" event (the
+# actual acceptance test for Phase Sec-4), use the trigger script deployed
+# alongside this one instead:
+#   /usr/local/bin/trigger_ebpf_event.sh
+{% raw %}
+set -u
+
+post_alert() {
+  local priority=$1
+  local rule=$2
+  local output=$3
+  curl -sf -X POST "${BRIDGE_URL}/_sandbox/ebpf/trigger" \
+    -H 'Content-Type: application/json' \
+    -d "$(printf '{"host":"%s","rule":"%s","priority":"%s","output":"%s"}' \
+          "$HOSTNAME_LABEL" "$rule" "$priority" "$output")" \
+    >/dev/null 2>&1
+}
+{% endraw %}
+BRIDGE_URL="{{ ebpf_bridge_url }}"
+HOSTNAME_LABEL="{{ inventory_hostname }}"
+TICK_INTERVAL={{ ebpf_sensor_tick_interval }}
+ALERT_CHANCE_PCT={{ (ebpf_sensor_spontaneous_alert_chance * 100) | int }}
+BACKGROUND_RULE="{{ ebpf_sensor_background_rule }}"
+BACKGROUND_PRIORITY="{{ ebpf_sensor_background_priority }}"
+{% raw %}
+while true; do
+  if (( RANDOM % 100 < ALERT_CHANCE_PCT )); then
+    post_alert "$BACKGROUND_PRIORITY" "$BACKGROUND_RULE" \
+      "Sensitive file opened for reading by an unexpected process (host=${HOSTNAME_LABEL})"
+  fi
+  sleep "$TICK_INTERVAL"
+done
+{% endraw %}

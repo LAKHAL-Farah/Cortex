@@ -1,0 +1,27 @@
+---
+# Where the sandbox's fake Falco/Tetragon bridge listens (see
+# infra/tetragon-bridge-sim). Reachable directly by service name because
+# compute1-sim/compute2-sim already sit on the same `cortex-sandbox`
+# Docker network as tetragon-bridge-sim (see docker-compose.sandbox.yml) --
+# no extra networking needed beyond what the sandbox stack already wires.
+ebpf_bridge_url: "http://tetragon-bridge-sim:9110"
+
+# Background daemon tick interval (seconds) -- same shape as
+# ssh_auth_simulator's ssh_auth_tick_interval.
+ebpf_sensor_tick_interval: 20
+
+# Per-tick probability [0.0-1.0] of the background daemon posting an
+# unprompted low-severity alert on its own, so the sandbox has *some*
+# eBPF signal variety even if nobody runs the on-demand trigger script --
+# same reasoning as ssh_auth_simulator's ssh_auth_spontaneous_burst_chance.
+# Deliberately low-severity/low-frequency: the interesting, deterministic
+# "unexpected shell spawned" event for actually testing Phase Sec-4's
+# acceptance criterion is what /usr/local/bin/trigger_ebpf_event.sh (also
+# deployed by this role) is for, not this background trickle.
+ebpf_sensor_spontaneous_alert_chance: 0.04
+
+# Background noise: a real, common (if not automatically critical) Falco
+# rule name/priority, for realistic variety alongside the deliberate
+# "Terminal shell in container"/critical event the trigger script fires.
+ebpf_sensor_background_rule: "Read sensitive file untrusted"
+ebpf_sensor_background_priority: "notice"
