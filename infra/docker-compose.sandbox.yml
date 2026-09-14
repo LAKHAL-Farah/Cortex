@@ -93,7 +93,7 @@ services:
     networks:
       cortex-sandbox:
         ipv4_address: 10.0.1.20
-    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
+    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server curl && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
   compute1-sim:
     image: geerlingguy/docker-ubuntu2204-ansible
     hostname: compute1-sim
@@ -108,7 +108,7 @@ services:
     networks:
       cortex-sandbox:
         ipv4_address: 10.0.1.21
-    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
+    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server curl && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
   compute2-sim:
     image: geerlingguy/docker-ubuntu2204-ansible
     hostname: compute2-sim
@@ -123,7 +123,7 @@ services:
     networks:
       cortex-sandbox:
         ipv4_address: 10.0.1.22
-    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
+    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server curl && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
   storage-sim:
     image: geerlingguy/docker-ubuntu2204-ansible
     hostname: storage-sim
@@ -140,7 +140,7 @@ services:
         ipv4_address: 10.0.1.23   # new address, gives storage-sim a route to controller-sim/loki
       cortex-sandbox-storage:
         ipv4_address: 10.0.2.20
-    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
+    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y openssh-server curl && mkdir -p /root/.ssh && cp /root/.ssh_bootstrap/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && mkdir -p /etc/systemd/system/multi-user.target.wants && ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service && exec /usr/sbin/init"]
   openstack-sim:
     # Fake Keystone/Nova/Neutron for local topology-graph testing -- see
     # openstack-sim/README.md. Not a real OpenStack; just enough surface

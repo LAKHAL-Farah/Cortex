@@ -1,11 +1,11 @@
 ---
-- name: Install Promtail system dependencies
+- name: Ensure Promtail system dependencies are installed
   ansible.builtin.apt:
     name:
       - unzip
       - ca-certificates
     state: present
-    update_cache: true
+    update_cache: false
 
 - name: Create Promtail system group
   ansible.builtin.group:
@@ -21,11 +21,13 @@
     shell: /usr/sbin/nologin
     create_home: false
     state: present
-- name: Add promtail user to adm group (read access to system logs)
+
+- name: Add Promtail user to adm group
   ansible.builtin.user:
     name: "{{ promtail_user }}"
     groups: adm
     append: true
+
 - name: Create Promtail directories
   ansible.builtin.file:
     path: "{{ item }}"
@@ -37,12 +39,13 @@
     - "{{ promtail_config_dir }}"
     - "{{ promtail_data_dir }}"
 
-- name: Download Promtail archive
-  ansible.builtin.get_url:
-    url: "{{ promtail_download_url }}"
+- name: Copy Promtail archive from controller
+  ansible.builtin.copy:
+    src: "{{ promtail_archive }}"
     dest: "{{ promtail_archive_path }}"
+    owner: root
+    group: root
     mode: "0644"
-    force: false
 
 - name: Extract Promtail binary
   ansible.builtin.unarchive:
@@ -86,7 +89,10 @@
     state: started
     daemon_reload: true
 
-- name: Remove temporary Promtail archive
+- name: Remove temporary Promtail installation files
   ansible.builtin.file:
-    path: "{{ promtail_archive_path }}"
+    path: "{{ item }}"
     state: absent
+  loop:
+    - "{{ promtail_archive_path }}"
+    - "{{ promtail_extracted_binary }}"

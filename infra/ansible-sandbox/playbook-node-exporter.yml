@@ -12,6 +12,11 @@
       copy:
         src: "{{ node_exporter_archive }}"
         dest: "/tmp/{{ node_exporter_archive }}"
+        validate: "bash -c 'sha1sum %s | grep -q ^{{ node_exporter_archive_sha1 }}'"
+      register: node_exporter_copy
+      retries: 3
+      delay: 5
+      until: node_exporter_copy is succeeded
     - name: Extraire node_exporter
       unarchive:
         src: "/tmp/{{ node_exporter_archive }}"
@@ -31,6 +36,7 @@
         rule: allow
         port: "9100"
         proto: tcp
+      when: ufw_enabled | default(false)
 
     - name: Déployer le service systemd
       copy:

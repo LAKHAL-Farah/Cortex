@@ -3,6 +3,17 @@ node_exporter_version: "1.8.2"
 node_exporter_archive: "node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
 node_exporter_port: 9100
 
+# sha1sum of roles/node_exporter/files/{{ node_exporter_archive }} -- used as
+# a post-transfer integrity check via the copy task's `validate` hook, which
+# runs against the temp file on the REMOTE host after the SSH/SFTP transfer
+# completes (unlike copy's own `checksum` param, which only checks the local
+# source file on the controller and would not catch transfer corruption).
+# SSH/SFTP transfers have been observed to truncate silently on some hosts
+# under WSL2/Docker Desktop's networking. Regenerate with:
+#   sha1sum roles/node_exporter/files/node_exporter-1.8.2.linux-amd64.tar.gz
+# if you bump node_exporter_version and refresh the checked-in archive.
+node_exporter_archive_sha1: "9e3196288a19674f5c46c1d1c7c056f915c6bba7"
+
 prometheus_version: "2.55.1"
 prometheus_port: 9090
 prometheus_scrape_interval: "20s"
@@ -12,6 +23,7 @@ prometheus_file_sd_dir: /etc/prometheus/file_sd
 prometheus_file_sd_refresh_interval: "30s"
 monitoring_network: "10.0.0.0/16"
 
+# Centralized logging
 loki_version: "3.6.0"
 promtail_version: "3.6.0"
 
@@ -29,13 +41,11 @@ promtail_group: promtail
 promtail_config_dir: /etc/promtail
 promtail_data_dir: /var/lib/promtail
 
-loki_server_host: "{{ hostvars[groups[\"loki_server\"][0]].ansible_host }}"
+# SSH authentication simulation / Promtail shared log path
+ssh_auth_log_dir: "/var/log"
+ssh_auth_log_path: "{{ ssh_auth_log_dir }}/auth.log"
+
+loki_server_host: "{{ hostvars[groups['loki_server'][0]].ansible_host }}"
 
 loki_push_url: >-
   http://{{ loki_server_host }}:{{ loki_http_port }}/loki/api/v1/push
-
-# Shared between roles/promtail (which tails this path) and
-# roles/ssh_auth_simulator (which writes it) -- single source of truth so
-# the two can never drift apart and silently stop matching.
-ssh_auth_log_dir: /var/log/cortex-ssh-sim
-ssh_auth_log_path: "{{ ssh_auth_log_dir }}/auth.log"
