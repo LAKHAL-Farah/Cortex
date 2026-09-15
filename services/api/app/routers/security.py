@@ -18,6 +18,20 @@ copy -- a viewer-role account gets identical protection whether they ask
 via chat or load this dashboard, which is only true if both routers call
 the same function (see services/security_rbac.py's module docstring).
 
+Phase Sec-5 adds three more read endpoints, deliberately not shaped like
+each other, because the three checks aren't shaped like each other (see
+the phased roadmap's own framing -- "layer" is stated explicitly for each):
+GET /exposed-ports/{hostname} is Node-scope and reads the same
+`security_finding_cache` everything else in this file reads (Sec-5a rides
+the existing periodic scan pass, nothing new to poll); GET
+/instance-exposed-ports/{instance_id} is Instance-scope and has no per-
+node cache to read at all (Sec-5b is a live, on-demand TCP-connect probe
+against one VM's own IP, not part of any node's periodic scan); GET
+/keystone-tokens is Identity-scope, fleet-wide, and likewise computed live
+(Sec-5c has no `hostname` to key a cache row on in the first place -- see
+services/keystone_audit.py's own module docstring for why this is
+deliberately not forced into the same per-host shape as everything else).
+
 Phase Sec-3 changed *where* a finding comes from, not what it looks like:
 GET /findings and friends used to call `_investigate(..., narrate=False)`
 live, once per known node, on every single request -- which is why the
@@ -43,7 +57,7 @@ from sqlalchemy.orm import Session
 from .. import crud, models
 from ..auth import get_current_user, require_admin
 from ..db import get_db
-from ..services import security_rbac, security_sandbox
+from ..services import instance_exposure, keystone_audit, security_rbac, security_sandbox
 from ..services.security_scan_cache import run_security_scan, scan_one_node
 
 logger = logging.getLogger(__name__)
@@ -236,6 +250,139 @@ def get_security_groups(hostname: str, current_user: models.User = Depends(get_c
     result = dict(redacted["sec_group_signal"])
     result["scanned_at"] = cache_row.updated_at.isoformat()
     return result
+
+
+@router.get("/exposed-ports/{hostname}")
+def get_exposed_ports(hostname: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Phase Sec-5a, Node scope. Cached confirmed-exposure cross-check for
+    one node -- exactly `raw_data.exposed_port_signal` from GET /findings
+    for this same host, broken out on its own for a dedicated "exposed
+    ports" panel, same pattern GET /groups/{hostname} already established
+    for sec-group data. Reads the same `security_finding_cache` row (no
+    new scan, no new collector call here) since `_check_exposed_ports`
+    already ran as part of this node's regular periodic pass.
+    """
+    node_row = crud.get_node_by_hostname(db, hostname)
+    if node_row is None:
+        raise HTTPException(status_code=404, detail=f"No known node '{hostname}'.")
+
+    cache_row = _cached_or_live(db, node_row)
+    exposed_port_signal = cache_row.raw_data.get("exposed_port_signal", {})
+    _, redacted = security_rbac.filter_security_response_for_role(
+        "", {"exposed_port_signal": exposed_port_signal}, "security", current_user.role
+    )
+    result = dict(redacted["exposed_port_signal"])
+    result["scanned_at"] = cache_row.updated_at.isoformat()
+    return result
+
+
+@router.get("/instance-exposed-ports/{instance_id}")
+def get_instance_exposed_ports(instance_id: str, current_user: models.User = Depends(get_current_user)):
+    """Phase Sec-5b, Instance scope -- an *explicit stretch*, not part of
+    any node's periodic scan (see this router's module docstring and
+    services/instance_exposure.py's own docstring for why this is
+    genuinely a different kind of check, not a variant of Sec-5a): live,
+    on demand, one instance at a time. Resolves the instance's own
+    reachable IP and declared-world-open rules, then actually TCP-connect
+    probes each declared port -- `confirmed` entries are a real, live
+    reachability finding, not a cached one, since there's no per-node
+    scan loop for this to ride.
+
+    No local `Node`/instance registry exists to 404 against up front (see
+    crud.py -- only physical `Node` rows are tracked, not OpenStack
+    server IDs), so an unknown `instance_id` surfaces as "no reachable IP
+    found" rather than a 404 -- an honest "couldn't resolve this
+    instance", not a guess that it doesn't exist.
+    """
+    try:
+        targets = instance_exposure.get_instance_exposure_targets(instance_id)
+    except Exception as exc:
+        logger.warning("instance-exposed-ports: couldn't resolve targets for %s: %s", instance_id, exc)
+        signal = {
+            "has_signal": False,
+            "degraded": True,
+            "detail": "Couldn't reach OpenStack to resolve this instance's IP and security groups.",
+        }
+    else:
+        if targets["reachable_ip"] is None:
+            signal = {
+                "has_signal": False,
+                "degraded": False,
+                "detail": f"No floating or fixed IP found for instance '{instance_id}' -- nothing to probe.",
+                "declared_open": targets["declared_open"],
+            }
+        else:
+            probe = instance_exposure.probe_declared_open_ports(targets["reachable_ip"], targets["declared_open"])
+            has_signal = bool(probe["confirmed"])
+            if has_signal:
+                detail = (
+                    f"{len(probe['confirmed'])} declared-open port(s) on {targets['reachable_ip']} are "
+                    "actually reachable from outside this instance's network."
+                )
+            elif probe["unconfirmed"]:
+                detail = (
+                    f"{len(probe['unconfirmed'])} port(s) are declared open on {targets['reachable_ip']} "
+                    "but nothing answered when probed -- unconfirmed, not reachable right now."
+                )
+            else:
+                detail = f"No world-open security-group rule for instance '{instance_id}' -- nothing to probe."
+            signal = {
+                "has_signal": has_signal,
+                "degraded": False,
+                "detail": detail,
+                "instance_id": instance_id,
+                "instance_name": targets["instance_name"],
+                "reachable_ip": targets["reachable_ip"],
+                "reachable_via": targets["reachable_via"],
+                **probe,
+            }
+
+    _, redacted = security_rbac.filter_security_response_for_role(
+        "", {"instance_exposure_signal": signal}, "security", current_user.role
+    )
+    return redacted["instance_exposure_signal"]
+
+
+@router.get("/keystone-tokens")
+def get_keystone_tokens(current_user: models.User = Depends(get_current_user)):
+    """Phase Sec-5c, Identity scope -- fleet/project-wide, not per-node
+    (see services/keystone_audit.py's own module docstring for why this
+    deliberately has no `hostname` in its response, unlike every other
+    endpoint in this router). Live, on demand: reads the sandbox's (or a
+    real deployment's) token-issuance log and applies the three small,
+    explicit abuse patterns keystone_audit.find_abusive_token_patterns
+    documents -- rapid re-issuance, an unexpected source IP, or an
+    unusually long-lived token.
+    """
+    try:
+        events = keystone_audit.get_token_issuance_log()
+    except Exception as exc:
+        logger.warning("keystone-tokens: couldn't reach the token-issuance log: %s", exc)
+        signal = {
+            "has_signal": False,
+            "degraded": True,
+            "detail": "Couldn't reach the Keystone token-issuance log -- no collector deployed yet.",
+        }
+    else:
+        patterns = keystone_audit.find_abusive_token_patterns(events)
+        has_signal = bool(patterns["rapid_reissue"] or patterns["unexpected_ip"] or patterns["long_lived"])
+        if has_signal:
+            fired = []
+            if patterns["rapid_reissue"]:
+                fired.append(f"{len(patterns['rapid_reissue'])} rapid-reissue user(s)")
+            if patterns["unexpected_ip"]:
+                fired.append(f"{len(patterns['unexpected_ip'])} token(s) from an unexpected IP")
+            if patterns["long_lived"]:
+                fired.append(f"{len(patterns['long_lived'])} unusually long-lived token(s)")
+            detail = f"Token-abuse patterns found across {patterns['event_count']} issuance event(s): " + ", ".join(fired) + "."
+        else:
+            detail = f"No token-abuse pattern found across {patterns['event_count']} issuance event(s)."
+        signal = {"has_signal": has_signal, "degraded": False, "detail": detail, **patterns}
+
+    _, redacted = security_rbac.filter_security_response_for_role(
+        "", {"keystone_token_signal": signal}, "security", current_user.role
+    )
+    return redacted["keystone_token_signal"]
 
 
 # ---------------------------------------------------------------------

@@ -21,19 +21,20 @@ function Pill({ signal }: { signal: AgentSecuritySignal }) {
  * into the same Notion-style dense table ServiceTable.tsx uses for
  * /services -- sticky-feeling header row, hairline row dividers, whole
  * row clickable through to the per-host security-groups detail page. The
- * four sub-check pills collapse on narrow viewports the same way
+ * five sub-check pills collapse on narrow viewports the same way
  * ServiceTable's secondary columns do, leaving host + overall status. */
 export default function SecurityPostureTable({ findings }: { findings: SecurityFinding[] }) {
   return (
     <div className="panel overflow-hidden">
       <div
-        className="hidden grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr] gap-4 px-5 py-2.5 text-[11px] font-medium uppercase tracking-[0.08em] text-text-muted sm:grid"
+        className="hidden grid-cols-[1.8fr_0.9fr_0.9fr_0.9fr_0.9fr_0.9fr_1fr] gap-3 px-5 py-2.5 text-[11px] font-medium uppercase tracking-[0.08em] text-text-muted sm:grid"
         style={{ background: "var(--canvas)" }}
       >
         <div>Host</div>
         <div>Auth activity</div>
         <div>Security groups</div>
         <div>Known CVEs</div>
+        <div>Exposed ports</div>
         <div>Kernel signals</div>
         <div className="text-right">Overall</div>
       </div>
@@ -45,7 +46,7 @@ export default function SecurityPostureTable({ findings }: { findings: SecurityF
             <Link
               key={f.hostname}
               href={`/security/security-groups/${encodeURIComponent(f.hostname)}`}
-              className="group grid w-full gap-4 border-b p-5 text-left transition-colors last:border-b-0 hover:bg-[var(--canvas)] sm:grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr]"
+              className="group grid w-full gap-3 border-b p-5 text-left transition-colors last:border-b-0 hover:bg-[var(--canvas)] sm:grid-cols-[1.8fr_0.9fr_0.9fr_0.9fr_0.9fr_0.9fr_1fr]"
               style={{ borderColor: "var(--border-soft)" }}
             >
               <div className="flex min-w-0 items-center gap-3">
@@ -69,6 +70,9 @@ export default function SecurityPostureTable({ findings }: { findings: SecurityF
               </div>
               <div className="hidden items-center sm:flex">
                 <Pill signal={f.raw_data.cve_signal} />
+              </div>
+              <div className="hidden items-center sm:flex">
+                <Pill signal={f.raw_data.exposed_port_signal} />
               </div>
               <div className="hidden items-center sm:flex">
                 <Pill signal={f.raw_data.ebpf_signal} />

@@ -806,6 +806,28 @@ export interface AgentEbpfSignal extends AgentSecuritySignal {
   alerts?: AgentEbpfAlert[];
 }
 
+// Phase Sec-5a: one (world-open security-group rule) x (really-listening
+// port) pair on a node -- see services/exposed_ports.py's module
+// docstring for why only this intersection is ever reported, never a
+// listening port alone (not reachable, Neutron default-denies) or a
+// risky rule alone (that's sec_group_signal's own job -- this is what
+// confirms one of those rules is backed by something real).
+export interface AgentExposedPortMismatch {
+  port: number;
+  protocol: string | null;
+  process: string | null;
+  security_group: string;
+  reason: string;
+}
+
+export interface AgentExposedPortSignal extends AgentSecuritySignal {
+  mismatches?: AgentExposedPortMismatch[];
+  // Every port this host reported listening on, matched or not -- lets a
+  // page show "checked, nothing exposed" instead of an empty table being
+  // ambiguous with "never checked".
+  listening_ports?: { port: number; protocol: string | null; process: string | null }[];
+}
+
 export interface AgentSecurityData extends CrossAgentArbitrationFields {
   hostname: string;
   role: string;
@@ -813,6 +835,7 @@ export interface AgentSecurityData extends CrossAgentArbitrationFields {
   auth_signal: AgentAuthAnomalySignal;
   sec_group_signal: AgentSecGroupSignal;
   cve_signal: AgentCveSignal;
+  exposed_port_signal: AgentExposedPortSignal;
   ebpf_signal: AgentEbpfSignal;
 }
 
@@ -861,6 +884,71 @@ export interface SecurityScanRun {
 export interface SecurityHealth {
   status: "ok" | "degraded" | "failed" | "unknown";
   last_run: SecurityScanRun | null;
+}
+
+// --- Phase Sec-5b: GET /api/v1/security/instance-exposed-ports/{id} -----
+//
+// Instance scope, not Node -- see services/instance_exposure.py's own
+// module docstring for why this is a live TCP-connect probe against one
+// VM's own IP, computed on demand, not part of any node's periodic scan
+// (so, unlike everything else in this file, there's no `scanned_at` and
+// no per-host list -- one instance at a time, by id).
+export interface InstanceExposurePort {
+  port: number;
+  reason: string;
+}
+
+export interface InstanceExposureResult {
+  has_signal: boolean;
+  degraded?: boolean;
+  detail?: string;
+  restricted?: boolean;
+  instance_id?: string;
+  instance_name?: string | null;
+  reachable_ip?: string | null;
+  reachable_via?: "floating_ip" | "fixed_ip" | null;
+  ip_address?: string;
+  confirmed?: InstanceExposurePort[];
+  unconfirmed?: InstanceExposurePort[];
+  unscoped_rules?: { reason: string }[];
+  declared_open?: { port: number | null; reason: string }[];
+}
+
+// --- Phase Sec-5c: GET /api/v1/security/keystone-tokens ------------------
+//
+// Identity scope, fleet/project-wide -- see services/keystone_audit.py's
+// own module docstring for why this deliberately has no `hostname` at
+// all, unlike every other signal in this file.
+export interface KeystoneRapidReissueEntry {
+  username: string;
+  count: number;
+  window_seconds: number;
+  first_issued_at: string;
+}
+
+export interface KeystoneUnexpectedIpEntry {
+  username: string | null;
+  source_ip: string;
+  issued_at: string;
+}
+
+export interface KeystoneLongLivedEntry {
+  username: string | null;
+  ttl_seconds: number;
+  issued_at: string;
+  expires_at: string;
+}
+
+export interface KeystoneTokenSignal {
+  has_signal: boolean;
+  degraded?: boolean;
+  detail?: string;
+  restricted?: boolean;
+  rapid_reissue?: KeystoneRapidReissueEntry[];
+  unexpected_ip?: KeystoneUnexpectedIpEntry[];
+  unexpected_ip_checked?: boolean;
+  long_lived?: KeystoneLongLivedEntry[];
+  event_count?: number;
 }
 
 export type AgentRawData =

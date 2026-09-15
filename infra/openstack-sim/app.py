@@ -575,6 +575,26 @@ async def issue_token(request: Request):
     password_auth = identity.get("password", {}).get("user", {})
     username = password_auth.get("name", "unknown")
 
+    # Phase Sec-5c: real Keystone has no built-in "list every token ever
+    # issued" API (tokens are opaque by design) -- see
+    # services/keystone_audit.py's module docstring for why this sandbox
+    # therefore logs issuance itself, the same "this sim stands in for a
+    # collector that doesn't exist yet, production needs its own" shape
+    # PACKAGE_INVENTORY/LISTENING_PORTS above already establish. Every
+    # real call to this endpoint (including the ones every other module's
+    # own `openstack.connect()` triggers) appends one event -- so a
+    # scripted or accidental burst of re-authentications is genuinely
+    # visible to `GET /_sandbox/keystone/token-log`, not simulated
+    # separately from it.
+    issued_at = datetime.now(timezone.utc)
+    _TOKEN_ISSUANCE_LOG.append({
+        "username": username,
+        "project": "sandbox-project",
+        "source_ip": request.client.host if request.client else None,
+        "issued_at": issued_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "expires_at": (issued_at + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    })
+
     token_body = {
         "token": {
             "issued_at": _now_iso(),
@@ -868,6 +888,61 @@ def get_packages(host: str):
     return PACKAGE_INVENTORY.get(host, [])
 
 
+# ---- Phase Sec-5a: listening-port collector (node layer only) -----------
+# Same "extend Sec-3's collector rather than stand up a new one" shape
+# services/exposed_ports.py's own module docstring describes -- this is
+# the `/listening-ports?host=` route that client calls, served from the
+# same openstack-sim process as `/packages` above, for the same "whichever
+# is less infra" reason.
+#
+# Seeded so the cross-check this phase exists to demonstrate -- "a
+# security-group rule world-opens port P, AND this host is really
+# listening on P" -- is genuinely true for both compute nodes, on two
+# *different* sensitive ports, mirroring how SECURITY_GROUP_RULES already
+# seeds one SSH hit ("default", compute1-sim) and one MySQL hit
+# ("database", compute2-sim):
+#   - compute1-sim really runs sshd on 22 -- "default"'s world-open SSH
+#     rule (rolled up onto compute1-sim, which hosts sandbox-vm-1/-3/-4)
+#     is therefore a *confirmed*, not just theoretical, exposure.
+#   - compute2-sim really runs sshd on 22 AND (illustratively) a mysqld on
+#     3306 -- both "default"'s SSH rule and "database"'s MySQL rule
+#     (rolled up onto compute2-sim, which hosts sandbox-vm-2/-5-db) are
+#     confirmed exposures here too.
+#   - controller-sim/storage-sim host no VMs at all (SERVERS above), so
+#     `security_audit.get_node_security_groups` already returns no risky
+#     rules for them regardless of what they're listening on -- seeded
+#     with just sshd so a fresh sandbox never reports "no listening-port
+#     collector for this host" for a real, known node.
+LISTENING_PORTS: dict[str, list[dict]] = {
+    "controller-sim": [
+        {"port": 22, "protocol": "tcp", "process": "sshd"},
+    ],
+    "compute1-sim": [
+        {"port": 22, "protocol": "tcp", "process": "sshd"},
+    ],
+    "compute2-sim": [
+        {"port": 22, "protocol": "tcp", "process": "sshd"},
+        {"port": 3306, "protocol": "tcp", "process": "mysqld"},
+    ],
+    "storage-sim": [
+        {"port": 22, "protocol": "tcp", "process": "sshd"},
+    ],
+}
+
+
+@app.get("/listening-ports")
+def get_listening_ports(host: str):
+    """`GET /listening-ports?host=<node hostname>` -- the exact shape
+    services/exposed_ports.get_listening_ports() expects:
+    `[{"port": int, "protocol": str, "process": str}, ...]`. Same
+    unknown-hostname convention as `/packages` above: an empty list, not
+    a 404, so `_check_exposed_ports` degrades to "no listening ports
+    reported" (a real, if uninteresting, state) rather than "collector
+    unreachable" for a node this sim doesn't seed.
+    """
+    return LISTENING_PORTS.get(host, [])
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
@@ -895,6 +970,13 @@ _FLOATINGIP_FAULTS: dict[str, dict] = {}
 # last looked" scenario Phase Sec-1 exists to catch, exercised against
 # real (if simulated) Neutron reads end to end rather than mocked fixtures.
 _SECURITY_GROUP_RULES_LIVE: dict[str, dict] = {r["id"]: dict(r) for r in SECURITY_GROUP_RULES}
+
+# Phase Sec-5c: every token issuance recorded by POST /v3/auth/tokens
+# above -- see that endpoint's own comment for why this sandbox has to
+# log it itself rather than reading it back out of a real Keystone API.
+# A plain in-memory list (append-only, oldest first), same shape
+# services/keystone_audit.get_token_issuance_log() expects verbatim.
+_TOKEN_ISSUANCE_LOG: list[dict] = []
 
 
 @app.post("/_sandbox/security-group-rule/add")
@@ -960,4 +1042,30 @@ def fault_reset():
     _FLOATINGIP_FAULTS.clear()
     _SECURITY_GROUP_RULES_LIVE.clear()
     _SECURITY_GROUP_RULES_LIVE.update({r["id"]: dict(r) for r in SECURITY_GROUP_RULES})
+    return {"status": "reset"}
+
+
+# ---- Phase Sec-5c: Keystone token-issuance log (identity layer) ---------
+@app.get("/_sandbox/keystone/token-log")
+def get_keystone_token_log():
+    """`GET /_sandbox/keystone/token-log` -- the exact shape
+    services/keystone_audit.get_token_issuance_log() expects:
+    `[{"username": str, "project": str, "source_ip": str,
+       "issued_at": ISO-8601 str, "expires_at": ISO-8601 str}, ...]`.
+    Read-only, no admin gate needed -- unlike the fault-injection/rule
+    endpoints above, this never mutates anything a real cloud would care
+    about, it only reads back what POST /v3/auth/tokens already recorded.
+    """
+    return list(_TOKEN_ISSUANCE_LOG)
+
+
+@app.post("/_sandbox/keystone/token-log/reset")
+def reset_keystone_token_log():
+    """Clears the in-memory issuance log -- its own reset, deliberately
+    not folded into /_sandbox/fault/reset above, since a token-abuse demo
+    scenario (or a test asserting on a clean log) shouldn't also have to
+    care about, or accidentally clear, an unrelated router/port/floating-
+    ip/security-group-rule fault someone else set up in the same sandbox
+    run."""
+    _TOKEN_ISSUANCE_LOG.clear()
     return {"status": "reset"}

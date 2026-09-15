@@ -12,12 +12,23 @@ drift out of sync. This module is that one shared copy; routers/agents.py
 and routers/security.py both import from here, neither defines its own.
 
 See nodes/security.py's module docstring for *why* this exists at all:
-a viewer account seeing exactly which world-open port, which CVE, or
-which eBPF alert line to exploit is a real exposure, not just an
-information nicety -- Monitoring/Prediction/Network's raw findings don't
-carry that risk, Security's does.
+a viewer account seeing exactly which world-open port, which CVE, which
+confirmed-listening exposed port, or which eBPF alert line to exploit is
+a real exposure, not just an information nicety -- Monitoring/Prediction/
+Network's raw findings don't carry that risk, Security's does.
 """
-_SECURITY_SUB_SIGNAL_KEYS = ("auth_signal", "sec_group_signal", "cve_signal", "ebpf_signal")
+_SECURITY_SUB_SIGNAL_KEYS = (
+    "auth_signal", "sec_group_signal", "cve_signal", "exposed_port_signal", "ebpf_signal",
+    # Not part of nodes/security.py's five node-scoped sub-checks -- these
+    # two are built directly by routers/security.py's own Sec-5b/Sec-5c
+    # endpoints (instance-scope exposed-port probe, fleet-wide Keystone
+    # token-abuse) -- but they carry exactly the same kind of
+    # individually-exploitable specifics (a real reachable IP:port, a
+    # real username/source-IP pattern), so they get the same redaction
+    # treatment through this one shared list rather than a second,
+    # parallel redaction path.
+    "instance_exposure_signal", "keystone_token_signal",
+)
 RESTRICTED_NOTICE = (
     "This turn's finding involved the Security Agent (auth activity, security-group rules, "
     "known-vulnerable packages, or kernel-level alerts). Those specifics are restricted to admin "

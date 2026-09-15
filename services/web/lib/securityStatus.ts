@@ -1,4 +1,4 @@
-import type { AgentCveMatch, AgentEbpfAlert, AgentSecGroupInfo, AgentSecGroupRule, AgentSecGroupSignal, AgentSecurityData, AgentSecuritySignal, SecurityFinding } from "./types";
+import type { AgentCveMatch, AgentEbpfAlert, AgentExposedPortMismatch, AgentSecGroupInfo, AgentSecGroupRule, AgentSecGroupSignal, AgentSecurityData, AgentSecuritySignal, SecurityFinding } from "./types";
 
 /** Same {has_signal, degraded, restricted} -> tone/label mapping
  * components/CopilotAgentPanels.tsx's SecuritySignalRow uses for the chat
@@ -43,7 +43,7 @@ export function isSecurityGroupFlagged(
  * merely being degraded, which outranks a fully clean host.
  */
 export function overallSecurityTone(raw: AgentSecurityData) {
-  const signals = [raw.auth_signal, raw.sec_group_signal, raw.cve_signal, raw.ebpf_signal];
+  const signals = [raw.auth_signal, raw.sec_group_signal, raw.cve_signal, raw.exposed_port_signal, raw.ebpf_signal];
   if (signals.some((s) => s.has_signal)) return { color: "var(--crit)", soft: "var(--crit-soft)", label: "Flagged" };
   if (signals.some((s) => s.degraded)) return { color: "var(--warn)", soft: "var(--warn-soft)", label: "Degraded" };
   return { color: "var(--ok)", soft: "var(--ok-soft)", label: "Clean" };
@@ -346,6 +346,65 @@ export function buildEbpfHostStatuses(findings: SecurityFinding[]): EbpfHostStat
     role: f.role,
     tone: securityPillTone(f.raw_data.ebpf_signal),
     alertCount: f.raw_data.ebpf_signal.alerts?.length ?? 0,
+  }));
+}
+
+// --- Phase Sec-5a (exposed-ports page): confirmed-exposure vocabulary ----
+//
+// Unlike CVE severity / eBPF priority, exposed-port mismatches don't carry
+// their own severity string from the backend -- every entry here already
+// represents the same thing (a world-open rule confirmed backed by a real
+// listening socket), so there's no ranking to apply, just a flat list.
+
+/** One row per (host, confirmed exposed port) -- the flat shape
+ * /security/exposed-ports' table renders, straight off
+ * AgentExposedPortSignal.mismatches (nodes/security.py's
+ * `_check_exposed_ports`, services/exposed_ports.py) plus the host each
+ * mismatch came from. A restricted (viewer) or degraded (listening-port
+ * collector unreachable) signal contributes no rows here by construction
+ * -- both have `mismatches` undefined, never a fabricated empty-but-clean
+ * list -- see buildExposedPortHostStatuses below for how those hosts are
+ * still represented instead of silently vanishing.
+ */
+export interface ExposedPortRow extends AgentExposedPortMismatch {
+  hostname: string;
+  role: string;
+}
+
+export function flattenExposedPortFindings(findings: SecurityFinding[]): ExposedPortRow[] {
+  const rows: ExposedPortRow[] = [];
+  for (const f of findings) {
+    for (const mismatch of f.raw_data.exposed_port_signal.mismatches ?? []) {
+      rows.push({ ...mismatch, hostname: f.hostname, role: f.role });
+    }
+  }
+  return rows.sort((a, b) => a.hostname.localeCompare(b.hostname) || a.port - b.port);
+}
+
+/** Every monitored host's exposed-port status, independent of whether it
+ * actually has a confirmed mismatch right now -- same reasoning
+ * buildCveHostStatuses' own docstring gives: a flat mismatches table on
+ * its own would only ever show hosts *with* a finding, making a clean
+ * host (checked, nothing confirmed reachable), a degraded one (no
+ * listening-port collector reachable for this host -- "unknown", not
+ * "clean"), and a restricted one (viewer role) indistinguishable from a
+ * host nobody's watching at all.
+ */
+export interface ExposedPortHostStatus {
+  hostname: string;
+  role: string;
+  tone: ReturnType<typeof securityPillTone>;
+  mismatchCount: number;
+  listeningCount: number;
+}
+
+export function buildExposedPortHostStatuses(findings: SecurityFinding[]): ExposedPortHostStatus[] {
+  return findings.map((f) => ({
+    hostname: f.hostname,
+    role: f.role,
+    tone: securityPillTone(f.raw_data.exposed_port_signal),
+    mismatchCount: f.raw_data.exposed_port_signal.mismatches?.length ?? 0,
+    listeningCount: f.raw_data.exposed_port_signal.listening_ports?.length ?? 0,
   }));
 }
 

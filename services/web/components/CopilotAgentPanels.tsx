@@ -18,6 +18,7 @@ import {
   ExternalLink,
   FileText,
   Gauge,
+  Globe,
   HardDrive,
   Lightbulb,
   Loader2,
@@ -786,14 +787,15 @@ function NetworkPanel({ data }: { data: AgentNetworkData }) {
 }
 
 // ---------------------------------------------------------------------------
-// Security agent panel -- four sub-checks (auth-anomaly, sec-group-diff,
-// CVE-match, eBPF-signal) merged into one finding, see nodes/security.py.
-// Every sub-signal renders the same way: a status chip (clean / flagged /
-// unknown) plus its own detail line -- except when `restricted` is set,
-// which means this response was RBAC-filtered for a non-admin account
-// (see routers/agents.py's `_redact_security_raw_data`); in that case the
-// panel shows a clear "admin only" placeholder instead of trying to
-// render fields the backend never sent.
+// Security agent panel -- five sub-checks (auth-anomaly, sec-group-diff,
+// CVE-match, exposed-port cross-check, eBPF-signal) merged into one
+// finding, see nodes/security.py. Every sub-signal renders the same way:
+// a status chip (clean / flagged / unknown) plus its own detail line --
+// except when `restricted` is set, which means this response was
+// RBAC-filtered for a non-admin account (see routers/agents.py's
+// `_redact_security_raw_data`); in that case the panel shows a clear
+// "admin only" placeholder instead of trying to render fields the backend
+// never sent.
 // ---------------------------------------------------------------------------
 
 export function SecuritySignalRow({
@@ -847,7 +849,7 @@ export function SecuritySignalRow({
 }
 
 export function SecurityPanel({ data }: { data: AgentSecurityData }) {
-  const anyRestricted = [data.auth_signal, data.sec_group_signal, data.cve_signal, data.ebpf_signal].some((s) => s.restricted);
+  const anyRestricted = [data.auth_signal, data.sec_group_signal, data.cve_signal, data.exposed_port_signal, data.ebpf_signal].some((s) => s.restricted);
 
   return (
     <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--chart-4) 22%, var(--border))" }}>
@@ -898,6 +900,17 @@ export function SecurityPanel({ data }: { data: AgentSecurityData }) {
               {data.cve_signal.matches!.slice(0, 3).map((m, i) => (
                 <li key={i} className="text-[11px]" style={{ color: "var(--crit)" }}>
                   {m.cve_id} ({m.severity}) -- {m.package} {m.installed_version}
+                </li>
+              ))}
+            </ul>
+          )}
+        </SecuritySignalRow>
+        <SecuritySignalRow icon={Globe} label="Exposed ports" signal={data.exposed_port_signal}>
+          {(data.exposed_port_signal.mismatches?.length ?? 0) > 0 && (
+            <ul className="flex flex-col gap-0.5">
+              {data.exposed_port_signal.mismatches!.slice(0, 3).map((m, i) => (
+                <li key={i} className="text-[11px]" style={{ color: "var(--crit)" }}>
+                  port {m.port} ({m.process ?? "unknown"}) via {m.security_group} -- {m.reason}
                 </li>
               ))}
             </ul>

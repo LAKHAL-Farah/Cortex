@@ -1,15 +1,17 @@
 """Tests for app/agents/nodes/security.py -- the Security Agent (v0.9,
-Phase 5), sub-orchestrating four near-independent checks (auth-anomaly,
-sec-group-diff, CVE-match, eBPF-signal) into one AgentResult.
+Phase 5), sub-orchestrating five near-independent checks (auth-anomaly,
+sec-group-diff, CVE-match, exposed-port cross-check [Phase Sec-5a],
+eBPF-signal) into one AgentResult.
 
 Same style as test_network_agent.py/test_anomaly_agent.py: every external
 call (loki_client.query_range, security_audit.get_node_security_groups,
-cve_feed.get_package_inventory, ebpf_signal.get_node_ebpf_alerts) is
-monkeypatched at its call site, and no NVIDIA_API_KEY is set so narration
-always takes the deterministic LLMConfigError fallback path.
+cve_feed.get_package_inventory, exposed_ports.get_listening_ports,
+ebpf_signal.get_node_ebpf_alerts) is monkeypatched at its call site, and
+no NVIDIA_API_KEY is set so narration always takes the deterministic
+LLMConfigError fallback path.
 """
 from app.agents.nodes import security
-from app.services import cve_feed, ebpf_signal, security_audit
+from app.services import cve_feed, ebpf_signal, exposed_ports, security_audit
 
 NODE = {"hostname": "compute-02", "role": "compute", "instance": "10.0.1.12:9100"}
 KNOWN_NODES = [NODE]
@@ -22,6 +24,7 @@ def _clean(monkeypatch):
         lambda hostname, conn=None: {"hostname": hostname, "security_groups": [], "risky_rules": []},
     )
     monkeypatch.setattr(cve_feed, "get_package_inventory", lambda hostname: [])
+    monkeypatch.setattr(exposed_ports, "get_listening_ports", lambda hostname: [])
     monkeypatch.setattr(ebpf_signal, "get_node_ebpf_alerts", lambda hostname: [])
 
 
@@ -119,6 +122,77 @@ def test_cve_match_ignores_patched_versions(monkeypatch):
     assert result["agent_result"]["raw_data"]["cve_signal"]["has_signal"] is False
 
 
+# --------------------------------------------------------------------
+# Sub-check 4 (Phase Sec-5a): exposed-port cross-check
+# --------------------------------------------------------------------
+
+def test_exposed_port_confirmed_when_listening_port_falls_inside_a_risky_rule(monkeypatch):
+    """The genuinely interesting case: a security-group rule world-opens
+    SSH, AND the host is really listening on 22 -- a confirmed, not just
+    theoretical, exposure."""
+    _clean(monkeypatch)
+    monkeypatch.setattr(security_audit, "get_node_security_groups", lambda hostname, conn=None: _sec_group(risky=True))
+    monkeypatch.setattr(
+        exposed_ports, "get_listening_ports",
+        lambda hostname: [{"port": 22, "protocol": "tcp", "process": "sshd"}],
+    )
+
+    result = security.security_agent({"user_query": "is compute-02 actually exposed", "known_nodes": KNOWN_NODES})
+
+    agent_result = result["agent_result"]
+    exposed = agent_result["raw_data"]["exposed_port_signal"]
+    assert exposed["has_signal"] is True
+    assert exposed["mismatches"][0]["port"] == 22
+    assert exposed["mismatches"][0]["process"] == "sshd"
+    assert agent_result["confidence"] == security._CONFIG_SIGNAL_CONFIDENCE
+
+
+def test_exposed_port_no_signal_when_risky_rule_has_nothing_listening_behind_it(monkeypatch):
+    """A world-open rule alone, with no confirmed listening socket behind
+    it, is real evidence for sec_group_signal but should NOT also trip
+    exposed_port_signal -- only the intersection counts (see
+    exposed_ports.py's module docstring)."""
+    _clean(monkeypatch)
+    monkeypatch.setattr(security_audit, "get_node_security_groups", lambda hostname, conn=None: _sec_group(risky=True))
+    monkeypatch.setattr(exposed_ports, "get_listening_ports", lambda hostname: [{"port": 8080, "protocol": "tcp", "process": "app"}])
+
+    result = security.security_agent({"user_query": "is compute-02 actually exposed", "known_nodes": KNOWN_NODES})
+
+    exposed = result["agent_result"]["raw_data"]["exposed_port_signal"]
+    assert exposed["has_signal"] is False
+    assert exposed["mismatches"] == []
+
+
+def test_exposed_port_no_signal_when_listening_port_has_no_covering_rule(monkeypatch):
+    """A listening port with no world-open rule covering it isn't
+    reachable from outside at all (default-deny) -- not flagged."""
+    _clean(monkeypatch)
+    monkeypatch.setattr(exposed_ports, "get_listening_ports", lambda hostname: [{"port": 9999, "protocol": "tcp", "process": "internal"}])
+
+    result = security.security_agent({"user_query": "is compute-02 actually exposed", "known_nodes": KNOWN_NODES})
+
+    exposed = result["agent_result"]["raw_data"]["exposed_port_signal"]
+    assert exposed["has_signal"] is False
+
+
+def test_a_dead_listening_port_collector_degrades_that_sub_check_without_crashing(monkeypatch):
+    _clean(monkeypatch)
+
+    def _dead(*a, **k):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(exposed_ports, "get_listening_ports", _dead)
+
+    result = security.security_agent({"user_query": "any security issues on compute-02", "known_nodes": KNOWN_NODES})
+
+    exposed = result["agent_result"]["raw_data"]["exposed_port_signal"]
+    assert exposed["degraded"] is True
+    assert exposed["has_signal"] is False
+    assert result["agent_result"]["confidence"] <= security._DEGRADED_CONFIDENCE_CAP
+    assert len(result["failures"]) == 1
+    assert result["failures"][0]["source"] == "security.exposed_ports"
+
+
 def test_ebpf_signal_alone_gets_the_highest_confidence(monkeypatch):
     """The literal roadmap requirement: eBPF/kernel-level signal weighted
     above every other sub-check."""
@@ -174,13 +248,14 @@ def test_a_dead_ebpf_sensor_degrades_that_sub_check_without_crashing(monkeypatch
     assert result["failures"][0]["source"] == "security.ebpf"
 
 
-def test_all_four_sub_checks_dead_still_returns_a_finding_not_a_crash(monkeypatch):
+def test_all_five_sub_checks_dead_still_returns_a_finding_not_a_crash(monkeypatch):
     def _dead(*a, **k):
         raise ConnectionError("connection refused")
 
     monkeypatch.setattr(security.loki_client, "query_range", _dead)
     monkeypatch.setattr(security_audit, "get_node_security_groups", _dead)
     monkeypatch.setattr(cve_feed, "get_package_inventory", _dead)
+    monkeypatch.setattr(exposed_ports, "get_listening_ports", _dead)
     monkeypatch.setattr(ebpf_signal, "get_node_ebpf_alerts", _dead)
 
     result = security.security_agent({"user_query": "any security issues on compute-02", "known_nodes": KNOWN_NODES})
@@ -188,7 +263,7 @@ def test_all_four_sub_checks_dead_still_returns_a_finding_not_a_crash(monkeypatc
     assert result["error"] is None
     assert result["agent_result"] is not None
     assert result["agent_result"]["confidence"] <= security._DEGRADED_CONFIDENCE_CAP
-    assert len(result["failures"]) == 4
+    assert len(result["failures"]) == 5
 
 
 # --------------------------------------------------------------------

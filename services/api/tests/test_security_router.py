@@ -227,3 +227,199 @@ def test_get_security_groups_viewer_gets_booleans_only(monkeypatch):
 
     assert res.status_code == 200
     assert res.json() == {"has_signal": True, "degraded": False, "restricted": True}
+
+
+# --------------------------------------------------------------------------
+# GET /api/v1/security/exposed-ports/{hostname} -- Phase Sec-5a, Node scope
+# --------------------------------------------------------------------------
+
+def test_get_exposed_ports_404s_for_unknown_hostname():
+    res = client.get("/api/v1/security/exposed-ports/no-such-host-at-all", headers=_make_user_headers("admin"))
+    assert res.status_code == 404
+
+
+def test_get_exposed_ports_admin_sees_confirmed_mismatches(monkeypatch):
+    _make_node("sec-router-exposed-admin")
+    monkeypatch.setattr(security_agent_node, "_check_exposed_ports", lambda node, sec_group: {
+        "has_signal": True, "degraded": False, "detail": "1 confirmed exposed port",
+        "mismatches": [{"port": 22, "protocol": "tcp", "process": "sshd", "security_group": "default", "reason": "SSH open to the world"}],
+        "listening_ports": [{"port": 22, "protocol": "tcp", "process": "sshd"}],
+    })
+
+    res = client.get("/api/v1/security/exposed-ports/sec-router-exposed-admin", headers=_make_user_headers("admin"))
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["has_signal"] is True
+    assert body["mismatches"][0]["port"] == 22
+
+
+def test_get_exposed_ports_viewer_gets_booleans_only(monkeypatch):
+    _make_node("sec-router-exposed-viewer")
+    monkeypatch.setattr(security_agent_node, "_check_exposed_ports", lambda node, sec_group: {
+        "has_signal": True, "degraded": False, "detail": "1 confirmed exposed port",
+        "mismatches": [{"port": 22, "protocol": "tcp", "process": "sshd", "security_group": "default", "reason": "SSH open to the world"}],
+        "listening_ports": [{"port": 22, "protocol": "tcp", "process": "sshd"}],
+    })
+
+    res = client.get("/api/v1/security/exposed-ports/sec-router-exposed-viewer", headers=_make_user_headers("viewer"))
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["has_signal"] is True
+    assert body["degraded"] is False
+    assert body["restricted"] is True
+    assert "mismatches" not in body
+    assert "listening_ports" not in body
+
+
+# --------------------------------------------------------------------------
+# GET /api/v1/security/instance-exposed-ports/{instance_id} -- Phase Sec-5b,
+# Instance scope
+# --------------------------------------------------------------------------
+
+def test_instance_exposed_ports_requires_authentication():
+    res = client.get("/api/v1/security/instance-exposed-ports/sandbox-vm-1")
+    assert res.status_code == 401
+
+
+def test_instance_exposed_ports_admin_sees_confirmed_reachability(monkeypatch):
+    from app.services import instance_exposure
+
+    monkeypatch.setattr(instance_exposure, "get_instance_exposure_targets", lambda instance_id, conn=None: {
+        "instance_id": instance_id, "instance_name": "sandbox-vm-1", "reachable_ip": "203.0.113.10",
+        "reachable_via": "floating_ip", "declared_open": [{"port": 22, "reason": "SSH open to the world", "rule": {}}],
+    })
+    monkeypatch.setattr(instance_exposure, "probe_declared_open_ports", lambda ip, declared: {
+        "ip_address": ip, "confirmed": [{"port": 22, "reason": "SSH open to the world"}],
+        "unconfirmed": [], "unscoped_rules": [],
+    })
+
+    res = client.get("/api/v1/security/instance-exposed-ports/sandbox-vm-1", headers=_make_user_headers("admin"))
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["has_signal"] is True
+    assert body["reachable_ip"] == "203.0.113.10"
+    assert body["confirmed"] == [{"port": 22, "reason": "SSH open to the world"}]
+
+
+def test_instance_exposed_ports_viewer_gets_booleans_only(monkeypatch):
+    from app.services import instance_exposure
+
+    monkeypatch.setattr(instance_exposure, "get_instance_exposure_targets", lambda instance_id, conn=None: {
+        "instance_id": instance_id, "instance_name": "sandbox-vm-1", "reachable_ip": "203.0.113.10",
+        "reachable_via": "floating_ip", "declared_open": [{"port": 22, "reason": "SSH open to the world", "rule": {}}],
+    })
+    monkeypatch.setattr(instance_exposure, "probe_declared_open_ports", lambda ip, declared: {
+        "ip_address": ip, "confirmed": [{"port": 22, "reason": "SSH open to the world"}],
+        "unconfirmed": [], "unscoped_rules": [],
+    })
+
+    res = client.get("/api/v1/security/instance-exposed-ports/sandbox-vm-1", headers=_make_user_headers("viewer"))
+
+    assert res.status_code == 200
+    assert res.json() == {"has_signal": True, "degraded": False, "restricted": True}
+
+
+def test_instance_exposed_ports_no_reachable_ip_is_not_a_signal(monkeypatch):
+    from app.services import instance_exposure
+
+    monkeypatch.setattr(instance_exposure, "get_instance_exposure_targets", lambda instance_id, conn=None: {
+        "instance_id": instance_id, "instance_name": None, "reachable_ip": None,
+        "reachable_via": None, "declared_open": [],
+    })
+
+    res = client.get("/api/v1/security/instance-exposed-ports/unknown-instance", headers=_make_user_headers("admin"))
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["has_signal"] is False
+    assert "no reachable IP" in body["detail"].lower() or "no floating or fixed ip" in body["detail"].lower()
+
+
+def test_instance_exposed_ports_degrades_on_connection_error(monkeypatch):
+    from app.services import instance_exposure
+
+    def _dead(instance_id, conn=None):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(instance_exposure, "get_instance_exposure_targets", _dead)
+
+    res = client.get("/api/v1/security/instance-exposed-ports/sandbox-vm-1", headers=_make_user_headers("admin"))
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["degraded"] is True
+    assert body["has_signal"] is False
+
+
+# --------------------------------------------------------------------------
+# GET /api/v1/security/keystone-tokens -- Phase Sec-5c, Identity scope
+# --------------------------------------------------------------------------
+
+def test_keystone_tokens_requires_authentication():
+    res = client.get("/api/v1/security/keystone-tokens")
+    assert res.status_code == 401
+
+
+def test_keystone_tokens_admin_sees_pattern_detail(monkeypatch):
+    from app.services import keystone_audit
+
+    monkeypatch.setattr(keystone_audit, "get_token_issuance_log", lambda: [{"username": "mallory"}] * 3)
+    monkeypatch.setattr(keystone_audit, "find_abusive_token_patterns", lambda events, now=None: {
+        "rapid_reissue": [{"username": "mallory", "count": 3, "window_seconds": 10, "first_issued_at": "x"}],
+        "unexpected_ip": [], "unexpected_ip_checked": False, "long_lived": [], "event_count": 3,
+    })
+
+    res = client.get("/api/v1/security/keystone-tokens", headers=_make_user_headers("admin"))
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["has_signal"] is True
+    assert body["rapid_reissue"][0]["username"] == "mallory"
+
+
+def test_keystone_tokens_viewer_gets_booleans_only(monkeypatch):
+    from app.services import keystone_audit
+
+    monkeypatch.setattr(keystone_audit, "get_token_issuance_log", lambda: [{"username": "mallory"}] * 3)
+    monkeypatch.setattr(keystone_audit, "find_abusive_token_patterns", lambda events, now=None: {
+        "rapid_reissue": [{"username": "mallory", "count": 3, "window_seconds": 10, "first_issued_at": "x"}],
+        "unexpected_ip": [], "unexpected_ip_checked": False, "long_lived": [], "event_count": 3,
+    })
+
+    res = client.get("/api/v1/security/keystone-tokens", headers=_make_user_headers("viewer"))
+
+    assert res.status_code == 200
+    assert res.json() == {"has_signal": True, "degraded": False, "restricted": True}
+
+
+def test_keystone_tokens_clean_log_has_no_signal(monkeypatch):
+    from app.services import keystone_audit
+
+    monkeypatch.setattr(keystone_audit, "get_token_issuance_log", lambda: [])
+    monkeypatch.setattr(keystone_audit, "find_abusive_token_patterns", lambda events, now=None: {
+        "rapid_reissue": [], "unexpected_ip": [], "unexpected_ip_checked": False, "long_lived": [], "event_count": 0,
+    })
+
+    res = client.get("/api/v1/security/keystone-tokens", headers=_make_user_headers("admin"))
+
+    assert res.status_code == 200
+    assert res.json()["has_signal"] is False
+
+
+def test_keystone_tokens_degrades_on_connection_error(monkeypatch):
+    from app.services import keystone_audit
+
+    def _dead():
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(keystone_audit, "get_token_issuance_log", _dead)
+
+    res = client.get("/api/v1/security/keystone-tokens", headers=_make_user_headers("admin"))
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["degraded"] is True
+    assert body["has_signal"] is False
