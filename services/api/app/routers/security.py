@@ -24,9 +24,12 @@ the phased roadmap's own framing -- "layer" is stated explicitly for each):
 GET /exposed-ports/{hostname} is Node-scope and reads the same
 `security_finding_cache` everything else in this file reads (Sec-5a rides
 the existing periodic scan pass, nothing new to poll); GET
-/instance-exposed-ports/{instance_id} is Instance-scope and has no per-
-node cache to read at all (Sec-5b is a live, on-demand TCP-connect probe
-against one VM's own IP, not part of any node's periodic scan); GET
+/instance-exposed-ports (fleet-wide table) and GET
+/instance-exposed-ports/{instance_id} (one instance) are Instance-scope
+and have no per-node cache to read at all (Sec-5b is a live TCP-connect
+probe against a VM's own IP, not part of any node's periodic scan --
+the list variant checks every instance the topology graph knows about,
+concurrently, on every request rather than riding a cache); GET
 /keystone-tokens is Identity-scope, fleet-wide, and likewise computed live
 (Sec-5c has no `hostname` to key a cache row on in the first place -- see
 services/keystone_audit.py's own module docstring for why this is
@@ -49,12 +52,13 @@ topology page, just for a security scan pass instead of an OpenStack
 sync pass.
 """
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from .. import crud, models
+from .. import crud, graph_db, models
 from ..auth import get_current_user, require_admin
 from ..db import get_db
 from ..services import instance_exposure, keystone_audit, security_rbac, security_sandbox
@@ -276,6 +280,47 @@ def get_exposed_ports(hostname: str, current_user: models.User = Depends(get_cur
     return result
 
 
+@router.get("/instance-exposed-ports")
+def list_instance_exposed_ports(current_user: models.User = Depends(get_current_user)):
+    """Phase Sec-5b, fleet-wide table variant. Every instance the
+    topology graph knows about (`graph_db.fetch_all_instances()`, synced
+    by topology_sync.py's regular pass -- not a fresh Nova listing, same
+    "read topology if it's there" rule Sec-5b's IP resolution already
+    follows), each checked with the exact same `instance_exposure.
+    build_instance_exposure_signal` the single-instance endpoint below
+    uses, redacted the same way.
+
+    Genuinely live, not cached -- there is still no per-node scan loop
+    this can ride (see this router's module docstring and services/
+    instance_exposure.py's own docstring). Unlike the single-instance
+    endpoint, this checks every known instance on every request, so the
+    per-instance OpenStack SDK reads and TCP-connect probes run
+    concurrently (one thread per instance) rather than one after
+    another -- otherwise N instances would mean N x up to ~4s (two
+    declared ports at CONNECT_TIMEOUT_SECONDS each) in the worst case,
+    serially, on a single page load.
+    """
+    instances = graph_db.fetch_all_instances()
+
+    def _signal_for(instance: dict) -> dict:
+        return instance_exposure.build_instance_exposure_signal(instance["id"], instance_name=instance["name"])
+
+    if instances:
+        with ThreadPoolExecutor(max_workers=min(len(instances), 16)) as pool:
+            signals = list(pool.map(_signal_for, instances))
+    else:
+        signals = []
+
+    redacted_signals = []
+    for signal in signals:
+        _, redacted = security_rbac.filter_security_response_for_role(
+            "", {"instance_exposure_signal": signal}, "security", current_user.role
+        )
+        redacted_signals.append(redacted["instance_exposure_signal"])
+
+    return {"instances": redacted_signals}
+
+
 @router.get("/instance-exposed-ports/{instance_id}")
 def get_instance_exposed_ports(instance_id: str, current_user: models.User = Depends(get_current_user)):
     """Phase Sec-5b, Instance scope -- an *explicit stretch*, not part of
@@ -294,48 +339,7 @@ def get_instance_exposed_ports(instance_id: str, current_user: models.User = Dep
     found" rather than a 404 -- an honest "couldn't resolve this
     instance", not a guess that it doesn't exist.
     """
-    try:
-        targets = instance_exposure.get_instance_exposure_targets(instance_id)
-    except Exception as exc:
-        logger.warning("instance-exposed-ports: couldn't resolve targets for %s: %s", instance_id, exc)
-        signal = {
-            "has_signal": False,
-            "degraded": True,
-            "detail": "Couldn't reach OpenStack to resolve this instance's IP and security groups.",
-        }
-    else:
-        if targets["reachable_ip"] is None:
-            signal = {
-                "has_signal": False,
-                "degraded": False,
-                "detail": f"No floating or fixed IP found for instance '{instance_id}' -- nothing to probe.",
-                "declared_open": targets["declared_open"],
-            }
-        else:
-            probe = instance_exposure.probe_declared_open_ports(targets["reachable_ip"], targets["declared_open"])
-            has_signal = bool(probe["confirmed"])
-            if has_signal:
-                detail = (
-                    f"{len(probe['confirmed'])} declared-open port(s) on {targets['reachable_ip']} are "
-                    "actually reachable from outside this instance's network."
-                )
-            elif probe["unconfirmed"]:
-                detail = (
-                    f"{len(probe['unconfirmed'])} port(s) are declared open on {targets['reachable_ip']} "
-                    "but nothing answered when probed -- unconfirmed, not reachable right now."
-                )
-            else:
-                detail = f"No world-open security-group rule for instance '{instance_id}' -- nothing to probe."
-            signal = {
-                "has_signal": has_signal,
-                "degraded": False,
-                "detail": detail,
-                "instance_id": instance_id,
-                "instance_name": targets["instance_name"],
-                "reachable_ip": targets["reachable_ip"],
-                "reachable_via": targets["reachable_via"],
-                **probe,
-            }
+    signal = instance_exposure.build_instance_exposure_signal(instance_id)
 
     _, redacted = security_rbac.filter_security_response_for_role(
         "", {"instance_exposure_signal": signal}, "security", current_user.role

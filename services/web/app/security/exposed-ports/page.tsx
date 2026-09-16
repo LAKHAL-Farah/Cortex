@@ -10,7 +10,7 @@ import SecurityHealthBadge from "@/components/SecurityHealthBadge";
 import SecurityRescanButton from "@/components/SecurityRescanButton";
 import SecurityScopeTag from "@/components/SecurityScopeTag";
 import ExposedPortsTable from "@/components/ExposedPortsTable";
-import InstanceExposureLookup from "@/components/InstanceExposureLookup";
+import InstanceExposureTable from "@/components/InstanceExposureTable";
 import { buildExposedPortHostStatuses, flattenExposedPortFindings } from "@/lib/securityStatus";
 
 const fetcher = async (url: string) => {
@@ -31,7 +31,7 @@ const fetcher = async (url: string) => {
  * rule that world-opens a port range, confirmed backed by a real
  * listening socket on that host. Sec-5b below is genuinely
  * Instance-scoped and, unlike Sec-5a, isn't part of any periodic scan --
- * see InstanceExposureLookup's own docstring.
+ * see InstanceExposureTable's own docstring.
  */
 export default function ExposedPortsPage() {
   const { data, error, isLoading, mutate } = useSWR<{ findings: SecurityFinding[] }>(
@@ -134,7 +134,7 @@ export default function ExposedPortsPage() {
         </>
       )}
 
-      <InstanceExposureLookup />
+      <InstanceExposureTable />
     </div>
   );
 }

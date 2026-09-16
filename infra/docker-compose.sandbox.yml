@@ -75,6 +75,21 @@ services:
       # make the eBPF-signal sub-check read real kernel-level data outside
       # the sandbox.
       CORTEX_EBPF_ALERTS_URL: http://tetragon-bridge-sim:9110
+      # Phase Sec-5c: no dedicated keystone-audit collector container in
+      # this sandbox either -- openstack-sim's own POST /v3/auth/tokens
+      # already logs every issuance in-memory, and GET /_sandbox/keystone/
+      # token-log (see its app.py, "Phase Sec-5c" section) reads that log
+      # back out in the exact shape keystone_audit.get_token_issuance_log()
+      # expects. Overrides the http://keystone-audit:9113 production
+      # default (keystone_audit.py), which has no such service in this
+      # sandbox's compose file at all -- without this override every call
+      # fails to resolve the hostname and /security/keystone-tokens always
+      # reports "no collector deployed yet", even though the sandbox has
+      # been serving this route since Phase Sec-5c. Pointing this at a real
+      # CADF-notification consumer or audit-middleware sidecar is the only
+      # change needed to make this read real issuance events outside the
+      # sandbox.
+      CORTEX_KEYSTONE_TOKEN_LOG_URL: http://openstack-sim:5000
 
     volumes:
       - ../ansible-sandbox:/infra/ansible-sandbox

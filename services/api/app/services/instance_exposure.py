@@ -25,9 +25,7 @@ doesn't require deploying anything into every tenant workload.
 Two independent pieces, same split every other module in this package
 uses:
 
-1. `get_instance_exposure_targets(instance_id, conn=None)` -- an
-   OpenStack SDK read (same `security_audit._connect()`/`_rule_to_dict`/
-   `_risk_reason` machinery, reused rather than reimplemented) resolving
+1. `get_instance_exposure_targets(instance_id, conn=None)` -- resolves
    one instance's reachable IP (floating IP preferred, since that's what
    an actual outside attacker would connect to; falls back to the first
    fixed IP if there's no floating IP, since a fixed IP on a network with
@@ -37,12 +35,41 @@ uses:
    world-open rules (`security_audit._risk_reason`, the exact same
    baseline Sec-5a cross-checks against, applied to this one instance's
    rules instead of a node's rolled-up set).
+
+   The IP-resolution half of this (which ports this instance owns, their
+   fixed IPs, and any floating IP already associated with one of them)
+   is read straight out of the already-synced topology graph
+   (`graph_db.fetch_instance_reachability`, topology_sync.py's Phase 6)
+   instead of re-querying Nova/Neutron for facts that graph already has --
+   `conn.compute.servers()` + `conn.network.ports()` + `conn.network.ips()`
+   used to be listed here a second time, on every single lookup, purely to
+   answer a question the topology sync loop had already answered on its
+   own schedule. If the instance hasn't been synced into the graph yet
+   (or genuinely doesn't exist), this is reported as "can't resolve this
+   instance" rather than silently falling back to that duplicate live
+   read -- see `graph_db.fetch_instance_reachability`'s own docstring.
+
+   The security-groups half is NOT read from topology, because there is
+   nothing there to read: topology_sync.py never syncs security groups
+   into the graph at all (a `:Port` vertex has no `security_group_ids`
+   property). So this still does one live OpenStack SDK read -- `conn.
+   network.ports()` -- but now filters it down to just the port ids the
+   topology graph already said belong to this instance, then `conn.
+   network.security_group_rules()` for the groups those ports carry, same
+   `security_audit._rule_to_dict()`/`_risk_reason()` baseline as before.
 2. `probe_declared_open_ports(ip_address, declared_ports, timeout_seconds=2.0)`
    -- a real TCP-connect probe (no mocking, no simulated response baked
    in here) against exactly the ports this instance's own security
    groups already declare open -- not a broad port scan, which would be
    both slow and a genuinely different, more invasive thing than "does
    this declared-open port actually answer".
+3. `build_instance_exposure_signal(instance_id, instance_name=None, conn=None)`
+   -- combines the two above into the same `has_signal`/`degraded`/
+   `detail` envelope every other Security Agent check returns, so
+   routers/security.py's single-instance lookup and its fleet-wide
+   instance table (every instance from `graph_db.fetch_all_instances()`,
+   run concurrently) build identical signals from identical logic rather
+   than two copies of the same shaping code.
 
 Honesty about what's real vs. illustrative in an openstack-sim checkout:
 both pieces are genuine, unmocked code -- the SDK read against
@@ -60,6 +87,7 @@ import logging
 import socket
 import time
 
+from .. import graph_db
 from . import security_audit
 
 logger = logging.getLogger(__name__)
@@ -106,41 +134,55 @@ def get_instance_exposure_targets(instance_id: str, conn=None) -> dict:
     and its own declared-world-open rules -- everything
     `probe_declared_open_ports` below needs, resolved in one pass so the
     caller doesn't have to make two round trips to build one finding.
+
+    IP resolution is read from the topology graph (`graph_db.
+    fetch_instance_reachability`), not a fresh Nova/Neutron listing --
+    see this module's own docstring on why re-querying facts topology_
+    sync.py already synced would be a needless duplicate round trip. If
+    the graph hasn't synced this instance at all (unknown id, or just not
+    reached by a pass yet), that's reported honestly as "unresolved"
+    (reachable_ip=None, declared_open=[]) rather than silently falling
+    back to a second, live read of the same data.
     """
-    conn = conn or _connect()
+    facts = graph_db.fetch_instance_reachability(instance_id)
+    if facts is None:
+        return {
+            "instance_id": instance_id,
+            "instance_name": None,
+            "reachable_ip": None,
+            "reachable_via": None,
+            "declared_open": [],
+        }
 
-    all_servers = {s.id: s for s in conn.compute.servers()}
-    server = all_servers.get(instance_id)
+    floating_ip = facts["floating_ip_address"]
+    fixed_ip_addresses = facts["fixed_ip_addresses"]
+    reachable_ip = floating_ip or (fixed_ip_addresses[0] if fixed_ip_addresses else None)
 
-    all_ports = list(conn.network.ports())
-    instance_ports = [p for p in all_ports if getattr(p, "device_id", None) == instance_id]
+    # Security groups have no topology-graph source at all (see module
+    # docstring) -- the one piece that still needs a live OpenStack SDK
+    # read, scoped to just this instance's own port ids (from the graph,
+    # above) instead of every port in the project.
+    port_ids = set(facts["port_ids"])
+    rule_dicts: list[dict] = []
+    if port_ids:
+        conn = conn or _connect()
+        all_ports = list(conn.network.ports())
+        sg_ids: set[str] = set()
+        for port in all_ports:
+            if getattr(port, "id", None) in port_ids:
+                sg_ids.update(getattr(port, "security_group_ids", None) or [])
 
-    sg_ids: set[str] = set()
-    fixed_ip_addresses: set[str] = set()
-    for port in instance_ports:
-        sg_ids.update(getattr(port, "security_group_ids", None) or [])
-        for fip in getattr(port, "fixed_ips", None) or []:
-            addr = fip.get("ip_address") if isinstance(fip, dict) else None
-            if addr:
-                fixed_ip_addresses.add(addr)
-
-    all_rules = list(conn.network.security_group_rules())
-    rule_dicts = [
-        security_audit._rule_to_dict(r)
-        for r in all_rules
-        if getattr(r, "security_group_id", None) in sg_ids
-    ]
-
-    floating_ip = next(
-        (getattr(f, "floating_ip_address", None) for f in conn.network.ips()
-         if getattr(f, "fixed_ip_address", None) in fixed_ip_addresses),
-        None,
-    )
-    reachable_ip = floating_ip or (sorted(fixed_ip_addresses)[0] if fixed_ip_addresses else None)
+        if sg_ids:
+            all_rules = list(conn.network.security_group_rules())
+            rule_dicts = [
+                security_audit._rule_to_dict(r)
+                for r in all_rules
+                if getattr(r, "security_group_id", None) in sg_ids
+            ]
 
     return {
         "instance_id": instance_id,
-        "instance_name": getattr(server, "name", None) if server is not None else None,
+        "instance_name": facts["instance_name"],
         "reachable_ip": reachable_ip,
         "reachable_via": "floating_ip" if floating_ip else ("fixed_ip" if reachable_ip else None),
         "declared_open": _declared_open_ports(rule_dicts),
@@ -192,3 +234,74 @@ def probe_declared_open_ports(ip_address: str, declared_open: list[dict]) -> dic
         "unconfirmed": unconfirmed,
         "unscoped_rules": [{"reason": u["reason"]} for u in unscoped],
     }
+
+
+def build_instance_exposure_signal(instance_id: str, instance_name: str | None = None, conn=None) -> dict:
+    """One instance's full Sec-5b signal -- resolve targets, probe them,
+    shape the result into the same `has_signal`/`degraded`/`detail`
+    envelope every other check in this security module returns, ready
+    for `security_rbac.filter_security_response_for_role`.
+
+    Pulled out of routers/security.py so GET /instance-exposed-ports/
+    {instance_id} (one instance, on demand) and GET /instance-exposed-
+    ports (every instance from topology, for the fleet-wide table) build
+    the exact same signal shape from the exact same logic -- the router
+    only adds RBAC redaction and, for the list endpoint, running this
+    concurrently across instances.
+
+    `instance_name` is an optional override for callers who already know
+    it (the list endpoint gets it from `graph_db.fetch_all_instances()`
+    and passes it straight through) so this doesn't need a second
+    `fetch_instance_reachability` round trip just to redisplay a name the
+    caller already had.
+    """
+    try:
+        targets = get_instance_exposure_targets(instance_id, conn=conn)
+    except Exception as exc:
+        logger.warning("instance-exposed-ports: couldn't resolve targets for %s: %s", instance_id, exc)
+        return {
+            "instance_id": instance_id,
+            "instance_name": instance_name,
+            "has_signal": False,
+            "degraded": True,
+            "detail": "Couldn't reach OpenStack to resolve this instance's IP and security groups.",
+        }
+
+    resolved_name = targets["instance_name"] or instance_name
+
+    if targets["reachable_ip"] is None:
+        return {
+            "instance_id": instance_id,
+            "instance_name": resolved_name,
+            "has_signal": False,
+            "degraded": False,
+            "detail": f"No floating or fixed IP found for instance '{instance_id}' -- nothing to probe.",
+            "declared_open": targets["declared_open"],
+        }
+
+    probe = probe_declared_open_ports(targets["reachable_ip"], targets["declared_open"])
+    has_signal = bool(probe["confirmed"])
+    if has_signal:
+        detail = (
+            f"{len(probe['confirmed'])} declared-open port(s) on {targets['reachable_ip']} are "
+            "actually reachable from outside this instance's network."
+        )
+    elif probe["unconfirmed"]:
+        detail = (
+            f"{len(probe['unconfirmed'])} port(s) are declared open on {targets['reachable_ip']} "
+            "but nothing answered when probed -- unconfirmed, not reachable right now."
+        )
+    else:
+        detail = f"No world-open security-group rule for instance '{instance_id}' -- nothing to probe."
+
+    return {
+        "has_signal": has_signal,
+        "degraded": False,
+        "detail": detail,
+        "instance_id": instance_id,
+        "instance_name": resolved_name,
+        "reachable_ip": targets["reachable_ip"],
+        "reachable_via": targets["reachable_via"],
+        **probe,
+    }
+
