@@ -264,6 +264,15 @@ def guarded_send(name: str, timeout_seconds: Optional[float] = 20.0):
     not a lost turn.
     """
     breaker = get_breaker(name, timeout_seconds=timeout_seconds)
+    # v0.9: Send-target breaker names are "{agent}.investigate" (see
+    # nodes/anomaly.py's anomaly_investigate_one, nodes/network.py's
+    # network_investigate_one, nodes/security.py's security_investigate_one)
+    # specifically so this degrade path can recover which agent a timed-out
+    # branch belonged to without a second parameter -- IncidentFinding.agent
+    # (state.py) needs it just as much on the failure path as the success
+    # path, since state["agent_results"] mixes all three agents' findings
+    # together from v0.9 on.
+    agent = name.split(".", 1)[0]
 
     def decorator(fn):
         @functools.wraps(fn)
@@ -280,13 +289,14 @@ def guarded_send(name: str, timeout_seconds: Optional[float] = 20.0):
             return {
                 "agent_results": [{
                     "hostname": hostname,
+                    "agent": agent,
                     "agent_result": {
                         "summary": (
                             f"Couldn't investigate {hostname} in time "
                             f"({result.failure['error_type']}); skipped for this incident."
                         ),
                         "confidence": 0.0,
-                        "raw_data": {"hostname": hostname, "error": result.failure},
+                        "raw_data": {"hostname": hostname, "has_signal": False, "error": result.failure},
                     },
                     "failures": [result.failure],
                 }],

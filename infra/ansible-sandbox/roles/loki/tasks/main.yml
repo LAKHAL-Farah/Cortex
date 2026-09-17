@@ -3,6 +3,7 @@
   ansible.builtin.apt:
     name:
       - unzip
+      - curl
       - ca-certificates
     state: present
     update_cache: true
@@ -36,12 +37,29 @@
     - "{{ loki_data_dir }}/rules"
     - "{{ loki_data_dir }}/compactor"
 
-- name: Download Loki archive
+- name: Download Loki archive via curl (get_url's urllib backend truncates on this network)
+  ansible.builtin.command:
+    cmd: >
+      curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 15
+      -o {{ loki_archive_path }}
+      {{ loki_download_url }}
+  args:
+    creates: "{{ loki_archive_path }}"
+
+- name: Fetch published Loki checksums
   ansible.builtin.get_url:
-    url: "{{ loki_download_url }}"
-    dest: "{{ loki_archive_path }}"
+    url: "https://github.com/grafana/loki/releases/download/v{{ loki_version }}/SHA256SUMS"
+    dest: /tmp/loki-SHA256SUMS
     mode: "0644"
-    force: false
+
+- name: Verify Loki archive matches published checksum
+  ansible.builtin.shell: |
+    set -o pipefail
+    grep loki-linux-{{ loki_arch }}.zip /tmp/loki-SHA256SUMS | sha256sum -c -
+  args:
+    chdir: /tmp
+    executable: /bin/bash
+  changed_when: false
 
 - name: Extract Loki binary
   ansible.builtin.unarchive:
@@ -98,5 +116,8 @@
 
 - name: Remove temporary Loki archive
   ansible.builtin.file:
-    path: "{{ loki_archive_path }}"
+    path: "{{ item }}"
     state: absent
+  loop:
+    - "{{ loki_archive_path }}"
+    - /tmp/loki-SHA256SUMS

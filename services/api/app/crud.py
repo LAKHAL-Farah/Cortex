@@ -26,6 +26,105 @@ def get_node_by_hostname(db: Session, hostname: str) -> models.Node | None:
     return db.scalar(select(models.Node).where(models.Node.hostname == hostname))
 
 
+def get_latest_security_group_snapshots(db: Session, hostname: str) -> dict[str, "models.SecurityGroupSnapshot"]:
+    """Latest `security_group_snapshots` row per security_group_id for one
+    hostname -- what `_check_sec_group_diff` (agents/nodes/security.py,
+    Phase Sec-1) diffs the live Neutron read against.
+
+    Plain "fetch every row for this hostname, order by captured_at desc,
+    keep the first per group" done in Python rather than a window-function/
+    DISTINCT ON query: the snapshot job runs at most a few times an hour
+    (see main.py's SECURITY_SNAPSHOT_INTERVAL_SECONDS) and a host rarely
+    has more than a handful of security groups, so this stays cheap --
+    same simplicity-over-cleverness tradeoff baseline_builder.py already
+    makes elsewhere in this codebase.
+    """
+    rows = (
+        db.query(models.SecurityGroupSnapshot)
+        .filter_by(hostname=hostname)
+        .order_by(models.SecurityGroupSnapshot.captured_at.desc())
+        .all()
+    )
+    latest: dict[str, models.SecurityGroupSnapshot] = {}
+    for row in rows:
+        latest.setdefault(row.security_group_id, row)
+    return latest
+
+
+def record_security_scan_run(
+    db: Session,
+    *,
+    status: str,
+    started_at: datetime,
+    finished_at: datetime,
+    summary: dict | None = None,
+    error: str | None = None,
+) -> models.SecurityScanRun:
+    """Appends one row to `security_scan_runs` after every pass of
+    services/security_scan_cache.py's `run_security_scan` -- success or
+    failure -- so GET /api/v1/security/health has real run history to
+    answer from, the same reasoning record_topology_sync_run already
+    gives for the topology sync loop.
+    """
+    run = models.SecurityScanRun(
+        status=status, summary=summary, error=error, started_at=started_at, finished_at=finished_at,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def get_latest_security_scan_run(db: Session) -> models.SecurityScanRun | None:
+    return db.scalar(
+        select(models.SecurityScanRun).order_by(models.SecurityScanRun.finished_at.desc()).limit(1)
+    )
+
+
+def upsert_security_finding_cache(
+    db: Session,
+    *,
+    hostname: str,
+    role: str,
+    confidence: float | None,
+    has_signal: bool,
+    degraded: bool,
+    answer: str,
+    raw_data: dict,
+) -> models.SecurityFindingCache:
+    """Writes (or overwrites) the one cached finding row for `hostname` --
+    see models.SecurityFindingCache's docstring for why this is an upsert
+    rather than an append. Called once per known node per
+    run_security_scan pass, and once on-demand whenever a GET falls back
+    to a live check for a host with no cached row yet (a freshly-added
+    node the periodic pass hasn't reached).
+    """
+    row = db.get(models.SecurityFindingCache, hostname)
+    if row is None:
+        row = models.SecurityFindingCache(hostname=hostname)
+        db.add(row)
+    row.role = role
+    row.confidence = confidence
+    row.has_signal = has_signal
+    row.degraded = degraded
+    row.answer = answer
+    row.raw_data = raw_data
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def list_security_finding_cache(db: Session) -> list[models.SecurityFindingCache]:
+    return db.scalars(
+        select(models.SecurityFindingCache).order_by(models.SecurityFindingCache.hostname)
+    ).all()
+
+
+def get_security_finding_cache(db: Session, hostname: str) -> models.SecurityFindingCache | None:
+    return db.get(models.SecurityFindingCache, hostname)
+
+
 def list_open_anomaly_flags(db: Session, hostname: str) -> list[models.AnomalyFlag]:
     """Currently-open (non-"normal") AnomalyFlag rows for one host.
 
@@ -323,6 +422,9 @@ def create_agent_trace(
     steps: list,
     final_answer: str,
     duration_ms: float,
+    user_id: uuid.UUID | None = None,
+    user_role: str | None = None,
+    security_involved: bool = False,
 ) -> models.AgentTrace:
     trace = models.AgentTrace(
         id=trace_id,
@@ -334,6 +436,9 @@ def create_agent_trace(
         steps=steps,
         final_answer=final_answer,
         duration_ms=duration_ms,
+        user_id=user_id,
+        user_role=user_role,
+        security_involved=security_involved,
     )
     db.add(trace)
     db.commit()
@@ -401,3 +506,38 @@ def agent_trace_stats(db: Session, *, since: datetime) -> dict:
         "degraded_rate": round(degraded_count / total, 4) if total else 0.0,
         "critic_flagged_rate": round(flagged_count / total, 4) if total else 0.0,
     }
+
+
+def list_security_audit_log(
+    db: Session, *, since: datetime, limit: int = 200
+) -> list[tuple[models.AgentTrace, str | None]]:
+    """Phase Sec-6: every trace where the Security Agent contributed a
+    finding (`security_involved`, computed once at write time -- see
+    models.AgentTrace), newest first, joined against `users` for the
+    asker's username. This is the evidence trail §7.11 (Gouvernance &
+    Garde-fous) asks for: who asked, under what role, and (derivable by
+    the caller from `user_role`/`security_involved` via the exact same
+    `security_rbac.filter_security_response_for_role` rule already gates
+    live answers with) whether the answer they got back was redacted --
+    see routers/security.py's `list_security_audit_log` endpoint, which
+    is the one place that actually applies that rule to these rows rather
+    than re-deriving "involved" from scratch.
+
+    A left outer join, not an inner one: `user_id` is nullable (a
+    pre-migration row, or a stateless/API caller with no session -- see
+    models.AgentTrace's own docstring), and a callerless security-flavored
+    turn is still something the audit trail should surface, just with no
+    username to show.
+
+    Indexed on `security_involved` (this query's whole filter) and
+    `created_at` (the ordering) -- no separate composite index yet; revisit
+    if this table's volume ever makes that combination worth it.
+    """
+    rows = db.execute(
+        select(models.AgentTrace, models.User.username)
+        .outerjoin(models.User, models.AgentTrace.user_id == models.User.id)
+        .where(models.AgentTrace.security_involved.is_(True), models.AgentTrace.created_at >= since)
+        .order_by(models.AgentTrace.created_at.desc())
+        .limit(limit)
+    ).all()
+    return [(row.AgentTrace, row.username) for row in rows]

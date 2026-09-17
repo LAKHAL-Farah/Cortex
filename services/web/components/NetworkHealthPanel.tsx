@@ -165,6 +165,17 @@ export default function NetworkHealthPanel() {
   const color = STATUS_COLOR[data.status];
   const soft = STATUS_SOFT[data.status];
   const anomalyCount = data.routers_down.length + data.floating_ips_orphaned.length + data.ports_down.length;
+  // The denominator here is every row in the `nodes` table (DB-backed,
+  // services/api/app/routers/nodes.py), not the four hosts in the
+  // checked-in sandbox seed data (infra/prometheus/file_sd/nodes.json,
+  // infra/ansible-sandbox/inventory/hosts.ini). node_seeder.py only ever
+  // inserts from that seed file once, on first boot against an empty
+  // table -- so if this ever reads e.g. "4/5" against this sandbox, the
+  // 5th row was added afterward via POST /api/v1/nodes (the "add node"
+  // flow) or a direct DB insert, not a gap in the tracked seed data.
+  // GET /api/v1/nodes shows exactly which row that is before assuming
+  // anything about it (Phase 0, security scope-clarification roadmap,
+  // §4 item 3).
   const reachableCount = data.latencies.filter((entry) => entry.reachable).length;
   const noAnomalies = anomalyCount === 0;
   const graphUnavailable = !data.graph_available;

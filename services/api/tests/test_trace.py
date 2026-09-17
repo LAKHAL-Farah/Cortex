@@ -152,15 +152,23 @@ def test_summarize_handles_no_events():
 # --------------------------------------------------------------------
 
 def test_agent_event_detail_carries_the_same_summary_the_answer_is_built_from(monkeypatch):
-    """The trace's `summary` for an agent node is not a second, diverging
-    description -- it's the exact AgentResult.summary compose.py/critic.py
-    already consume at the point that node ran, just also surfaced
-    per-step for the UI. (This flag is severe enough to chain into
-    openstack_expert -- see should_trigger_after_anomaly -- so the
-    *final* result["agent_result"] ends up being the expert agent's,
-    not anomaly's; the anomaly node's own trace event is what still
-    carries anomaly's own summary, which is the thing being checked
-    here.)"""
+    """The trace's `summary` for the "anomaly" step (recorded on
+    anomaly_arbitrate, see graph.py's v0.8 note on why that name stays)
+    is arbitration's own real merged narrative, not a placeholder -- v0.9
+    changed *what* that narrative typically is, since every anomaly-routed
+    investigation now fans out to Network and Security too (see graph.py's
+    `_fan_out_to_investigate`), so even this single-node case has three
+    agents' findings for compute-02, and arbitration's own cross-agent
+    narrative (not bare anomaly-only prose) is what ends up recorded here.
+    (This particular fixture's flag is severe enough to also chain into
+    openstack_expert -- see should_trigger_after_anomaly -- so
+    `result["agent_result"]` itself ends up being the *expert* agent's
+    walkthrough by the time the graph finishes, recorded under its own
+    "openstack_expert" trace step; the "anomaly" step is what still
+    carries arbitration's own cross-agent narrative, which is what's
+    checked here. See test_cross_agent_arbitration.py for dedicated,
+    unchained coverage of that narrative's own content.)
+    """
     _route_to(monkeypatch, "anomaly")
     monkeypatch.setattr(anomaly.crud, "list_open_anomaly_flags", lambda db, hostname: [_flag()])
 
@@ -168,7 +176,7 @@ def test_agent_event_detail_carries_the_same_summary_the_answer_is_built_from(mo
 
     anomaly_event = next(e for e in result["trace_events"] if e["node"] == "anomaly")
     assert "compute-02" in anomaly_event["detail"]["summary"]
-    assert "cpu" in anomaly_event["detail"]["summary"].lower()
+    assert "anomaly agent" in anomaly_event["detail"]["summary"]
 
 
 def test_openstack_expert_event_records_which_upstream_agent_triggered_it(monkeypatch):

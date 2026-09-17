@@ -66,7 +66,21 @@ def _safe_detail(state: dict, node: str) -> dict:
     openstack_expert specifically, `chained_from` -- which upstream agent's
     finding (if any) triggered this walkthrough, so the UI can render
     "network agent found X -> chained into openstack_expert" as one visible
-    line instead of two unrelated-looking steps."""
+    line instead of two unrelated-looking steps.
+
+    v0.9 adds `contributing_agents` for the "anomaly" node specifically
+    (arbitrate's join point, see nodes/anomaly.py's `anomaly_arbitrate`) --
+    every agent name that appears anywhere in this turn's `agent_results`
+    fan-out, not just whichever one arbitration picked as primary. This
+    exists for exactly one reason: routers/agents.py's RBAC filter needs
+    an exact, structured way to know "did Security contribute to this
+    step's narrative at all" (arbitration's own free-form summary can
+    mention a corroborating agent's specifics even when it isn't the
+    primary theory) without resorting to string-searching already-
+    persisted prose for the word "security", which is exactly the
+    unreliable heuristic a hand-written narrative or a differently-phrased
+    LLM response could silently defeat.
+    """
     detail: dict = {}
     if node == "router":
         detail["intent"] = state.get("intent")
@@ -80,6 +94,10 @@ def _safe_detail(state: dict, node: str) -> dict:
             detail["summary"] = result.get("summary")
         if node == "openstack_expert":
             detail["chained_from"] = _last_agent_node(state.get("trace_events") or [], before=node)
+        if node == "anomaly":
+            findings = state.get("agent_results") or []
+            if findings:
+                detail["contributing_agents"] = sorted({f.get("agent", "anomaly") for f in findings})
     if state.get("error"):
         detail["error"] = state["error"]
     return detail

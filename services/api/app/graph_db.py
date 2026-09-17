@@ -394,3 +394,91 @@ def fetch_network_anomalies() -> dict:
                 for record in ports_down
             ],
         }
+
+
+def fetch_instance_reachability(instance_id: str) -> dict | None:
+    """One :Instance's own :Port(s) (id + fixed_ip_address) and the
+    :Node it RUNS_ON, plus the :FloatingIP (if any) already associated
+    with one of those ports' fixed IPs -- everything services/
+    instance_exposure.get_instance_exposure_targets needs to resolve
+    Sec-5b's reachable IP (floating preferred, else first fixed) *without*
+    re-querying Nova/Neutron for facts topology_sync.py's Phase 6 already
+    synced into this graph (Instance/Port vertices, HAS_PORT/RUNS_ON
+    edges, and FloatingIP.fixed_ip_address -- see that module's own
+    docstring). Same plain-pattern-comprehension convention as every
+    other function in this file, for the same reason.
+
+    Returns None if no :Instance with this id exists in the graph yet --
+    not yet reached by a sync pass, or genuinely doesn't exist. The
+    caller treats that as "can't resolve this instance from topology" and
+    degrades honestly rather than falling back to a second, duplicate
+    OpenStack SDK read for data this graph is supposed to already have.
+
+    Deliberately silent on security groups: topology_sync.py never syncs
+    security groups into this graph at all (a :Port vertex carries no
+    security_group_ids property -- see that module's own graph_ports
+    dict), so there is no topology source for "which rules apply to this
+    instance" to read from. That half of Sec-5b's targets stays exactly
+    what it was -- a live OpenStack SDK read, scoped to just this
+    instance's own port ids (returned here) rather than every port in the
+    project.
+    """
+    with driver.session() as session:
+        result = session.run(
+            """
+            MATCH (i:Instance {id: $instance_id})
+            RETURN i {.*} AS instance,
+                   [(i)-[:HAS_PORT]->(p:Port) | p {.*}] AS ports,
+                   head([(i)-[:RUNS_ON]->(n:Node) | n.id]) AS hypervisor_hostname
+            """,
+            instance_id=instance_id,
+        )
+        record = result.single()
+        if record is None:
+            return None
+
+        ports = [p for p in record["ports"] if p.get("id")]
+        fixed_ip_addresses = sorted({p["fixed_ip_address"] for p in ports if p.get("fixed_ip_address")})
+
+        floating_ip_address = None
+        if fixed_ip_addresses:
+            fip_result = session.run(
+                """
+                UNWIND $fixed_ips AS fixed_ip
+                MATCH (f:FloatingIP {fixed_ip_address: fixed_ip})
+                RETURN f.floating_ip_address AS floating_ip_address
+                LIMIT 1
+                """,
+                fixed_ips=fixed_ip_addresses,
+            )
+            fip_record = fip_result.single()
+            if fip_record is not None:
+                floating_ip_address = fip_record["floating_ip_address"]
+
+        return {
+            "instance_id": instance_id,
+            "instance_name": record["instance"].get("name"),
+            "hypervisor_hostname": record["hypervisor_hostname"],
+            "port_ids": [p["id"] for p in ports],
+            "fixed_ip_addresses": fixed_ip_addresses,
+            "floating_ip_address": floating_ip_address,
+        }
+
+
+def fetch_all_instances() -> list[dict]:
+    """Every :Instance vertex's id + name, straight from the topology
+    graph -- what services/instance_exposure.py's fleet-wide instance-
+    reachability table needs to know *which* instances to check at all,
+    without a separate live `conn.compute.servers()` listing call (the
+    graph already has this from topology_sync.py's regular sync pass, the
+    same reasoning as `fetch_instance_reachability` above). Sorted by
+    name for a stable table order across repeated reads.
+    """
+    with driver.session() as session:
+        result = session.run("MATCH (i:Instance) RETURN i {.*} AS instance")
+        instances = [
+            {"id": record["instance"]["id"], "name": record["instance"].get("name")}
+            for record in result
+        ]
+        return sorted(instances, key=lambda i: (i["name"] or "", i["id"]))
+

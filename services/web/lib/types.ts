@@ -456,7 +456,7 @@ export interface ChatSource {
 // actually return, used by components/CopilotAgentPanels.tsx to pick a
 // renderer.
 
-export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly" | "openstack_expert" | "network";
+export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly" | "openstack_expert" | "network" | "security";
 
 // Same live-status shape as LiveMetrics above, just named for clarity at
 // the copilot call site.
@@ -541,7 +541,37 @@ export interface AgentAnomalyLogSignal {
   entries: AgentAnomalyLogEntry[];
 }
 
-export interface AgentAnomalyData {
+// v0.9 (Phase 5): fields anomaly_arbitrate (nodes/anomaly.py) adds on top
+// of whichever agent's own raw_data shape won that turn's cross-agent
+// arbitration -- see that function's own docstring for the ranking rule.
+// Every one of AgentAnomalyData/AgentNetworkData/AgentSecurityData can
+// carry these, since arbitration can pick any of the three as primary.
+export interface CrossAgentFinding {
+  hostname: string;
+  agent: AgentName | string;
+  confidence?: number;
+  summary?: string;
+  has_signal?: boolean;
+  // v0.9 RBAC: present (with `summary`/other specifics stripped) when
+  // this entry belongs to the Security agent and the current user isn't
+  // an admin -- see routers/agents.py's `_redact_security_raw_data`.
+  restricted?: boolean;
+}
+
+export interface CrossAgentArbitrationFields {
+  // Which agent's finding this raw_data shape actually belongs to --
+  // present whenever this turn went through arbitration at all (i.e. a
+  // broad incident question, not a single agent answering directly).
+  investigating_agent?: AgentName | string;
+  // Other agent(s) that also investigated this same host, most-confident
+  // first -- present only when more than one agent found something here.
+  cross_agent_findings?: CrossAgentFinding[];
+  // One entry per host in scope, this host's own winning theory --
+  // present only when more than one host was investigated.
+  multi_node_findings?: CrossAgentFinding[];
+}
+
+export interface AgentAnomalyData extends CrossAgentArbitrationFields {
   hostname: string;
   role: string;
   metric_signal: AgentAnomalyMetricSignal;
@@ -654,7 +684,7 @@ export interface AgentNetworkNeutronSignal extends AgentNetworkSignal {
   bad_instances?: NeutronInstanceStatus[];
 }
 
-export interface AgentNetworkData {
+export interface AgentNetworkData extends CrossAgentArbitrationFields {
   scope: "node" | "network" | "subnet" | "instance";
   // scope === "node"
   hostname?: string;
@@ -669,6 +699,279 @@ export interface AgentNetworkData {
   };
 }
 
+// Security agent (v0.9, services/api/app/agents/nodes/security.py) --
+// mirrors _investigate's raw_data exactly: four near-independent
+// sub-checks, each with the same {has_signal, degraded, detail} shape
+// every "signal" dict in this codebase uses, plus its own extra evidence
+// field. The detail fields below are typed optional because a non-admin
+// ("viewer") account receives each sub-signal collapsed to just
+// {has_signal, degraded, restricted: true} -- see routers/agents.py's
+// `_redact_security_raw_data` -- not because the backend ever omits them
+// for an admin caller.
+export interface AgentSecuritySignal {
+  has_signal: boolean;
+  degraded?: boolean;
+  detail?: string;
+  restricted?: boolean;
+}
+
+export interface AgentAuthAnomalySignal extends AgentSecuritySignal {
+  entries?: { ts: number; line: string; service: string | null }[];
+}
+
+export interface AgentSecGroupRule {
+  security_group: string;
+  reason: string;
+  rule: {
+    direction: string;
+    protocol: string | null;
+    port_range_min: number | null;
+    port_range_max: number | null;
+    remote_ip_prefix: string | null;
+  };
+}
+
+export interface AgentSecGroupDriftEntry {
+  security_group: string;
+  security_group_id: string;
+  previous_captured_at: string;
+  added_rules: AgentSecGroupRule["rule"][];
+  removed_rules: AgentSecGroupRule["rule"][];
+}
+
+// Phase Sec-3: one security group actually attached to a host's
+// instance(s), with its full rule list -- services/security_audit.py's
+// `get_node_security_groups` always computed this (as `data.
+// security_groups`), but no page rendered it until now; everything below
+// risky_rules/drift only ever showed aggregate counts, never "here's
+// every group actually on this node right now".
+export interface AgentSecGroupInfo {
+  id: string;
+  name: string;
+  rules: AgentSecGroupRule["rule"][];
+  // Names of every instance hosted on this node whose port actually
+  // carries this group -- a group here is already a union across every
+  // VM scheduled onto the hypervisor (see get_node_security_groups'
+  // docstring), so this is what tells a viewer whether a group belongs
+  // to one VM or several.
+  instances?: string[];
+}
+
+export interface AgentSecGroupSignal extends AgentSecuritySignal {
+  risky_rules?: AgentSecGroupRule[];
+  // Phase Sec-1: this pass's live rules diffed against the most recent
+  // stored security_group_snapshots row -- present alongside risky_rules
+  // (a rule can show up here even when it isn't risky by the static
+  // baseline, e.g. a newly-opened internal-only port). Optional for the
+  // same reason every other evidence field here is: a viewer account
+  // never receives it (see AgentSecuritySignal's own docstring).
+  drift?: AgentSecGroupDriftEntry[];
+  // Phase Sec-3: the full current-groups-per-node listing
+  // security_audit.get_node_security_groups already returns as `data` --
+  // an admin gets it here, a viewer never does (same restriction as
+  // risky_rules/drift above).
+  data?: {
+    hostname: string;
+    security_groups: AgentSecGroupInfo[];
+    risky_rules: AgentSecGroupRule[];
+  } | null;
+  // Phase Sec-3: when this particular signal was last computed --
+  // present on the dedicated GET /api/v1/security/groups/{hostname}
+  // response (routers/security.py), not on the per-signal fields nested
+  // inside a fleet-wide GET /findings response.
+  scanned_at?: string;
+}
+
+export interface AgentCveMatch {
+  cve_id: string;
+  severity: "critical" | "high" | "medium" | "low" | string;
+  package: string;
+  installed_version: string;
+  fixed_version: string;
+  description: string;
+}
+
+export interface AgentCveSignal extends AgentSecuritySignal {
+  matches?: AgentCveMatch[];
+}
+
+export interface AgentEbpfAlert {
+  rule: string;
+  priority: string;
+  output: string;
+  time: string;
+}
+
+export interface AgentEbpfSignal extends AgentSecuritySignal {
+  alerts?: AgentEbpfAlert[];
+}
+
+// Phase Sec-5a: one (world-open security-group rule) x (really-listening
+// port) pair on a node -- see services/exposed_ports.py's module
+// docstring for why only this intersection is ever reported, never a
+// listening port alone (not reachable, Neutron default-denies) or a
+// risky rule alone (that's sec_group_signal's own job -- this is what
+// confirms one of those rules is backed by something real).
+export interface AgentExposedPortMismatch {
+  port: number;
+  protocol: string | null;
+  process: string | null;
+  security_group: string;
+  reason: string;
+}
+
+export interface AgentExposedPortSignal extends AgentSecuritySignal {
+  mismatches?: AgentExposedPortMismatch[];
+  // Every port this host reported listening on, matched or not -- lets a
+  // page show "checked, nothing exposed" instead of an empty table being
+  // ambiguous with "never checked".
+  listening_ports?: { port: number; protocol: string | null; process: string | null }[];
+}
+
+export interface AgentSecurityData extends CrossAgentArbitrationFields {
+  hostname: string;
+  role: string;
+  has_signal: boolean;
+  auth_signal: AgentAuthAnomalySignal;
+  sec_group_signal: AgentSecGroupSignal;
+  cve_signal: AgentCveSignal;
+  exposed_port_signal: AgentExposedPortSignal;
+  ebpf_signal: AgentEbpfSignal;
+}
+
+// Phase Sec-2 (routers/security.py) -- the shape GET /api/v1/security/
+// findings and /findings/{hostname} return: the same AgentSecurityData
+// raw_data + confidence a chat answer would carry for this host, just
+// without the LLM-narrated `summary` (routers/security.py calls
+// `_investigate(..., narrate=False)`, so `answer` is nodes/security.py's
+// own deterministic fallback sentence, or the shared RESTRICTED_NOTICE
+// for a non-admin -- see services/security_rbac.py).
+export interface SecurityFinding {
+  hostname: string;
+  role: string;
+  confidence: number | null;
+  has_signal: boolean;
+  degraded: boolean;
+  answer: string;
+  raw_data: AgentSecurityData;
+  // Phase Sec-3: when `security_finding_cache` last refreshed this host
+  // (services/security_scan_cache.py) -- how GET /findings can now
+  // return instantly instead of scanning live on every request.
+  scanned_at: string;
+}
+
+export interface SecurityStatus {
+  status: "ok" | "degraded";
+  has_signal: boolean;
+  degraded: boolean;
+  node_count: number;
+  // Phase Sec-3 additions -- see routers/security.py's GET /status.
+  last_scan_at: string | null;
+  sandbox_mode: boolean;
+}
+
+// Phase Sec-3 -- same run-history shape TopologySyncRun/TopologyHealth
+// already give the topology page, backing GET /api/v1/security/health
+// and the SecurityHealthBadge/SecurityRescanButton components.
+export interface SecurityScanRun {
+  status: "ok" | "degraded" | "failed";
+  summary: Record<string, unknown> | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface SecurityHealth {
+  status: "ok" | "degraded" | "failed" | "unknown";
+  last_run: SecurityScanRun | null;
+}
+
+// --- Phase Sec-5b: GET /api/v1/security/instance-exposed-ports/{id} -----
+//
+// Instance scope, not Node -- see services/instance_exposure.py's own
+// module docstring for why this is a live TCP-connect probe against one
+// VM's own IP, computed on demand, not part of any node's periodic scan
+// (so, unlike everything else in this file, there's no `scanned_at` and
+// no per-host list -- one instance at a time, by id).
+export interface InstanceExposurePort {
+  port: number;
+  reason: string;
+}
+
+export interface InstanceExposureResult {
+  has_signal: boolean;
+  degraded?: boolean;
+  detail?: string;
+  restricted?: boolean;
+  instance_id?: string;
+  instance_name?: string | null;
+  reachable_ip?: string | null;
+  reachable_via?: "floating_ip" | "fixed_ip" | null;
+  ip_address?: string;
+  confirmed?: InstanceExposurePort[];
+  unconfirmed?: InstanceExposurePort[];
+  unscoped_rules?: { reason: string }[];
+  declared_open?: { port: number | null; reason: string }[];
+}
+
+// --- Phase Sec-5c: GET /api/v1/security/keystone-tokens ------------------
+//
+// Identity scope, fleet/project-wide -- see services/keystone_audit.py's
+// own module docstring for why this deliberately has no `hostname` at
+// all, unlike every other signal in this file.
+export interface KeystoneRapidReissueEntry {
+  username: string;
+  count: number;
+  window_seconds: number;
+  first_issued_at: string;
+}
+
+export interface KeystoneUnexpectedIpEntry {
+  username: string | null;
+  source_ip: string;
+  issued_at: string;
+}
+
+export interface KeystoneLongLivedEntry {
+  username: string | null;
+  ttl_seconds: number;
+  issued_at: string;
+  expires_at: string;
+}
+
+export interface KeystoneTokenSignal {
+  has_signal: boolean;
+  degraded?: boolean;
+  detail?: string;
+  restricted?: boolean;
+  rapid_reissue?: KeystoneRapidReissueEntry[];
+  unexpected_ip?: KeystoneUnexpectedIpEntry[];
+  unexpected_ip_checked?: boolean;
+  long_lived?: KeystoneLongLivedEntry[];
+  event_count?: number;
+}
+
+/** Phase Sec-6: one row of GET /api/security/audit-log -- mirrors
+ * schemas.SecurityAuditLogEntry (services/api/app/schemas.py) exactly.
+ * `redacted` is computed server-side from the same rule
+ * filter_security_response_for_role already applies live
+ * (services/security_rbac.py), not re-derived here.
+ */
+export interface SecurityAuditLogEntry {
+  trace_id: string;
+  created_at: string;
+  user_query: string;
+  username: string | null;
+  user_role: string | null;
+  target_agent: string | null;
+  redacted: boolean;
+}
+
+export interface SecurityAuditLogResponse {
+  since: string;
+  entries: SecurityAuditLogEntry[];
+}
+
 export type AgentRawData =
   | AgentMonitoringData
   | AgentPredictionData
@@ -676,6 +979,7 @@ export type AgentRawData =
   | AgentAnomalyData
   | AgentExpertData
   | AgentNetworkData
+  | AgentSecurityData
   | Record<string, unknown>;
 
 // v0.7 (adr-0009) trace step -- one per node the graph actually visited

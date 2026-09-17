@@ -440,6 +440,40 @@ class AgentTrace(Base):
     final_answer: Mapped[str] = mapped_column(Text, nullable=False)
     duration_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
+    # Phase Sec-6: who asked, and under what role, so GET
+    # /api/v1/security/audit-log (routers/security.py) can show "who asked
+    # a security question, what role they had, and whether the answer was
+    # redacted" -- the RBAC/redaction story made visible, not a new
+    # gating mechanism. Nullable because rows written before this column
+    # existed have no way to backfill an asker (and a stateless/API caller
+    # with no session still runs today, see routers/agents.py's own
+    # docstring on conversation_id being optional) -- an old or callerless
+    # row just can't appear in the audit log's per-user filtering, it
+    # isn't backfilled with a fake owner.
+    #
+    # `user_role` is a snapshot of `User.role` *at request time*, not a
+    # live join to the current `users` row: this table is an audit trail,
+    # and a promotion/demotion after the fact shouldn't rewrite what
+    # actually happened on a past turn -- the same reasoning
+    # critic_verdict_status above already applies to freezing a fact onto
+    # the row instead of re-deriving it later.
+    #
+    # `security_involved` is computed once, at write time, from the exact
+    # same `security_rbac.security_agent_involved(target_agent, raw_data)`
+    # call routers/agents.py already makes for RBAC filtering (see that
+    # router) -- persisted here instead of re-derived, because raw_data
+    # itself isn't a column on this table (see `steps` above) and
+    # GET /trace/{trace_id}'s own fallback (reconstructing involvement
+    # from `steps`' node names/contributing_agents) is a heuristic worth
+    # avoiding for an audit surface when the real, raw_data-based answer
+    # was available for free at write time. Indexed: the audit log's whole
+    # query shape is "security-involved rows only".
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    user_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    security_involved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
@@ -484,6 +518,117 @@ class AgentSessionMemory(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class SecurityGroupSnapshot(Base):
+    """Phase Sec-1: one row per (hostname, security_group_id) captured at
+    `captured_at` -- the actual "did this change since we last looked"
+    memory `_check_sec_group_diff` (agents/nodes/security.py) needs and
+    didn't have before. Same shape family as `Baseline`/`RoleBaseline`
+    (keyed columns + a captured/updated timestamp + a serialized payload),
+    but append-only like `TopologySyncRun` rather than upserted in place --
+    a diff needs the *previous* state to still exist after the current one
+    is captured, so overwriting a row in place the way Baseline does would
+    destroy the exact thing this table exists to keep.
+
+    `rules` is the same list-of-dicts shape `security_audit._rule_to_dict`
+    already produces (id, security_group_id, direction, ethertype,
+    protocol, port_range_min/max, remote_ip_prefix) -- stored verbatim
+    rather than normalized into their own columns/table, since nothing
+    reads a single rule field independently of its group; the whole
+    rule-set is always read and diffed together.
+
+    Not unique-constrained on (hostname, security_group_id): a fresh row
+    is written every snapshot pass on purpose (see
+    security_snapshot_builder.py), and `crud.get_latest_security_group_snapshots`
+    is what picks the newest one per group back out.
+    """
+    __tablename__ = "security_group_snapshots"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hostname = Column(String, nullable=False, index=True)
+    security_group_id = Column(String, nullable=False, index=True)
+    security_group_name = Column(String, nullable=True)
+    rules = Column(JSON, nullable=False)
+    captured_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class SecurityScanRun(Base):
+    """One row per completed pass of the Security Agent's fleet-wide scan
+    (services/security_scan_cache.py's `run_security_scan`) -- the exact
+    same "append-only run history backs a /health endpoint" shape
+    `TopologySyncRun` already established for the OpenStack/Prometheus
+    sync loops (see that model's own docstring for the full reasoning).
+
+    Added alongside `SecurityFindingCache` to fix a real gap Phase Sec-2
+    left open: GET /api/v1/security/findings used to call
+    `agents/nodes/security.py::_investigate` live, once per known node,
+    on *every* request -- so `/security` and `/security/security-groups`
+    never rendered instantly, they blocked on a fresh Loki/Neutron/CVE-
+    feed/eBPF round trip per host per page load. Now a periodic pass
+    (main.py's SECURITY_SCAN_INTERVAL_SECONDS) does that live work in the
+    background and this table records each pass's outcome, the same way
+    a topology sync pass does -- so a dashboard badge can show "scanned
+    Xm ago" instead of guessing from whatever's sitting in the cache.
+
+    One column intentionally NOT copied from TopologySyncRun:
+    `sync_type` -- there's only ever one kind of security scan pass, so a
+    discriminator column would always hold the same value.
+    """
+    __tablename__ = "security_scan_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # "ok": every known node's scan completed without a degraded sub-check.
+    # "degraded": ran, but at least one node had a sub-check fail/time out.
+    # "failed": the pass itself raised before producing any summary.
+    status = Column(String, nullable=False)
+    summary = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=False)
+    finished_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ok','degraded','failed')",
+            name="ck_security_scan_runs_status_allowed",
+        ),
+    )
+
+
+class SecurityFindingCache(Base):
+    """One upserted-in-place row per known node -- the Security Agent's
+    full (unredacted) finding from the most recent scan pass, read by
+    routers/security.py's GET /findings, /findings/{hostname}, and
+    /groups/{hostname} instead of each of those calling `_investigate`
+    live on every request (see SecurityScanRun's docstring above for why
+    that mattered).
+
+    Unlike `SecurityGroupSnapshot`/`TopologySyncRun`, this is deliberately
+    upserted rather than append-only: nothing here needs "what did this
+    look like an hour ago" history of its own (the finding's own
+    `sec_group_signal.drift` field already carries that, sourced from
+    `SecurityGroupSnapshot`) -- this table only ever needs to answer "what
+    does the fleet look like right now", so one row per hostname that
+    gets overwritten every pass keeps it cheap to read and trivially
+    correct (no "which is the latest row for this host" query needed).
+
+    `raw_data` stores the full, unredacted `AgentResult["raw_data"]`
+    (auth_signal/sec_group_signal/cve_signal/ebpf_signal, every field) --
+    RBAC redaction is applied at *read* time against the caller's own
+    role (see services/security_rbac.py), same as it always was, so an
+    admin and a viewer polling the same cached row still see different
+    things without needing two differently-redacted copies stored.
+    """
+    __tablename__ = "security_finding_cache"
+
+    hostname = Column(String, primary_key=True)
+    role = Column(String, nullable=False)
+    confidence = Column(Float, nullable=True)
+    has_signal = Column(Boolean, nullable=False, default=False)
+    degraded = Column(Boolean, nullable=False, default=False)
+    answer = Column(Text, nullable=False, default="")
+    raw_data = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class RoleBaseline(Base):

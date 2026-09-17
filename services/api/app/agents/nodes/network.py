@@ -96,8 +96,8 @@ from ...services.llm_client import LLMConfigError, get_chat_model
 from ...services.metrics_collector import collect_network_metrics
 from ..network_resolver import KnownNetworkEntity, resolve_network_entity
 from ..node_resolver import resolve_node
-from ..resilience import get_breaker
-from ..state import CortexState
+from ..resilience import get_breaker, guarded_send
+from ..state import CortexState, IncidentFinding
 
 logger = logging.getLogger(__name__)
 
@@ -492,30 +492,86 @@ def _narrate_entity(query: str, entity: KnownNetworkEntity, entity_signal: dict)
         return fallback
 
 
-def _run_node_scope(state: CortexState, node) -> CortexState:
+def _investigate(query: str, node) -> tuple[dict, list]:
+    """Pure node-scope investigation -- (AgentResult, embedded_failures),
+    no graph state touched. Mirrors nodes/anomaly.py's `_investigate` /
+    nodes/security.py's `_investigate` exactly, for the same reason: v0.9
+    adds `network_investigate_one`, a fan-out Send target (see graph.py)
+    that needs this same node-scope pipeline without a full CortexState to
+    mutate (see resilience.guarded_send's docstring on why a Send target
+    works off a narrow payload, not the graph's full state) -- kept in
+    exactly one place so the standalone leaf path (_run_node_scope below)
+    and the fan-out path can never drift apart, same rationale anomaly.py
+    already gives for its own `_investigate`.
+    """
     metric_signal = _check_node_metrics(node)
     neutron_signal = _check_neutron(node)
 
-    summary = _narrate(state["user_query"], node, metric_signal, neutron_signal)
+    summary = _narrate(query, node, metric_signal, neutron_signal)
     confidence = _confidence(neutron_signal)
 
-    state["agent_result"] = {
+    agent_result = {
         "summary": summary,
         "confidence": confidence,
         "raw_data": {
             "scope": "node",
             "hostname": node["hostname"],
             "role": node["role"],
+            # v0.9: uniform, agent-shape-agnostic flag every agent's
+            # raw_data now carries (see anomaly.py/security.py) -- lets
+            # anomaly_arbitrate's cross-agent corroboration check ask "did
+            # this agent find anything" without knowing this module's own
+            # raw_data layout.
+            "has_signal": metric_signal["has_signal"] or neutron_signal["has_signal"],
             "metric_signal": metric_signal,
             "neutron_signal": neutron_signal,
         },
     }
-    state["error"] = None
+
+    failures = []
     if neutron_signal.get("degraded") and neutron_signal.get("failure"):
-        state.setdefault("failures", []).append(neutron_signal["failure"])
+        failures.append(neutron_signal["failure"])
+    return agent_result, failures
+
+
+def _run_node_scope(state: CortexState, node) -> CortexState:
+    agent_result, failures = _investigate(state["user_query"], node)
+
+    state["agent_result"] = agent_result
+    state["error"] = None
+    for failure in failures:
+        state.setdefault("failures", []).append(failure)
     state.setdefault("resolved_entities", {})["last_node"] = node
     state["resolved_entities"]["last_agent"] = "network"
     return state
+
+
+# --------------------------------------------------------------------
+# v0.9: fan-out Send target -- one branch of the multi-agent incident
+# investigation (see graph.py's `_fan_out_to_investigate` and
+# nodes/anomaly.py's `anomaly_arbitrate`, which joins this back together
+# with anomaly's and security's own findings for the same node). Only
+# ever dispatched for a node already known by hostname (the fan-out's
+# `incident_scope` is a list[KnownNode], see state.py) -- the
+# entity-scoped path (_run_entity_scope) has no equivalent here, since a
+# broad "is anything wrong" incident question is asked about nodes, not
+# about a specific network/subnet/instance by name.
+# --------------------------------------------------------------------
+
+def _network_investigate_one_impl(payload: dict) -> dict:
+    query = payload["user_query"]
+    node = payload["node"]
+    agent_result, failures = _investigate(query, node)
+    finding: IncidentFinding = {
+        "hostname": node["hostname"],
+        "agent": "network",
+        "agent_result": agent_result,
+        "failures": failures,
+    }
+    return {"agent_results": [finding]}
+
+
+network_investigate_one = guarded_send("network.investigate", timeout_seconds=60.0)(_network_investigate_one_impl)
 
 
 def _run_entity_scope(state: CortexState, known_nodes) -> CortexState:

@@ -11,6 +11,11 @@
     src: "{{ node_exporter_archive }}"
     dest: "/tmp/{{ node_exporter_archive }}"
     mode: "0644"
+    validate: "bash -c 'sha1sum %s | grep -q ^{{ node_exporter_archive_sha1 }}'"
+  register: node_exporter_copy
+  retries: 3
+  delay: 5
+  until: node_exporter_copy is succeeded
 
 - name: Extract node_exporter archive
   ansible.builtin.unarchive:

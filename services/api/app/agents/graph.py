@@ -77,12 +77,29 @@ floating-IP/agent health plus node-level network-traffic signals. It's a
 plain leaf, wired exactly like monitoring: one more conditional-edge
 target off the router, and its own should_trigger_after_network ->
 openstack_expert chain (reusing the neutron-*-agent-down catalog entries
-that were already sitting unused in openstack_expert_catalog.py). This
-does not yet touch the anomaly fan-out above -- a broad "is anything
-wrong" question still only dispatches Anomaly investigations; fanning
-that dispatch out across Network (and Security, once it exists) so
-compose.py's arbitration has more than one agent's theory to compare is
-deferred to when the Security Agent lands (see compose.py's docstring).
+that were already sitting unused in openstack_expert_catalog.py).
+
+v0.9 (Phase 5) also lands the Security Agent (nodes/security.py, an
+eighth node) and, with a second investigating agent now existing, finally
+does the fan-out widening the v0.9-network paragraph above used to defer:
+"anomaly_dispatch" (still that name -- see the v0.8 paragraph below for
+why it stays) now fans out **three** Sends per node in scope --
+"anomaly_investigate", "network_investigate", "security_investigate" --
+instead of one, so a broad "is anything wrong" question gets genuinely
+independent theories from all three investigating agents for the same
+node(s), not just Anomaly's. All three still converge on the same single
+join node, "anomaly_arbitrate", which is what turns "three concurrent
+findings for this host" into one genuinely-arbitrated theory (see that
+function's own docstring for how it weighs corroboration across agents
+rather than just picking whichever responded first). `security` is *also*
+reachable directly from the router, exactly like `network`, for a
+standalone security question that names one node explicitly -- it does
+NOT yet chain into openstack_expert the way network/monitoring/anomaly
+do (no should_trigger_after_security yet); a security finding goes
+straight to critic. That chaining is a reasonable follow-up once there
+are runbook-catalog entries worth walking through for a security symptom,
+deliberately left out here rather than bolted on against catalog entries
+that don't exist yet.
 
 v0.8 (efficiency & scale prep) replaces the single "anomaly" node with
 three: "anomaly_dispatch" (resolves which node(s) this turn investigates,
@@ -115,7 +132,7 @@ from .nodes.anomaly import (
 )
 from .nodes.critic import critic_check
 from .nodes.monitoring import monitoring_agent
-from .nodes.network import network_agent
+from .nodes.network import network_agent, network_investigate_one
 from .nodes.openstack_expert import (
     openstack_expert_agent,
     should_trigger_after_anomaly,
@@ -124,6 +141,7 @@ from .nodes.openstack_expert import (
 )
 from .nodes.prediction import prediction_agent
 from .nodes.rag import rag_agent
+from .nodes.security import security_agent, security_investigate_one
 from .resilience import guarded_node
 from .state import CortexState
 from .trace import traced
@@ -133,14 +151,23 @@ def _fan_out_to_investigate(state: CortexState):
     """Conditional edge off anomaly_dispatch: either the dispatch step
     already gave up (no resolvable scope -- state["error"] is set, same
     short-circuit "couldn't tell which node" always used), or it's time to
-    actually investigate -- one Send per node in state["incident_scope"],
-    run concurrently rather than looped."""
+    actually investigate.
+
+    v0.9: three Sends per node in state["incident_scope"] instead of one
+    -- Anomaly, Network, and Security all investigate the same node
+    concurrently, so anomaly_arbitrate has more than one agent's theory to
+    genuinely compare for each host, not just one theory per host ranked
+    against other hosts' single theories the way v0.8 left it.
+    """
     if state.get("error"):
         return "critic"
-    return [
-        Send("anomaly_investigate", {"user_query": state["user_query"], "node": node})
-        for node in state["incident_scope"]
-    ]
+    sends = []
+    for node in state["incident_scope"]:
+        payload = {"user_query": state["user_query"], "node": node}
+        sends.append(Send("anomaly_investigate", payload))
+        sends.append(Send("network_investigate", payload))
+        sends.append(Send("security_investigate", payload))
+    return sends
 
 
 def build_graph():
@@ -158,10 +185,13 @@ def build_graph():
     # resolved and you have clean latency numbers to size against.
     graph.add_node("monitoring", guarded_node("monitoring", timeout_seconds=60.0)(monitoring_agent))
     graph.add_node("network", guarded_node("network", timeout_seconds=60.0)(network_agent))
+    graph.add_node("security", guarded_node("security", timeout_seconds=60.0)(security_agent))
     graph.add_node("prediction", guarded_node("prediction", timeout_seconds=60.0)(prediction_agent))
     graph.add_node("rag", guarded_node("rag", timeout_seconds=60.0)(rag_agent))
     graph.add_node("anomaly_dispatch", guarded_node("anomaly_dispatch", timeout_seconds=8.0)(anomaly_dispatch))
     graph.add_node("anomaly_investigate", anomaly_investigate_one)
+    graph.add_node("network_investigate", network_investigate_one)
+    graph.add_node("security_investigate", security_investigate_one)
     graph.add_node("anomaly_arbitrate", guarded_node("anomaly", timeout_seconds=60.0)(anomaly_arbitrate))
     graph.add_node(
         "openstack_expert",
@@ -177,6 +207,7 @@ def build_graph():
         {
             "monitoring": "monitoring",
             "network": "network",
+            "security": "security",
             "prediction": "prediction",
             "rag": "rag",
             "anomaly": "anomaly_dispatch",
@@ -188,8 +219,14 @@ def build_graph():
             "clarify": "critic",
         },
     )
-    graph.add_conditional_edges("anomaly_dispatch", _fan_out_to_investigate, {"critic": "critic"})
+    graph.add_conditional_edges(
+        "anomaly_dispatch", _fan_out_to_investigate,
+        {"critic": "critic", "anomaly_investigate": "anomaly_investigate",
+         "network_investigate": "network_investigate", "security_investigate": "security_investigate"},
+    )
     graph.add_edge("anomaly_investigate", "anomaly_arbitrate")
+    graph.add_edge("network_investigate", "anomaly_arbitrate")
+    graph.add_edge("security_investigate", "anomaly_arbitrate")
     graph.add_conditional_edges(
         "anomaly_arbitrate",
         lambda state: "openstack_expert" if should_trigger_after_anomaly(state) else "critic",
@@ -205,6 +242,9 @@ def build_graph():
         lambda state: "openstack_expert" if should_trigger_after_network(state) else "critic",
         {"openstack_expert": "openstack_expert", "critic": "critic"},
     )
+    # No should_trigger_after_security yet -- see this module's v0.9
+    # docstring paragraph on why that chain is deliberately deferred.
+    graph.add_edge("security", "critic")
     graph.add_edge("prediction", "critic")
     graph.add_edge("rag", "critic")
     graph.add_edge("openstack_expert", "critic")

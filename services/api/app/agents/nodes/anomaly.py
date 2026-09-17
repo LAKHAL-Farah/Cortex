@@ -79,6 +79,25 @@ reused by both paths --
   is the "arbitration" this module's v0.4 docstring above deferred to the
   day a second source of findings existed; a second *node*, not just a
   second *agent*, turned out to be the first one to actually need it.
+
+v0.9 (Phase 5) turns this from cross-*node* arbitration into genuine
+cross-*agent* arbitration, the thing v0.8's last sentence above was
+itself waiting on: `graph.py`'s fan-out now sends Anomaly, Network, and
+Security to investigate the *same* node concurrently (three
+IncidentFindings per host instead of one), `_incident_scope_from_living_model`
+widens what counts as "worth investigating" to a down Neutron agent or a
+live eBPF alert (not just a scored metric anomaly, so a purely
+network- or security-flavored incident with no metric signal at all still
+gets picked up), and `anomaly_arbitrate` picks each host's winning theory
+by confidence *plus* a small bonus for every other agent on that same
+host also having a signal -- so two or three agents independently
+corroborating each other outranks a single agent's finding, even when
+that single agent happened to respond first. See `_corroboration_bonus`
+and `anomaly_arbitrate`'s own docstring for the exact rule. The graph
+node names (`anomaly_dispatch`/`anomaly_investigate`/`anomaly_arbitrate`)
+are unchanged on purpose -- this is still the one join point every fan-out
+branch converges on, it just now receives more than one agent's worth of
+branches.
 """
 import logging
 import re
@@ -89,7 +108,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from ...db import SessionLocal
 from ... import crud
-from ...services import loki_client
+from ...services import ebpf_signal, loki_client, network_health
 from ...services.llm_client import LLMConfigError, get_chat_model
 from ...services.metrics_collector import collect_metrics
 from ..node_resolver import resolve_node
@@ -551,6 +570,12 @@ def _investigate(query: str, node: KnownNode) -> tuple[AgentResult, list]:
         "raw_data": {
             "hostname": node["hostname"],
             "role": node["role"],
+            # v0.9: a uniform, agent-shape-agnostic flag every agent's
+            # raw_data now carries (see network.py/security.py) -- lets
+            # anomaly_arbitrate's cross-agent corroboration check ask "did
+            # this agent find anything" without knowing each agent's own
+            # raw_data layout.
+            "has_signal": metric_signal["has_signal"] or log_signal["has_signal"],
             "metric_signal": metric_signal,
             "log_signal": log_signal,
             "likely_cause": likely_cause,
@@ -594,20 +619,60 @@ def anomaly_agent(state: CortexState) -> CortexState:
 
 def _incident_scope_from_living_model(query: str, known_nodes: list[KnownNode]) -> list[KnownNode]:
     """Scopes a broad, no-specific-node incident question to whichever
-    known nodes currently have an open AnomalyFlag -- the Living Model
-    (the topology graph's current node list, intersected with the anomaly
-    detector's live output), not a fixed/hardcoded set. Returns [] for
-    anything that doesn't read as a broad incident question at all (the
-    caller falls through to the existing "couldn't tell which node"
-    clarify path in that case, same as before this existed)."""
+    known nodes currently look worth investigating -- the Living Model,
+    not a fixed/hardcoded set. Returns [] for anything that doesn't read
+    as a broad incident question at all (the caller falls through to the
+    existing "couldn't tell which node" clarify path in that case, same
+    as before this existed).
+
+    v0.9 widens what "looks worth investigating" means, so the two DoD
+    scenarios for the Security Agent's launch (roadmap v0.9: "two
+    synthetic correlated issues, one network-flavored, one
+    security-flavored, trigger real parallel investigation") actually get
+    picked up even when nothing has tripped an AnomalyFlag yet -- a down
+    Neutron agent or a live eBPF alert is exactly as much "something worth
+    investigating" as a scored metric anomaly is, and waiting for the
+    anomaly detector's own periodic tick to notice the knock-on metric
+    effect (if there even is one) would miss or badly delay the case this
+    whole phase exists to catch. The union below is deliberately still
+    cheap, bulk, no-argument reads (one query each, not one per known
+    node) -- see network_health.list_hosts_with_down_agents /
+    ebpf_signal.list_hosts_with_alerts's own docstrings for why each is
+    safe to call unconditionally here rather than only once a node is
+    already suspected.
+    """
     if not _BROAD_INCIDENT_PATTERN.search(query):
         return []
 
     db = SessionLocal()
     try:
-        flagged_hostnames = crud.list_all_open_anomaly_flag_hostnames(db)
+        flagged_hostnames = list(crud.list_all_open_anomaly_flag_hostnames(db))
     finally:
         db.close()
+
+    # Deterministic order matters here (this feeds straight into
+    # `Send(...)` fan-out order and, downstream, `multi_node_findings`'
+    # own ordering) -- AnomalyFlag hosts first in the DB's own order,
+    # then network-flagged additions, then eBPF-flagged additions, each
+    # already returned sorted by its own bulk lookup. A bare set union
+    # would iterate in Python's hash order instead, which is neither
+    # stable across runs nor meaningful to a reader.
+    seen = set(flagged_hostnames)
+
+    def _extend(hostnames):
+        for h in hostnames:
+            if h not in seen:
+                flagged_hostnames.append(h)
+                seen.add(h)
+
+    try:
+        _extend(network_health.list_hosts_with_down_agents())
+    except Exception:
+        logger.exception("anomaly_dispatch: network-flagged scope lookup failed, continuing without it")
+    try:
+        _extend(ebpf_signal.list_hosts_with_alerts())
+    except Exception:
+        logger.exception("anomaly_dispatch: eBPF-flagged scope lookup failed, continuing without it")
 
     known_by_hostname = {n["hostname"]: n for n in known_nodes}
     scope = [known_by_hostname[h] for h in flagged_hostnames if h in known_by_hostname]
@@ -656,6 +721,7 @@ def _anomaly_investigate_one_impl(payload: dict) -> dict:
     agent_result, failures = _investigate(query, node)
     finding: IncidentFinding = {
         "hostname": node["hostname"],
+        "agent": "anomaly",
         "agent_result": agent_result,
         "failures": failures,
     }
@@ -669,26 +735,55 @@ anomaly_investigate_one = guarded_send("anomaly.investigate", timeout_seconds=60
 
 
 _ARBITRATION_SYSTEM_PROMPT = """You are Cortex's incident investigation assistant. You're given \
-independent findings for several nodes, gathered because they're all part of the same broad incident \
-question. Write a short (3-5 sentence) cross-node incident summary: which node(s) look most serious \
-and why, whether the findings look related (e.g. the same likely cause recurring, or one node's \
-symptom plausibly cascading to another) or look like separate unrelated issues, and what to check or \
-prioritize first. Use ONLY the findings given -- never invent a node, a number, or a detail that \
-wasn't provided."""
+independent findings gathered for a broad incident question -- possibly several nodes, and for any \
+given node possibly several *different* agents (anomaly/metric-and-log, network/traffic-and-Neutron, \
+security/auth-and-CVE-and-kernel-signal) that each investigated it independently. Write a short (3-6 \
+sentence) cross-node, cross-agent incident summary: which node(s) look most serious and why, which \
+agent's theory is best-supported when more than one investigated the same node (say so explicitly when \
+two or more agents corroborate each other on the same host -- that combination is stronger evidence \
+than any single agent's finding alone, and should be favored over a theory only one agent produced), \
+whether findings across different nodes look related or look like separate unrelated issues, and what \
+to check or prioritize first. Use ONLY the findings given -- never invent a node, an agent, a number, or \
+a detail that wasn't provided."""
 
 
-def _arbitrate_narrative(query: str, ranked: list[IncidentFinding]) -> str:
-    fallback = " ".join(
-        f"{f['hostname']} (confidence {f['agent_result']['confidence']:.2f}): {f['agent_result']['summary']}"
-        for f in ranked
-    )
+def _arbitrate_narrative(
+    query: str,
+    ranked_hosts: list[IncidentFinding],
+    by_host: dict[str, list[IncidentFinding]],
+) -> str:
+    def _host_block(primary: IncidentFinding) -> str:
+        host_findings = sorted(by_host[primary["hostname"]], key=lambda f: f["agent_result"]["confidence"], reverse=True)
+        lines = [f"Node: {primary['hostname']}"]
+        for f in host_findings:
+            lines.append(
+                f"  [{f['agent']} agent, confidence {f['agent_result']['confidence']:.2f}]: "
+                f"{f['agent_result']['summary']}"
+            )
+        return "\n".join(lines)
+
+    fallback_parts = []
+    for primary in ranked_hosts:
+        host_findings = by_host[primary["hostname"]]
+        if len(host_findings) > 1:
+            others = ", ".join(
+                f"{f['agent']} agent (confidence {f['agent_result']['confidence']:.2f})"
+                for f in host_findings
+            )
+            fallback_parts.append(
+                f"{primary['hostname']}: {len(host_findings)} agents investigated ({others}); "
+                f"leading theory from the {primary['agent']} agent: {primary['agent_result']['summary']}"
+            )
+        else:
+            fallback_parts.append(
+                f"{primary['hostname']} ({primary['agent']} agent, confidence "
+                f"{primary['agent_result']['confidence']:.2f}): {primary['agent_result']['summary']}"
+            )
+    fallback = " ".join(fallback_parts)
+
     try:
         llm = get_chat_model(temperature=0.2, tier="reasoning")
-        findings_text = "\n\n".join(
-            f"Node: {f['hostname']}\nConfidence: {f['agent_result']['confidence']:.2f}\n"
-            f"Finding: {f['agent_result']['summary']}"
-            for f in ranked
-        )
+        findings_text = "\n\n".join(_host_block(primary) for primary in ranked_hosts)
         response = llm.invoke(
             [
                 SystemMessage(content=_ARBITRATION_SYSTEM_PROMPT),
@@ -704,23 +799,64 @@ def _arbitrate_narrative(query: str, ranked: list[IncidentFinding]) -> str:
         return fallback
 
 
+def _finding_has_signal(finding: IncidentFinding) -> bool:
+    """Agent-shape-agnostic "did this agent actually find something" read
+    -- every agent's raw_data carries a top-level `has_signal` now (see
+    nodes/anomaly.py/_investigate, nodes/network.py, nodes/security.py),
+    specifically so arbitration never has to know each agent's own
+    raw_data layout to compare across them."""
+    return bool((finding["agent_result"].get("raw_data") or {}).get("has_signal"))
+
+
+# Cross-agent corroboration bonus, capped well below what any single
+# finding's own confidence could reach on its own -- this is a tie-
+# breaker/ranking nudge ("multiple independent agents agree something's
+# wrong here"), not a way to manufacture near-certainty out of several
+# individually-weak readings. Only ever used to decide *which* finding
+# arbitration presents as the primary theory for a host; the confidence
+# actually reported in the final answer stays that finding's own honestly
+# -computed number, never the boosted one.
+_MAX_CORROBORATION_BONUS = 0.15
+_CORROBORATION_BONUS_PER_AGENT = 0.05
+
+
+def _corroboration_bonus(host_findings: list[IncidentFinding]) -> float:
+    signal_count = sum(1 for f in host_findings if _finding_has_signal(f))
+    if signal_count <= 1:
+        return 0.0
+    return min(_MAX_CORROBORATION_BONUS, _CORROBORATION_BONUS_PER_AGENT * (signal_count - 1))
+
+
 def anomaly_arbitrate(state: CortexState) -> CortexState:
     """Converges the fan-out back into the single agent_result shape every
     downstream node (should_trigger_after_anomaly, critic, compose)
-    already expects. Ranks findings by confidence, keeps the worst/most-
-    urgent one as `agent_result`'s primary raw_data shape (so chaining
-    into openstack_expert keeps working unchanged for the common case),
-    and -- only when there's more than one finding, so the single-node
-    case costs exactly what it always did -- adds a `multi_node_findings`
-    breakdown plus a reasoning-tier cross-node narrative.
+    already expects.
+
+    v0.9 (Phase 5): this is now genuine cross-*agent* arbitration, not
+    just cross-*node* ranking -- `state["agent_results"]` can hold several
+    agents' independent findings for the very same host (anomaly, network,
+    security all investigated it concurrently, see graph.py's
+    `_fan_out_to_investigate`). For each host, the finding presented as
+    that host's theory is the one with the highest confidence *after* a
+    small corroboration bonus for any other agent on the same host also
+    having a signal (`_corroboration_bonus`) -- so a theory two or three
+    agents independently support outranks one only a single agent
+    produced, even if that single agent happened to respond first, which
+    is exactly the "arbitration picks the graph-supported theory over the
+    first one to respond" requirement this phase exists to satisfy. Hosts
+    are then ranked the same corroboration-boosted way against each other.
+    The reported confidence on the final agent_result is always the
+    winning finding's own, honestly-computed confidence -- the bonus only
+    ever decides *which* finding wins, never what confidence gets reported
+    for it.
 
     Also the one place `state["agent_results"]` gets consumed: this node
     runs sequentially after the fan-out has fully joined and reads that
     field to do its ranking/merging. It's safe to just read it (no need
     to clear it afterward) precisely because state.py's `_concat` reducer
-    dedupes by hostname -- see that function's docstring for why a plain
-    concatenating reducer would otherwise silently double the fan-out's
-    findings at every downstream node instead.
+    dedupes by (hostname, agent) -- see that function's docstring for why
+    a plain concatenating reducer would otherwise silently double the
+    fan-out's findings at every downstream node instead.
     """
     findings: list[IncidentFinding] = state.get("agent_results") or []
 
@@ -734,20 +870,65 @@ def anomaly_arbitrate(state: CortexState) -> CortexState:
         for failure in finding.get("failures") or []:
             state.setdefault("failures", []).append(failure)
 
-    ranked = sorted(findings, key=lambda f: f["agent_result"]["confidence"], reverse=True)
-    primary = ranked[0]
-    merged_raw = dict(primary["agent_result"]["raw_data"])
+    by_host: dict[str, list[IncidentFinding]] = {}
+    for finding in findings:
+        by_host.setdefault(finding["hostname"], []).append(finding)
 
-    if len(ranked) > 1:
+    def _boosted_confidence(finding: IncidentFinding) -> float:
+        bonus = _corroboration_bonus(by_host[finding["hostname"]]) if _finding_has_signal(finding) else 0.0
+        return min(0.99, finding["agent_result"]["confidence"] + bonus)
+
+    def _rank_key(finding: IncidentFinding):
+        # has_signal sorts first and outranks confidence entirely: an
+        # agent that's *confidently found nothing* (e.g. Network reading
+        # 1.0 confidence on clean interface counters) must never outrank
+        # an agent that *did* find something, even if that something came
+        # back at reduced confidence because one of its own sub-checks
+        # degraded (e.g. Anomaly's log-check timing out caps its
+        # confidence at 0.6, see anomaly.py's _DEGRADED_LOG_CONFIDENCE_CAP).
+        # A confident "nothing's wrong here" is corroborating evidence
+        # for a *different* theory (or for "nothing's wrong at all" when
+        # every agent agrees), never a competing theory of its own that
+        # should win by raw confidence math -- these two numbers were
+        # never on the same scale to begin with.
+        return (_finding_has_signal(finding), _boosted_confidence(finding), finding["agent_result"]["confidence"], finding["agent"])
+
+    # One winning theory per host -- ties broken by the finding's own
+    # (unboosted) confidence, then alphabetically by agent name, so the
+    # choice is deterministic rather than depending on Send/dict ordering.
+    host_primaries = {host: max(host_findings, key=_rank_key) for host, host_findings in by_host.items()}
+    ranked_hosts = sorted(host_primaries.values(), key=_rank_key, reverse=True)
+
+    primary = ranked_hosts[0]
+    merged_raw = dict(primary["agent_result"]["raw_data"])
+    merged_raw["investigating_agent"] = primary["agent"]
+
+    host_findings = by_host[primary["hostname"]]
+    cross_agent = len(host_findings) > 1
+    if cross_agent:
+        merged_raw["cross_agent_findings"] = [
+            {
+                "agent": f["agent"],
+                "confidence": f["agent_result"]["confidence"],
+                "summary": f["agent_result"]["summary"],
+                "has_signal": _finding_has_signal(f),
+            }
+            for f in sorted(host_findings, key=lambda f: f["agent_result"]["confidence"], reverse=True)
+        ]
+
+    if len(ranked_hosts) > 1:
         merged_raw["multi_node_findings"] = [
             {
                 "hostname": f["hostname"],
+                "agent": f["agent"],
                 "confidence": f["agent_result"]["confidence"],
                 "summary": f["agent_result"]["summary"],
             }
-            for f in ranked
+            for f in ranked_hosts
         ]
-        summary = _arbitrate_narrative(state["user_query"], ranked)
+
+    if len(ranked_hosts) > 1 or cross_agent:
+        summary = _arbitrate_narrative(state["user_query"], ranked_hosts, by_host)
     else:
         summary = primary["agent_result"]["summary"]
 
@@ -758,5 +939,5 @@ def anomaly_arbitrate(state: CortexState) -> CortexState:
     }
     state["error"] = None
     state.setdefault("resolved_entities", {})["last_node"] = {"hostname": primary["hostname"]}
-    state["resolved_entities"]["last_agent"] = "anomaly"
+    state["resolved_entities"]["last_agent"] = primary["agent"]
     return state

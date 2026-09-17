@@ -1,0 +1,6 @@
+---
+- name: Restart ebpf sensor simulator
+  ansible.builtin.systemd:
+    name: ebpf-sensor-simulator
+    state: restarted
+    daemon_reload: true

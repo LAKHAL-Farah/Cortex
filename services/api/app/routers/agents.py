@@ -11,12 +11,26 @@ from ..auth import get_current_user
 from ..db import get_db
 from ..agents.graph import app_graph
 from ..agents.trace import new_trace_id
+from ..services import security_rbac
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/api/v1/agents",
     tags=["agents"],
 )
+
+# v0.9's RBAC output filtering moved to services/security_rbac.py in
+# Phase Sec-2, so routers/security.py's dashboard endpoints can call the
+# exact same functions instead of keeping a second copy that could drift
+# out of sync (see that module's own docstring). These names are kept as
+# thin aliases -- not re-implementations -- purely so this router's own
+# call sites below and any existing imports of this module's private
+# names don't need to change.
+_RESTRICTED_NOTICE = security_rbac.RESTRICTED_NOTICE
+_security_agent_involved = security_rbac.security_agent_involved
+_redact_security_raw_data = security_rbac.redact_security_raw_data
+_filter_security_response_for_role = security_rbac.filter_security_response_for_role
+_filter_security_steps_for_role = security_rbac.filter_security_steps_for_role
 
 
 @router.post("/orchestrate", response_model=schemas.AgentOrchestrateResponse)
@@ -92,6 +106,7 @@ def orchestrate(
     degraded = bool(result.get("failures")) or bool(
         critic_verdict and critic_verdict["status"] == "flagged"
     )
+    security_involved = _security_agent_involved(result["target_agent"], agent_result.get("raw_data"))
 
     crud.create_agent_trace(
         db,
@@ -104,12 +119,33 @@ def orchestrate(
         steps=result.get("trace_events") or [],
         final_answer=result["final_answer"],
         duration_ms=duration_ms,
+        # Phase Sec-6: who asked and under what role, snapshotted onto the
+        # row for GET /api/v1/security/audit-log -- see models.AgentTrace's
+        # own docstring on why this is a snapshot, not a live join.
+        # `security_involved` is computed just above (already needed for
+        # this turn's own RBAC filtering below) and persisted rather than
+        # thrown away, so the audit log doesn't have to re-derive it from
+        # `steps` the way GET /trace/{trace_id}'s older fallback does.
+        user_id=current_user.id,
+        user_role=current_user.role,
+        security_involved=security_involved,
+    )
+
+    # v0.9: RBAC output filtering -- applied here, to the *response*, never
+    # upstream in the graph or to what gets persisted just above. The
+    # persisted models.AgentTrace row always keeps the full, unfiltered
+    # finding (an admin reviewing history later, including a viewer's own
+    # past turns, should see the real thing) -- see GET /trace/{trace_id}
+    # below, which applies this same filter keyed to *its own* caller's
+    # role, not the original caller's.
+    filtered_answer, filtered_raw_data = _filter_security_response_for_role(
+        result["final_answer"], agent_result.get("raw_data"), result["target_agent"], current_user.role
     )
 
     return schemas.AgentOrchestrateResponse(
-        answer=result["final_answer"],
+        answer=filtered_answer,
         agent_used=result["target_agent"],
-        raw_data=agent_result.get("raw_data"),
+        raw_data=filtered_raw_data,
         confidence=agent_result.get("confidence"),
         degraded=degraded,
         trace_id=trace_id,
@@ -118,17 +154,49 @@ def orchestrate(
         # back inline so the caller that triggered this turn doesn't need a
         # second round-trip to GET /trace/{trace_id} just to show the real
         # router -> agent [-> chained agent] -> critic -> compose pipeline.
-        steps=result.get("trace_events") or [],
+        # v0.9: filtered by the same RBAC rule as `answer`/`raw_data` above
+        # when the Security Agent contributed to this turn -- a step's own
+        # `detail.summary` (see agents/trace.py's `_safe_detail`) carries
+        # the same kind of per-agent specifics the top-level answer does.
+        steps=_filter_security_steps_for_role(result.get("trace_events") or [], security_involved, current_user.role),
     )
 
 
 @router.get("/trace/{trace_id}", response_model=schemas.AgentTraceResponse)
-def get_trace(trace_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_trace(
+    trace_id: uuid.UUID,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """"Why did it say that" as a lookup, not an investigation (v0.7's
-    stated goal) -- the full step-by-step run for one orchestrate turn."""
+    stated goal) -- the full step-by-step run for one orchestrate turn.
+
+    v0.9: now requires auth (it didn't before -- trace_id is a UUID
+    handed back by /orchestrate, not a secret, but "not a secret" isn't
+    the same as "safe to serve unfiltered to anyone who has it"), and
+    applies the exact same RBAC filter POST /orchestrate does, keyed to
+    *this* request's caller -- not the original caller who triggered the
+    turn. That's deliberate: an admin looking back at a viewer's old
+    security-flavored trace should see the real thing; a viewer looking
+    back at their own should still get the redacted version, the same as
+    if they'd asked it fresh right now.
+    """
     trace = crud.get_agent_trace(db, trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail="No trace found for that id.")
+
+    # The persisted row has no separate raw_data column (see
+    # models.AgentTrace) -- so involvement is read off `steps` themselves:
+    # the "security" node ran directly, or the "anomaly" (arbitrate) step
+    # recorded Security among `contributing_agents` (see trace.py's
+    # `_safe_detail`, added for exactly this exact/structured check).
+    security_involved = trace.target_agent == "security" or any(
+        step.get("node") == "security"
+        or "security" in ((step.get("detail") or {}).get("contributing_agents") or [])
+        for step in (trace.steps or [])
+    )
+    filtered_answer = trace.final_answer if current_user.role == "admin" or not security_involved else _RESTRICTED_NOTICE
+    filtered_steps = _filter_security_steps_for_role(trace.steps or [], security_involved, current_user.role)
 
     return schemas.AgentTraceResponse(
         trace_id=str(trace.id),
@@ -137,8 +205,8 @@ def get_trace(trace_id: uuid.UUID, db: Session = Depends(get_db)):
         target_agent=trace.target_agent,
         critic_verdict_status=trace.critic_verdict_status,
         degraded=trace.degraded,
-        steps=trace.steps,
-        final_answer=trace.final_answer,
+        steps=filtered_steps,
+        final_answer=filtered_answer,
         duration_ms=trace.duration_ms,
         created_at=trace.created_at.isoformat(),
     )

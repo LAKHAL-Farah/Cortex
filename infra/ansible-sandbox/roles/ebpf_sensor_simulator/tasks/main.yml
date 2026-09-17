@@ -1,0 +1,27 @@
+---
+- name: Deploy background eBPF alert generator
+  ansible.builtin.template:
+    src: ebpf_sensor_sim.sh.j2
+    dest: /usr/local/bin/ebpf_sensor_sim.sh
+    mode: "0755"
+  notify: Restart ebpf sensor simulator
+
+- name: Deploy on-demand eBPF event trigger script
+  ansible.builtin.template:
+    src: trigger_ebpf_event.sh.j2
+    dest: /usr/local/bin/trigger_ebpf_event.sh
+    mode: "0755"
+
+- name: Deploy ebpf sensor simulator systemd unit
+  ansible.builtin.template:
+    src: ebpf-sensor-simulator.service.j2
+    dest: /etc/systemd/system/ebpf-sensor-simulator.service
+    mode: "0644"
+  notify: Restart ebpf sensor simulator
+
+- name: Enable and start ebpf sensor simulator
+  ansible.builtin.systemd:
+    name: ebpf-sensor-simulator
+    enabled: true
+    state: started
+    daemon_reload: true

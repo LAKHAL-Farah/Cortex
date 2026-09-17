@@ -1,0 +1,44 @@
+---
+# SANDBOX ONLY. Phase Sec-4 piloted this on `computes` only; Phase Sec-6
+# widens it to the full `monitoring` group (== controllers+computes+
+# storages, see inventory/hosts.ini) now that the pilot has confirmed the
+# tetragon-bridge-sim alert format and volume are sane for
+# `services/api/app/services/ebpf_signal.py` to read. There is no
+# "network" host group in this inventory -- `node_role=network` doesn't
+# exist here, Neutron agents run on `controller-sim`/`compute*-sim`
+# instead -- so widening to `monitoring` already covers every simulated
+# role there is.
+#
+# Nothing in application code changes for this: `_check_ebpf_signal` and
+# ebpf_signal.get_node_ebpf_alerts() were always host-agnostic (they take
+# whatever hostname the caller passes and ask tetragon-bridge-sim for it),
+# and the ebpf_sensor_simulator role templates every script off
+# `inventory_hostname` rather than assuming a compute role -- the
+# compute-only restriction lived entirely in this playbook's `hosts:`
+# line, so widening it is the whole change.
+#
+# Re-running this against `compute1-sim`/`compute2-sim` (already piloted
+# since Sec-4) is a no-op beyond a service restart -- the role's tasks are
+# idempotent (template + enable/start), so there's no need to carve the
+# pilot hosts back out of the play.
+#
+# Deliberately kept out of site.yml, same reasoning as simulate-logs.yml:
+# never run against real infra by accident.
+#
+# Run:    ansible-playbook simulate-ebpf.yml
+# Stop:   ansible monitoring -b -m systemd -a "name=ebpf-sensor-simulator state=stopped"
+#
+# For a deterministic test event instead of waiting on the background
+# daemon's random schedule, use the trigger script it deploys alongside
+# itself -- this is also Phase Sec-4's own acceptance test, now available
+# on every monitoring host, not just the two compute nodes:
+#   ansible compute1-sim -b -m command -a "/usr/local/bin/trigger_ebpf_event.sh"
+#   ansible compute2-sim -b -m command -a "/usr/local/bin/trigger_ebpf_event.sh warning"
+#   ansible controller-sim -b -m command -a "/usr/local/bin/trigger_ebpf_event.sh"
+#   ansible storage-sim -b -m command -a "/usr/local/bin/trigger_ebpf_event.sh warning"
+
+- name: Deploy fake eBPF/Falco alert generator (Phase Sec-6 full rollout, all monitoring hosts)
+  hosts: monitoring
+  become: true
+  roles:
+    - ebpf_sensor_simulator

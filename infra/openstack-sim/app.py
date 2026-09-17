@@ -35,12 +35,12 @@ HYPERVISORS = [
         "state": "up",
         "status": "enabled",
         "vcpus": 8,
-        "vcpus_used": 2,
+        "vcpus_used": 3,
         "memory_mb": 16384,
-        "memory_mb_used": 4096,
+        "memory_mb_used": 6144,
         "local_gb": 200,
-        "local_gb_used": 40,
-        "running_vms": 2,
+        "local_gb_used": 60,
+        "running_vms": 3,
         "hypervisor_type": "QEMU",
         "hypervisor_version": 2011000,
     },
@@ -51,12 +51,12 @@ HYPERVISORS = [
         "state": "up",
         "status": "enabled",
         "vcpus": 8,
-        "vcpus_used": 1,
+        "vcpus_used": 2,
         "memory_mb": 16384,
-        "memory_mb_used": 2048,
+        "memory_mb_used": 4096,
         "local_gb": 200,
-        "local_gb_used": 20,
-        "running_vms": 1,
+        "local_gb_used": 40,
+        "running_vms": 2,
         "hypervisor_type": "QEMU",
         "hypervisor_version": 2011000,
     },
@@ -192,6 +192,17 @@ FLOATING_IPS = [
 ]
 
 NEUTRON_AGENTS = [
+    # Phase 0 (security scope-clarification roadmap, §1.1): this placement
+    # -- l3-agent/dhcp-agent on the controller, OVS on the computes -- is a
+    # sandbox-topology choice, not an architectural requirement. This
+    # project's Node schema has no dedicated "network" role (only
+    # controller/compute/storage/monitoring), so these control-plane
+    # agents have to live on one of those four; every downstream reader
+    # (network_health.py, topology_sync.py's SERVES-edge sync) resolves an
+    # agent by matching its `host` label against a real Node hostname, not
+    # by assuming which role hosts which agent -- so moving these two
+    # entries to compute{1,2}-sim, if a future deployment wants that
+    # instead, is a one-line change here with no code change required.
     {"id": "a1", "binary": "neutron-l3-agent", "host": "controller-sim", "agent_type": "L3 agent", "alive": True, "admin_state_up": True},
     {"id": "a2", "binary": "neutron-dhcp-agent", "host": "controller-sim", "agent_type": "DHCP agent", "alive": True, "admin_state_up": True},
     {"id": "a3", "binary": "neutron-openvswitch-agent", "host": "compute1-sim", "agent_type": "Open vSwitch agent", "alive": True, "admin_state_up": True},
@@ -235,6 +246,31 @@ SERVERS = [
         "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute1-sim",
         "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
     },
+    {
+        # Phase Sec-5 seed: a second instance on compute1-sim that's on a
+        # *different* security group than sandbox-vm-1/-3-broken (below),
+        # so this node has more than one group to show, and each group's
+        # "which instance(s) actually carry this" list isn't just "all of
+        # them" every time.
+        "id": "8f3f0f4a-0000-0000-0000-000000000044",
+        "name": "sandbox-vm-4-web",
+        "status": "ACTIVE",
+        "tenant_id": "sandbox-project",
+        "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute1-sim",
+        "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
+    },
+    {
+        # And one on compute2-sim with its own group, carrying a *different*
+        # sensitive-port hit (MySQL, not SSH) -- so the two compute nodes
+        # don't just show the same finding twice, and the demo proves the
+        # baseline catches more than one specific port.
+        "id": "8f3f0f4a-0000-0000-0000-000000000045",
+        "name": "sandbox-vm-5-db",
+        "status": "ACTIVE",
+        "tenant_id": "sandbox-project",
+        "OS-EXT-SRV-ATTR:hypervisor_hostname": "compute2-sim",
+        "flavor": {"id": "m1.small", "original_name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20},
+    },
 ]
 
 PORTS = [
@@ -249,6 +285,11 @@ PORTS = [
         "network_id": NETWORKS[0]["id"],
         "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.101"}],
         "tenant_id": "sandbox-project",
+        # Phase Sec-1/Sec-2: this port carries the "default" security group
+        # (SECURITY_GROUPS below) -- what security_audit.get_node_security_groups
+        # and security_snapshot_builder.py's periodic pass both key off of
+        # (openstacksdk's port.security_group_ids).
+        "security_group_ids": ["8f3f0f4a-0000-0000-0000-0000000000e1"],
     },
     {
         "id": "8f3f0f4a-0000-0000-0000-000000000052",
@@ -261,6 +302,7 @@ PORTS = [
         "network_id": NETWORKS[0]["id"],
         "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.102"}],
         "tenant_id": "sandbox-project",
+        "security_group_ids": ["8f3f0f4a-0000-0000-0000-0000000000e1"],
     },
     {
         # The broken pairing: sandbox-vm-3-broken's port is DOWN and
@@ -276,6 +318,44 @@ PORTS = [
         "network_id": NETWORKS[0]["id"],
         "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.103"}],
         "tenant_id": "sandbox-project",
+        "security_group_ids": ["8f3f0f4a-0000-0000-0000-0000000000e1"],
+    },
+    {
+        # sandbox-vm-4-web: on *both* "default" and the new "web-frontend"
+        # group, so "default" reads as compute1-sim's shared baseline group
+        # (all three of its VMs carry it) while "web-frontend" is scoped to
+        # just this one instance.
+        "id": "8f3f0f4a-0000-0000-0000-000000000055",
+        "name": "sandbox-vm-4-web-port",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:55",
+        "device_id": SERVERS[3]["id"],
+        "device_owner": "compute:nova",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.104"}],
+        "tenant_id": "sandbox-project",
+        "security_group_ids": [
+            "8f3f0f4a-0000-0000-0000-0000000000e1",
+            "8f3f0f4a-0000-0000-0000-0000000000e2",
+        ],
+    },
+    {
+        # sandbox-vm-5-db: "database" only -- deliberately *not* on
+        # "default", so compute2-sim shows a group set with no overlap
+        # against compute1-sim's, instead of every node just being a
+        # variation on the same one group.
+        "id": "8f3f0f4a-0000-0000-0000-000000000056",
+        "name": "sandbox-vm-5-db-port",
+        "status": "ACTIVE",
+        "admin_state_up": True,
+        "mac_address": "fa:16:3e:00:00:56",
+        "device_id": SERVERS[4]["id"],
+        "device_owner": "compute:nova",
+        "network_id": NETWORKS[0]["id"],
+        "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.105"}],
+        "tenant_id": "sandbox-project",
+        "security_group_ids": ["8f3f0f4a-0000-0000-0000-0000000000e3"],
     },
     {
         # sandbox-router's internal interface onto sandbox-net's subnet --
@@ -295,6 +375,120 @@ PORTS = [
         "network_id": NETWORKS[0]["id"],
         "fixed_ips": [{"subnet_id": SUBNETS[0]["id"], "ip_address": "10.0.1.1"}],
         "tenant_id": "sandbox-project",
+    },
+]
+
+# Phase Sec-1/Sec-2 seed data: one security group ("default", attached to
+# both healthy sandbox VMs above) with a real world-open SSH rule --
+# security_audit._risk_reason flags this immediately (a genuine "does
+# this look risky right now" hit against the sim, not a mocked fixture),
+# and security_snapshot_builder.py's periodic pass gives
+# `_check_sec_group_diff` a real snapshot to diff future changes against.
+# `/_sandbox/security-group-rule/add` and `/remove` below let a test (or
+# a person poking at the sandbox) actually mutate this list on demand to
+# exercise the Sec-1 drift path end to end -- add a rule, wait for the
+# next snapshot pass (or trigger one via run_security_snapshot.py), ask
+# the Security Agent again, see the diff.
+SECURITY_GROUPS = [
+    {
+        "id": "8f3f0f4a-0000-0000-0000-0000000000e1",
+        "name": "default",
+        "description": "Default security group for the sandbox project",
+        "project_id": "sandbox-project",
+    },
+    {
+        # Phase Sec-5 seed: world-open HTTPS is normal for a public web
+        # tier, so this group is a deliberate *negative* example -- one
+        # rule below is world-open and still correctly reads "Clean" in
+        # the UI, since 443 isn't in security_audit._SENSITIVE_PORTS.
+        "id": "8f3f0f4a-0000-0000-0000-0000000000e2",
+        "name": "web-frontend",
+        "description": "Public HTTPS ingress for the sandbox web tier",
+        "project_id": "sandbox-project",
+    },
+    {
+        # And a second real positive example, on a different sensitive
+        # port than "default"'s SSH hit, so the demo doesn't just repeat
+        # the same one finding on every group.
+        "id": "8f3f0f4a-0000-0000-0000-0000000000e3",
+        "name": "database",
+        "description": "MySQL ingress for the sandbox database tier",
+        "project_id": "sandbox-project",
+    },
+]
+
+SECURITY_GROUP_RULES = [
+    {
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f1",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e1",
+        "direction": "ingress",
+        "ethertype": "IPv4",
+        "protocol": "tcp",
+        "port_range_min": 22,
+        "port_range_max": 22,
+        # World-open SSH -- security_audit._risk_reason's textbook case,
+        # seeded on purpose so a fresh sandbox always has one real
+        # "overly-permissive" finding to look at, the same way ROUTERS/
+        # SERVERS above always have one real broken/degraded case.
+        "remote_ip_prefix": "0.0.0.0/0",
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f2",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e1",
+        "direction": "egress",
+        "ethertype": "IPv4",
+        "protocol": None,
+        "port_range_min": None,
+        "port_range_max": None,
+        # Open egress is normal/expected (see security_audit._risk_reason's
+        # own "ingress-only" docstring note) -- kept here so the rule-set
+        # isn't unrealistically ingress-only.
+        "remote_ip_prefix": "0.0.0.0/0",
+    },
+    {
+        # web-frontend: world-open HTTPS -- expected for a public web tier,
+        # not in _SENSITIVE_PORTS, so this is the sim's one deliberately
+        # *unflagged* world-open rule (see SECURITY_GROUPS' comment above).
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f3",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e2",
+        "direction": "ingress",
+        "ethertype": "IPv4",
+        "protocol": "tcp",
+        "port_range_min": 443,
+        "port_range_max": 443,
+        "remote_ip_prefix": "0.0.0.0/0",
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f4",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e2",
+        "direction": "egress",
+        "ethertype": "IPv4",
+        "protocol": None,
+        "port_range_min": None,
+        "port_range_max": None,
+        "remote_ip_prefix": "0.0.0.0/0",
+    },
+    {
+        # database: world-open MySQL -- the second real "overly-permissive"
+        # finding, on a different port than "default"'s SSH one.
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f5",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e3",
+        "direction": "ingress",
+        "ethertype": "IPv4",
+        "protocol": "tcp",
+        "port_range_min": 3306,
+        "port_range_max": 3306,
+        "remote_ip_prefix": "0.0.0.0/0",
+    },
+    {
+        "id": "8f3f0f4a-0000-0000-0000-0000000000f6",
+        "security_group_id": "8f3f0f4a-0000-0000-0000-0000000000e3",
+        "direction": "egress",
+        "ethertype": "IPv4",
+        "protocol": None,
+        "port_range_min": None,
+        "port_range_max": None,
+        "remote_ip_prefix": "0.0.0.0/0",
     },
 ]
 
@@ -380,6 +574,26 @@ async def issue_token(request: Request):
     identity = auth.get("identity", {})
     password_auth = identity.get("password", {}).get("user", {})
     username = password_auth.get("name", "unknown")
+
+    # Phase Sec-5c: real Keystone has no built-in "list every token ever
+    # issued" API (tokens are opaque by design) -- see
+    # services/keystone_audit.py's module docstring for why this sandbox
+    # therefore logs issuance itself, the same "this sim stands in for a
+    # collector that doesn't exist yet, production needs its own" shape
+    # PACKAGE_INVENTORY/LISTENING_PORTS above already establish. Every
+    # real call to this endpoint (including the ones every other module's
+    # own `openstack.connect()` triggers) appends one event -- so a
+    # scripted or accidental burst of re-authentications is genuinely
+    # visible to `GET /_sandbox/keystone/token-log`, not simulated
+    # separately from it.
+    issued_at = datetime.now(timezone.utc)
+    _TOKEN_ISSUANCE_LOG.append({
+        "username": username,
+        "project": "sandbox-project",
+        "source_ip": request.client.host if request.client else None,
+        "issued_at": issued_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "expires_at": (issued_at + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    })
 
     token_body = {
         "token": {
@@ -588,6 +802,147 @@ def list_ports():
     return {"ports": [{**p, **_PORT_FAULTS.get(p["id"], {})} for p in PORTS]}
 
 
+@app.get("/v2.0/security-groups")
+def list_security_groups():
+    # openstacksdk's network.security_groups() -- security_audit.py's
+    # get_node_security_groups()/list_security_groups_by_hostname() both
+    # call this to resolve a security group's own name.
+    return {"security_groups": SECURITY_GROUPS}
+
+
+@app.get("/v2.0/security-group-rules")
+def list_security_group_rules():
+    # openstacksdk's network.security_group_rules() -- includes whatever
+    # /_sandbox/security-group-rule/add or /remove below has changed
+    # in-memory, so a security_snapshot_builder.py pass (or a fresh
+    # security_audit.get_node_security_groups() call) run after a fault
+    # injection sees the mutated rule-set, exactly like a real Neutron
+    # would after `openstack security group rule create/delete`.
+    return {"security_group_rules": list(_SECURITY_GROUP_RULES_LIVE.values())}
+
+
+# ---- Phase Sec-3: package-inventory collector (node layer only) ---------
+# Not a real OpenStack API -- this stands in for whatever collector
+# CORTEX_PACKAGE_INVENTORY_URL ends up pointing at in a real deployment
+# (an Ansible-facts scraper, a node_exporter textfile collector publishing
+# dpkg/rpm output, osquery/Fleet -- see services/cve_feed.py's module
+# docstring for the tradeoffs). Serving it from openstack-sim rather than
+# standing up a fifth container is "whichever is less infra" per the
+# roadmap doc's own §6 table -- docker-compose.sandbox.yml just points
+# CORTEX_PACKAGE_INVENTORY_URL at this host:port instead of the
+# package-inventory:9111 production default.
+#
+# Deliberately mirrors the SERVERS/PORTS convention above: one node
+# (controller-sim) seeded with a real, known-vulnerable version
+# (openssh-server 9.6, below cve_feed.py's fixed_version of 9.8p1) so
+# `_check_cve_match` always has a genuine matched/clean finding to
+# demonstrate against a fresh sandbox, exactly like SECURITY_GROUP_RULES
+# seeds one deliberately world-open rule. The remaining three nodes (and
+# controller-sim's other packages) are seeded clean -- versions comfortably
+# newer than every fixed_version in cve_feed.py's _CVE_DATABASE -- so a
+# scan across the whole fleet shows a mix of "vulnerable" and "clean"
+# rather than either extreme.
+PACKAGE_INVENTORY: dict[str, list[dict]] = {
+    "controller-sim": [
+        {"name": "openssh-server", "version": "9.6"},
+        {"name": "openssl", "version": "3.2.1"},
+        {"name": "sudo", "version": "1.10.0"},
+        {"name": "runc", "version": "1.2.0"},
+        {"name": "libvirt", "version": "10.2.0"},
+    ],
+    "compute1-sim": [
+        {"name": "openssh-server", "version": "10.0"},
+        {"name": "openssl", "version": "3.2.1"},
+        {"name": "sudo", "version": "1.10.0"},
+        {"name": "runc", "version": "1.2.0"},
+        {"name": "libvirt", "version": "10.2.0"},
+    ],
+    "compute2-sim": [
+        {"name": "openssh-server", "version": "10.0"},
+        {"name": "openssl", "version": "3.2.1"},
+        {"name": "sudo", "version": "1.10.0"},
+        {"name": "runc", "version": "1.2.0"},
+        {"name": "libvirt", "version": "10.2.0"},
+    ],
+    "storage-sim": [
+        {"name": "openssh-server", "version": "10.0"},
+        {"name": "openssl", "version": "3.2.1"},
+        {"name": "sudo", "version": "1.10.0"},
+        {"name": "runc", "version": "1.2.0"},
+        {"name": "libvirt", "version": "10.2.0"},
+    ],
+}
+
+
+@app.get("/packages")
+def get_packages(host: str):
+    """`GET /packages?host=<node hostname>` -- the exact shape
+    cve_feed.get_package_inventory() already expects and already calls:
+    `[{"name": str, "version": str}, ...]`. An unknown hostname returns an
+    empty list (a real collector would report "nothing installed on a host
+    I've never heard of" the same way, not a 404) so `_check_cve_match`
+    degrades to "no known-vulnerable packages found" rather than "collector
+    unreachable" for a node this sim doesn't seed -- a different, real
+    state, not a connection error.
+    """
+    return PACKAGE_INVENTORY.get(host, [])
+
+
+# ---- Phase Sec-5a: listening-port collector (node layer only) -----------
+# Same "extend Sec-3's collector rather than stand up a new one" shape
+# services/exposed_ports.py's own module docstring describes -- this is
+# the `/listening-ports?host=` route that client calls, served from the
+# same openstack-sim process as `/packages` above, for the same "whichever
+# is less infra" reason.
+#
+# Seeded so the cross-check this phase exists to demonstrate -- "a
+# security-group rule world-opens port P, AND this host is really
+# listening on P" -- is genuinely true for both compute nodes, on two
+# *different* sensitive ports, mirroring how SECURITY_GROUP_RULES already
+# seeds one SSH hit ("default", compute1-sim) and one MySQL hit
+# ("database", compute2-sim):
+#   - compute1-sim really runs sshd on 22 -- "default"'s world-open SSH
+#     rule (rolled up onto compute1-sim, which hosts sandbox-vm-1/-3/-4)
+#     is therefore a *confirmed*, not just theoretical, exposure.
+#   - compute2-sim really runs sshd on 22 AND (illustratively) a mysqld on
+#     3306 -- both "default"'s SSH rule and "database"'s MySQL rule
+#     (rolled up onto compute2-sim, which hosts sandbox-vm-2/-5-db) are
+#     confirmed exposures here too.
+#   - controller-sim/storage-sim host no VMs at all (SERVERS above), so
+#     `security_audit.get_node_security_groups` already returns no risky
+#     rules for them regardless of what they're listening on -- seeded
+#     with just sshd so a fresh sandbox never reports "no listening-port
+#     collector for this host" for a real, known node.
+LISTENING_PORTS: dict[str, list[dict]] = {
+    "controller-sim": [
+        {"port": 22, "protocol": "tcp", "process": "sshd"},
+    ],
+    "compute1-sim": [
+        {"port": 22, "protocol": "tcp", "process": "sshd"},
+    ],
+    "compute2-sim": [
+        {"port": 22, "protocol": "tcp", "process": "sshd"},
+        {"port": 3306, "protocol": "tcp", "process": "mysqld"},
+    ],
+    "storage-sim": [
+        {"port": 22, "protocol": "tcp", "process": "sshd"},
+    ],
+}
+
+
+@app.get("/listening-ports")
+def get_listening_ports(host: str):
+    """`GET /listening-ports?host=<node hostname>` -- the exact shape
+    services/exposed_ports.get_listening_ports() expects:
+    `[{"port": int, "protocol": str, "process": str}, ...]`. Same
+    unknown-hostname convention as `/packages` above: an empty list, not
+    a 404, so `_check_exposed_ports` degrades to "no listening ports
+    reported" (a real, if uninteresting, state) rather than "collector
+    unreachable" for a node this sim doesn't seed.
+    """
+    return LISTENING_PORTS.get(host, [])
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
@@ -607,6 +962,48 @@ def healthz():
 _ROUTER_FAULTS: dict[str, dict] = {}
 _PORT_FAULTS: dict[str, dict] = {}
 _FLOATINGIP_FAULTS: dict[str, dict] = {}
+# Phase Sec-1/Sec-2 real-life drift scenario: a mutable copy of
+# SECURITY_GROUP_RULES that /_sandbox/security-group-rule/add and /remove
+# actually mutate, so a security_snapshot_builder.py pass taken before the
+# mutation and the Security Agent's live `_check_sec_group_diff` read
+# taken after it genuinely disagree -- the same "did this change since we
+# last looked" scenario Phase Sec-1 exists to catch, exercised against
+# real (if simulated) Neutron reads end to end rather than mocked fixtures.
+_SECURITY_GROUP_RULES_LIVE: dict[str, dict] = {r["id"]: dict(r) for r in SECURITY_GROUP_RULES}
+
+# Phase Sec-5c: every token issuance recorded by POST /v3/auth/tokens
+# above -- see that endpoint's own comment for why this sandbox has to
+# log it itself rather than reading it back out of a real Keystone API.
+# A plain in-memory list (append-only, oldest first), same shape
+# services/keystone_audit.get_token_issuance_log() expects verbatim.
+_TOKEN_ISSUANCE_LOG: list[dict] = []
+
+
+@app.post("/_sandbox/security-group-rule/add")
+def add_security_group_rule(body: dict):
+    """body: a full security-group-rule dict (id, security_group_id,
+    direction, ethertype, protocol, port_range_min/max, remote_ip_prefix)
+    -- same shape security_audit._rule_to_dict produces reading a real
+    one. `id` is required and must be unique; this sandbox has no
+    auto-generated-id convenience the way real Neutron's rule-create call
+    does, since tests/scripts driving this want a stable id to assert
+    against afterward.
+    """
+    rule_id = body.get("id")
+    if not rule_id:
+        return JSONResponse(status_code=400, content={"error": "body.id is required"})
+    _SECURITY_GROUP_RULES_LIVE[rule_id] = dict(body)
+    return {"security_group_rule": _SECURITY_GROUP_RULES_LIVE[rule_id]}
+
+
+@app.post("/_sandbox/security-group-rule/remove")
+def remove_security_group_rule(body: dict):
+    """body: {"id": "<rule-id>"} -- removes one rule from the live
+    rule-set, the other half of the Sec-1 drift scenario (a rule that
+    existed at the last snapshot and is now gone)."""
+    rule_id = body.get("id")
+    _SECURITY_GROUP_RULES_LIVE.pop(rule_id, None)
+    return {"removed": rule_id}
 
 
 @app.post("/_sandbox/fault/router/{router_id}")
@@ -637,8 +1034,38 @@ def fault_floating_ip(fip_id: str, body: dict | None = None):
 @app.post("/_sandbox/fault/reset")
 def fault_reset():
     """Clears every override above, restoring all seed data to its healthy
-    default state."""
+    default state -- including the live security-group rule-set back to
+    SECURITY_GROUP_RULES's original seed (undoes any
+    /_sandbox/security-group-rule/add or /remove call)."""
     _ROUTER_FAULTS.clear()
     _PORT_FAULTS.clear()
     _FLOATINGIP_FAULTS.clear()
+    _SECURITY_GROUP_RULES_LIVE.clear()
+    _SECURITY_GROUP_RULES_LIVE.update({r["id"]: dict(r) for r in SECURITY_GROUP_RULES})
+    return {"status": "reset"}
+
+
+# ---- Phase Sec-5c: Keystone token-issuance log (identity layer) ---------
+@app.get("/_sandbox/keystone/token-log")
+def get_keystone_token_log():
+    """`GET /_sandbox/keystone/token-log` -- the exact shape
+    services/keystone_audit.get_token_issuance_log() expects:
+    `[{"username": str, "project": str, "source_ip": str,
+       "issued_at": ISO-8601 str, "expires_at": ISO-8601 str}, ...]`.
+    Read-only, no admin gate needed -- unlike the fault-injection/rule
+    endpoints above, this never mutates anything a real cloud would care
+    about, it only reads back what POST /v3/auth/tokens already recorded.
+    """
+    return list(_TOKEN_ISSUANCE_LOG)
+
+
+@app.post("/_sandbox/keystone/token-log/reset")
+def reset_keystone_token_log():
+    """Clears the in-memory issuance log -- its own reset, deliberately
+    not folded into /_sandbox/fault/reset above, since a token-abuse demo
+    scenario (or a test asserting on a clean log) shouldn't also have to
+    care about, or accidentally clear, an unrelated router/port/floating-
+    ip/security-group-rule fault someone else set up in the same sandbox
+    run."""
+    _TOKEN_ISSUANCE_LOG.clear()
     return {"status": "reset"}

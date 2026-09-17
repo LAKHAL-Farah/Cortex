@@ -1,0 +1,638 @@
+"""Security agent -- auth anomalies, security-group audit, exposed/known-
+vulnerable packages, confirmed listening-port exposure, and kernel-level
+(eBPF) signals for one node (v0.9, roadmap Phase 5: "Security & Network
+agents"; Phase Sec-5a added the fifth, exposed-port, check).
+
+Same sub-orchestration shape nodes/anomaly.py established (v0.4) and this
+module deliberately reuses rather than reinvents: several near-independent
+sub-checks run inside this one graph node and get merged into a single
+AgentResult before the graph ever sees them. Anomaly needed two sub-checks
+(metric + log); Security needs five, since "is this node compromised or
+misconfigured" genuinely has five largely-independent angles, none of
+which alone is conclusive:
+
+1. `_check_auth_anomaly` -- correlated auth-failure log lines (failed
+   password, invalid user, repeated sudo failures) from Loki, the same
+   client anomaly.py's `_check_logs` already uses, just pattern-matched
+   against auth-specific keywords instead of generic error/warn/exception
+   ones. Log-only, and therefore the weakest of the four signals on its
+   own -- an attacker who's already in doesn't have to keep failing
+   logins, and a burst of failed logins doesn't by itself mean anyone
+   succeeded. See _CONFIDENCE_BY_SIGNAL for exactly how this is weighted
+   below eBPF/sec-group/CVE.
+2. `_check_sec_group_diff` -- Neutron security-group rules attached to
+   this host's instances, audited two ways: against a built-in "overly
+   permissive" baseline (services/security_audit.py's `_risk_reason`) --
+   a world-open SSH/RDP/database port, or an all-protocols-all-ports
+   rule -- and (Phase Sec-1) against the most recently stored
+   `security_group_snapshots` row for this host, surfacing anything that
+   changed since that snapshot even if the new state isn't itself risky
+   enough to trip the static baseline (e.g. a newly-opened internal-only
+   port). Both are *configuration* evidence: they say the door is open,
+   or that a door moved, not that anyone walked through it.
+3. `_check_cve_match` -- this host's installed package versions
+   (services/cve_feed.py) matched against a small embedded CVE reference
+   table. Also configuration evidence (a known-vulnerable version is
+   installed), not proof of exploitation.
+4. `_check_exposed_ports` (Phase Sec-5a) -- cross-checks this host's own
+   real, actually-bound listening sockets (services/exposed_ports.py)
+   against the security-group rules `_check_sec_group_diff` already
+   fetched for this same node this same pass. Deliberately reuses that
+   sub-check's `risky_rules` rather than re-querying Neutron a second
+   time -- see exposed_ports.py's own module docstring for why the
+   *intersection* of "rule says world-open" and "really listening" is
+   the only case worth reporting, not either side alone. Still
+   configuration/state evidence (a bound socket, not an observed
+   exploit), so it sits in the same confidence tier as sec-group-diff
+   and CVE-match below.
+5. `_check_ebpf_signal` -- live kernel-level alerts from a Falco/Tetragon-
+   style sensor (services/ebpf_signal.py) -- process execs, syscalls,
+   file/network activity the kernel itself observed. This is the only one
+   of the five that's actual *behavioral* evidence rather than
+   configuration or log-based inference, and the hardest for an attacker
+   to fake or avoid (they can avoid writing to a log Loki reads, or
+   already be in before a CVE scan runs, but they can't make the kernel
+   not see a process exec) -- hence the roadmap's explicit "confidence
+   weighted toward eBPF/kernel signals... over log-only signals", applied
+   in `_confidence` below.
+
+Honesty about what's real vs. illustrative in an openstack-sim checkout:
+`_check_auth_anomaly` and `_check_sec_group_diff` read genuinely live data
+(the same Loki/Neutron this project already runs). `_check_cve_match` is a
+real HTTP client (services/cve_feed.py) against `CORTEX_PACKAGE_INVENTORY_URL`
+-- as of Phase Sec-3, the sandbox points this at openstack-sim's own
+`/packages` route (seeded: a real known-vulnerable openssh-server version
+on controller-sim, clean versions on the other three nodes), so this
+sub-check returns a genuine matched/clean finding in a fresh sandbox
+checkout rather than degrading. `_check_exposed_ports` (Phase Sec-5a) is
+the same shape of HTTP client (services/exposed_ports.py), reusing that
+same collector's `/listening-ports` route -- seeded so compute1-sim/
+compute2-sim's own listening sockets fall inside their hosted VMs' real
+world-open rules, giving a genuine "confirmed exposure" finding rather
+than degrading, same as CVE-match. `_check_ebpf_signal` is the same shape
+of HTTP client (services/ebpf_signal.py) against `CORTEX_EBPF_ALERTS_URL`,
+still nothing in this repo stands up yet (Phase Sec-4) -- point it at a
+real Falco or Tetragon deployment and it reads real data; until then it
+simply fails to connect, which (same as every other external read in this
+codebase) degrades that one sub-check to "unknown" via
+resilience.get_breaker rather than crashing the turn or silently reporting
+"clean". Outside the sandbox, CORTEX_PACKAGE_INVENTORY_URL still needs a
+real collector too (see cve_feed.py's module docstring) -- the sandbox
+route is a stand-in, not a production data source. `_CVE_DATABASE` itself
+(cve_feed.py) is a small, real, but deliberately finite hand-picked table,
+same tradeoff openstack_expert_catalog.py already makes for its runbook
+entries.
+
+RBAC note: this agent's raw findings (which CVEs, which security-group
+rules, which specific eBPF alert lines) are sensitive in a way Monitoring/
+Prediction/Network's aren't -- a viewer account seeing "here's exactly
+which world-open port and package version to exploit" is a real exposure,
+not just an information nicety. That filtering happens in
+routers/agents.py (`_filter_security_response_for_role`), not here --
+this module always computes and returns the full finding; the endpoint is
+what decides how much of it a given caller's role gets to see, the same
+place get_current_user's role claim is already available and every other
+per-role gate in this codebase already lives (see auth.py's require_admin).
+"""
+import logging
+import time
+
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from ... import crud
+from ...db import SessionLocal
+from ...services import cve_feed, ebpf_signal, exposed_ports, loki_client, security_audit
+from ...services.llm_client import LLMConfigError, get_chat_model
+from ..node_resolver import resolve_node
+from ..resilience import get_breaker, guarded_send
+from ..state import AgentResult, CortexState, IncidentFinding, KnownNode
+
+logger = logging.getLogger(__name__)
+
+# How far back _check_auth_anomaly looks -- there's no metric-signal
+# timestamp to anchor a window on the way anomaly.py's log-check has (a
+# security question is rarely "around this specific spike"), so this is
+# just a fixed recent lookback.
+_AUTH_LOG_WINDOW_MINUTES = 60
+_AUTH_LOG_SIGNAL_PATTERN = (
+    "(?i)failed password|authentication failure|invalid user|permission denied|"
+    "too many authentication failures|pam_unix.*auth.*fail"
+)
+
+# Confidence weighting: eBPF (kernel-level, behavioral, hardest to fake or
+# miss) > sec-group-diff / CVE-match (configuration evidence, real but
+# doesn't itself prove exploitation) > auth-anomaly alone (log-only,
+# easiest for an attacker to avoid leaving a trace of, or to simply not
+# be caused by an attacker at all -- a misconfigured cron job can also
+# fail logins repeatedly). This ladder is the literal roadmap requirement
+# ("confidence weighted toward eBPF/kernel signals... over log-only
+# signals") -- see _confidence.
+_EBPF_SIGNAL_CONFIDENCE = 0.95
+_CONFIG_SIGNAL_CONFIDENCE = 0.8  # sec-group-diff and/or CVE-match
+_AUTH_LOG_ONLY_CONFIDENCE = 0.55
+_NO_SIGNAL_CONFIDENCE = 0.9
+_DEGRADED_CONFIDENCE_CAP = 0.6
+
+
+# --------------------------------------------------------------------
+# Sub-check 1: auth-anomaly (Loki)
+# --------------------------------------------------------------------
+
+def _check_auth_anomaly(node: KnownNode) -> dict:
+    """Confirmed (Phase 0, security scope-clarification roadmap, §4 item 5):
+    this is a standalone keyword match against raw Loki log lines
+    (_AUTH_LOG_SIGNAL_PATTERN) and does NOT read anomaly_detector.py's
+    odd-hour/baseline scoring (models.AnomalyFlag, the host->role->EWMA
+    tier ladder) at all -- that scoring only ever feeds the generic
+    Anomaly agent (agents/nodes/anomaly.py) via the periodic
+    detect_anomalies() job in main.py, over ssh_failed_logins_5min /
+    ssh_successful_logins_5min. The two checks are genuinely independent:
+    this one says "a failed-login pattern showed up in the last
+    _AUTH_LOG_WINDOW_MINUTES", the other says "the volume of successful/
+    failed logins this hour is statistically unusual for this host (or its
+    role)". A question routed to the Security agent gets only the former;
+    getting the latter's odd-hour signal folded in here as well is a real,
+    not-yet-built capability, not a bug in either agent as it stands today.
+    """
+    now = time.time()
+    start = now - _AUTH_LOG_WINDOW_MINUTES * 60
+    logql = f'{{host="{node["hostname"]}"}} |~ "{_AUTH_LOG_SIGNAL_PATTERN}"'
+
+    breaker = get_breaker("security.loki", timeout_seconds=8.0, max_retries=1, failure_threshold=2)
+    call_result = breaker.call(loki_client.query_range, logql, start, now, limit=50)
+
+    if not call_result.ok:
+        logger.warning("security_agent: auth-anomaly sub-check failed to query Loki: %s", call_result.failure)
+        return {
+            "has_signal": False,
+            "degraded": True,
+            "failure": call_result.failure,
+            "detail": (
+                "The auth-log check couldn't complete (the log store didn't respond in time), "
+                "so authentication activity for this host is unknown rather than confirmed clean."
+            ),
+            "entries": [],
+        }
+
+    entries = []
+    for stream in call_result.value:
+        labels = stream.get("stream", {})
+        for ts_ns, line in stream.get("values", []):
+            entries.append({"ts": int(ts_ns) // 1_000_000, "line": line, "service": labels.get("service") or labels.get("job")})
+    entries.sort(key=lambda e: e["ts"], reverse=True)
+
+    if not entries:
+        return {
+            "has_signal": False,
+            "degraded": False,
+            "detail": f"No correlated auth-failure log entries found for {node['hostname']} in the last {_AUTH_LOG_WINDOW_MINUTES} minutes.",
+            "entries": [],
+        }
+
+    top = entries[:5]
+    plural = "y" if len(entries) == 1 else "ies"
+    detail = (
+        f"{len(entries)} correlated auth-failure log entr{plural} for {node['hostname']} in the last "
+        f"{_AUTH_LOG_WINDOW_MINUTES} minutes, most recent: \"{top[0]['line'][:160]}\"."
+    )
+    return {"has_signal": True, "degraded": False, "detail": detail, "entries": top}
+
+
+# --------------------------------------------------------------------
+# Sub-check 2: sec-group-diff (Neutron)
+# --------------------------------------------------------------------
+
+def _diff_against_last_snapshot(hostname: str, current_groups: list[dict]) -> list[dict]:
+    """Opens its own short-lived DB session to read the most recent
+    `security_group_snapshots` rows for this host (Phase Sec-1) and diffs
+    them against this pass's live groups -- same "own session, not
+    threaded through graph state" pattern nodes/anomaly.py's
+    `_metric_signal_from_flags` already uses, for the same reason: graph
+    state has to stay JSON-serializable (see state.py's module docstring),
+    so a live Session can never be part of it.
+
+    Best-effort: a Postgres hiccup here degrades to "no drift detected"
+    for this pass rather than failing the whole sec-group-diff sub-check
+    -- the static risk read above doesn't depend on Postgres at all, so
+    there's no reason to take it down over the snapshot-history read
+    failing.
+    """
+    db = SessionLocal()
+    try:
+        previous_by_sg_id = crud.get_latest_security_group_snapshots(db, hostname)
+    except Exception:
+        logger.exception("security_agent: sec-group snapshot read failed for %s", hostname)
+        return []
+    finally:
+        db.close()
+
+    if not previous_by_sg_id:
+        return []
+    return security_audit.diff_security_groups(current_groups, previous_by_sg_id)
+
+
+def _check_sec_group_diff(node: KnownNode) -> dict:
+    # Re-confirmed (Phase 0, security scope-clarification roadmap, §4 item
+    # 4): this is a plain, unmodified use of the shared breaker
+    # (agents/resilience.py) -- closed -> open after 2 consecutive
+    # failures -> half-open retry after 30s, same as every other
+    # get_breaker() call site in this codebase. Nothing in this call path
+    # is special-cased or overridden. This confirms the breaker's *code*
+    # behaves as documented; it doesn't confirm anything about a specific
+    # live incident, since that would need that deployment's own logs
+    # (grep for "security.neutron" in the API's log output), which aren't
+    # available from a static read of this repo.
+    #
+    # Phase Sec-6 follow-up on the compute2-sim timeout trace: the
+    # `FailureRecord` this breaker already produces on failure
+    # (resilience.py's `_failure_record`) is itself the disambiguator
+    # between the two candidate explanations, no code change needed to
+    # get an answer -- just read `error_type`/`attempts`/`duration_ms` off
+    # the trace event for that call:
+    #   - `error_type="circuit_open"`, `attempts=0`, near-zero duration
+    #     -> the breaker was already open from an earlier failure and
+    #     short-circuited; this call never actually reached
+    #     get_node_security_groups. Not a bug -- the breaker did exactly
+    #     what ADR-0007 describes -- just needs the earlier failure logged
+    #     alongside it to explain the open window.
+    #   - `error_type="timeout"`, `attempts>=1`, duration close to
+    #     `timeout_seconds` (or ~2s + 2x that, with the one retry)
+    #     -> genuinely slow, and *this* is the case worth tuning
+    #     timeout_seconds/failure_threshold for.
+    # Static read of this repo rules out a couple of candidate causes for
+    # the "genuine slowness" branch: openstack-sim has no injected delay,
+    # rate limiting, or resource caps for compute2-sim specifically (grep
+    # infra/openstack-sim/app.py), and compute1-sim/compute2-sim sit on
+    # the same sandbox Docker network as the API (no extra network hop
+    # unique to compute2-sim, see ebpf_sensor_simulator's defaults for the
+    # same observation about that topology). What *is* structurally true
+    # regardless of which host: get_node_security_groups makes one
+    # `_connect()` plus four sequential list() round-trips
+    # (servers/ports/security_group_rules/security_groups) inside this
+    # one breaker-guarded call -- heavier than a single-query breaker like
+    # security.loki -- so real latency (host under load, e.g. from the
+    # Sec-4/Sec-6 eBPF pilot's own background traffic) crossing 10s isn't
+    # implausible. Until the trace's error_type confirms which branch this
+    # was, timeout_seconds/failure_threshold below are left at their
+    # original values rather than tuned blind.
+    breaker = get_breaker("security.neutron", timeout_seconds=10.0, max_retries=1, failure_threshold=2)
+    call_result = breaker.call(security_audit.get_node_security_groups, node["hostname"])
+
+    if not call_result.ok:
+        logger.warning("security_agent: sec-group-diff sub-check failed: %s", call_result.failure)
+        return {
+            "has_signal": False,
+            "degraded": True,
+            "failure": call_result.failure,
+            "detail": (
+                "The security-group check couldn't complete (OpenStack's network API didn't "
+                "respond in time), so this host's firewall posture is unknown rather than confirmed safe."
+            ),
+            "data": None,
+            "risky_rules": [],
+            "drift": [],
+        }
+
+    data = call_result.value
+    risky = data["risky_rules"]
+    drift = _diff_against_last_snapshot(node["hostname"], data["security_groups"])
+
+    detail_parts = []
+    if risky:
+        reasons = "; ".join(r["reason"] for r in risky)
+        detail_parts.append(f"{len(risky)} overly-permissive security-group rule(s) on {node['hostname']}: {reasons}.")
+    if drift:
+        drift_summary = "; ".join(
+            f"{d['security_group']} changed since {d['previous_captured_at']} "
+            f"(+{len(d['added_rules'])}/-{len(d['removed_rules'])} rule(s))"
+            for d in drift
+        )
+        detail_parts.append(f"Security-group drift on {node['hostname']} since the last snapshot: {drift_summary}.")
+
+    if not detail_parts:
+        if not data["security_groups"]:
+            detail_parts.append(f"No security groups attached to any instance on {node['hostname']}.")
+        else:
+            detail_parts.append(
+                f"{len(data['security_groups'])} security group(s) checked on {node['hostname']}, "
+                "no overly-permissive ingress rules and no drift since the last snapshot."
+            )
+
+    has_signal = bool(risky) or bool(drift)
+    return {
+        "has_signal": has_signal,
+        "degraded": False,
+        "detail": " ".join(detail_parts),
+        "data": data,
+        "risky_rules": risky,
+        "drift": drift,
+    }
+
+
+# --------------------------------------------------------------------
+# Sub-check 3: CVE-match (package inventory)
+# --------------------------------------------------------------------
+
+def _check_cve_match(node: KnownNode) -> dict:
+    breaker = get_breaker("security.cve_feed", timeout_seconds=8.0, max_retries=1, failure_threshold=2)
+    call_result = breaker.call(cve_feed.get_package_inventory, node["hostname"])
+
+    if not call_result.ok:
+        logger.warning("security_agent: CVE-match sub-check failed: %s", call_result.failure)
+        return {
+            "has_signal": False,
+            "degraded": True,
+            "failure": call_result.failure,
+            "detail": (
+                "The package-inventory check couldn't complete, so known-vulnerable packages on "
+                "this host are unknown rather than confirmed absent."
+            ),
+            "matches": [],
+        }
+
+    matches = cve_feed.match_cves(call_result.value)
+    if not matches:
+        return {
+            "has_signal": False,
+            "degraded": False,
+            "detail": f"No known-vulnerable package versions found on {node['hostname']}.",
+            "matches": [],
+        }
+
+    worst = max(matches, key=lambda m: {"critical": 3, "high": 2, "medium": 1, "low": 0}.get(m["severity"], 0))
+    detail = (
+        f"{len(matches)} known-vulnerable package(s) on {node['hostname']}, worst: {worst['cve_id']} "
+        f"({worst['severity']}) in {worst['package']} {worst['installed_version']} -- fixed in {worst['fixed_version']}."
+    )
+    return {"has_signal": True, "degraded": False, "detail": detail, "matches": matches}
+
+
+# --------------------------------------------------------------------
+# Sub-check 4: exposed-port cross-check (Phase Sec-5a)
+# --------------------------------------------------------------------
+
+def _check_exposed_ports(node: KnownNode, sec_group: dict) -> dict:
+    """Deliberately takes `sec_group` (this same pass's already-computed
+    `_check_sec_group_diff` result) as an argument rather than
+    re-querying Neutron -- see exposed_ports.py's module docstring: the
+    finding this check exists to surface is the *intersection* of "a
+    security-group rule world-opens this port range" (already known,
+    from `sec_group["risky_rules"]`) and "a real process on this host is
+    actually bound to a port inside it" (this check's own, independent
+    listening-port read). A second live Neutron call in the same
+    investigation pass would only re-fetch data `_check_sec_group_diff`
+    already has.
+    """
+    breaker = get_breaker("security.exposed_ports", timeout_seconds=8.0, max_retries=1, failure_threshold=2)
+    call_result = breaker.call(exposed_ports.get_listening_ports, node["hostname"])
+
+    if not call_result.ok:
+        logger.warning("security_agent: exposed-port sub-check failed: %s", call_result.failure)
+        return {
+            "has_signal": False,
+            "degraded": True,
+            "failure": call_result.failure,
+            "detail": (
+                "The listening-port check couldn't complete, so real (confirmed) exposure behind "
+                "this host's security-group rules is unknown rather than confirmed absent."
+            ),
+            "mismatches": [],
+            "listening_ports": [],
+        }
+
+    listening = call_result.value
+    risky_rules = sec_group.get("risky_rules") or []
+    mismatches = exposed_ports.find_exposed_port_mismatches(listening, risky_rules)
+
+    if not mismatches:
+        if listening:
+            detail = (
+                f"None of {node['hostname']}'s {len(listening)} listening port(s) fall inside a "
+                "world-open security-group rule -- no confirmed exposure."
+            )
+        else:
+            detail = f"No listening ports reported for {node['hostname']}."
+        return {"has_signal": False, "degraded": False, "detail": detail, "mismatches": [], "listening_ports": listening}
+
+    worst = mismatches[0]
+    plural = "s" if len(mismatches) != 1 else ""
+    process_suffix = f" ({worst['process']})" if worst.get("process") else ""
+    detail = (
+        f"{len(mismatches)} confirmed exposed port{plural} on {node['hostname']}: port {worst['port']}"
+        f"{process_suffix} is actually listening and reachable via '{worst['security_group']}' -- "
+        f"{worst['reason']}."
+    )
+    return {"has_signal": True, "degraded": False, "detail": detail, "mismatches": mismatches, "listening_ports": listening}
+
+
+# --------------------------------------------------------------------
+# Sub-check 5: eBPF kernel-level signal
+# --------------------------------------------------------------------
+
+def _check_ebpf_signal(node: KnownNode) -> dict:
+    breaker = get_breaker("security.ebpf", timeout_seconds=8.0, max_retries=1, failure_threshold=2)
+    call_result = breaker.call(ebpf_signal.get_node_ebpf_alerts, node["hostname"])
+
+    if not call_result.ok:
+        logger.warning("security_agent: eBPF-signal sub-check failed: %s", call_result.failure)
+        return {
+            "has_signal": False,
+            "degraded": True,
+            "failure": call_result.failure,
+            "detail": (
+                "The kernel-level (eBPF) check couldn't complete -- no sensor reachable, so "
+                "runtime behavior on this host is unknown rather than confirmed clean."
+            ),
+            "alerts": [],
+        }
+
+    alerts = call_result.value
+    if not alerts:
+        return {
+            "has_signal": False,
+            "degraded": False,
+            "detail": f"No active kernel-level alerts for {node['hostname']}.",
+            "alerts": [],
+        }
+
+    top = alerts[0]
+    detail = (
+        f"{len(alerts)} active kernel-level alert(s) for {node['hostname']}, most severe: "
+        f"[{top.get('priority')}] {top.get('rule')} -- {top.get('output')}"
+    )
+    return {"has_signal": True, "degraded": False, "detail": detail, "alerts": alerts[:5]}
+
+
+# --------------------------------------------------------------------
+# Merge: four sub-check results -> one AgentResult
+# --------------------------------------------------------------------
+
+def _confidence(auth: dict, sec_group: dict, cve: dict, exposed: dict, ebpf: dict) -> float:
+    if ebpf["has_signal"]:
+        base = _EBPF_SIGNAL_CONFIDENCE
+    elif sec_group["has_signal"] or cve["has_signal"] or exposed["has_signal"]:
+        base = _CONFIG_SIGNAL_CONFIDENCE
+    elif auth["has_signal"]:
+        base = _AUTH_LOG_ONLY_CONFIDENCE
+    else:
+        base = _NO_SIGNAL_CONFIDENCE
+
+    if any(sig.get("degraded") for sig in (auth, sec_group, cve, exposed, ebpf)):
+        # Same idiom as anomaly.py/network.py's degraded caps: a sub-check
+        # that couldn't run means "unknown", not "confirmed clean" --
+        # worth less than a signal that actually fired, but not worth
+        # penalizing like a checked-and-found-nothing result would be.
+        base = min(base, _DEGRADED_CONFIDENCE_CAP)
+
+    return round(base, 2)
+
+
+_SYSTEM_PROMPT = """You are Cortex's security investigation assistant. You're given five independent \
+readings for one node: auth-failure log activity (Loki), a security-group audit (Neutron, flagging \
+overly-permissive ingress rules), a known-vulnerable-package check (CVE match against installed \
+versions), a confirmed-exposed-port cross-check (a real listening socket that falls inside a world-open \
+security-group rule), and kernel-level runtime alerts (eBPF/Falco-style). Write a developed security \
+finding, 4-6 sentences, covering: what each signal that fired actually shows (name specifics -- which \
+CVE, which port/rule, which alert -- when given), which signal should be weighted most heavily (a \
+kernel-level/eBPF signal is the strongest evidence here since it reflects actual observed behavior, not \
+just configuration or log correlation) and why, and a concrete next step (which log/rule/package/port/ \
+alert to check first). Use ONLY the evidence given -- never invent a CVE id, rule, port, or alert that \
+wasn't provided. If nothing fired across all five checks, say so plainly and don't force a finding."""
+
+
+def _fallback_summary(node: KnownNode, auth: dict, sec_group: dict, cve: dict, exposed: dict, ebpf: dict) -> str:
+    signals = [auth, sec_group, cve, exposed, ebpf]
+    if not any(s["has_signal"] for s in signals) and not any(s.get("degraded") for s in signals):
+        return (
+            f"No security signal on {node['hostname']}: auth logs are clean, no overly-permissive "
+            "security-group rules, no known-vulnerable packages, no confirmed exposed ports, and no "
+            "active kernel-level alerts."
+        )
+    parts = [s["detail"] for s in signals]
+    return " ".join(parts)
+
+
+def _narrate(query: str, node: KnownNode, auth: dict, sec_group: dict, cve: dict, exposed: dict, ebpf: dict) -> str:
+    fallback = _fallback_summary(node, auth, sec_group, cve, exposed, ebpf)
+    try:
+        llm = get_chat_model(temperature=0.2, tier="reasoning")
+        response = llm.invoke(
+            [
+                SystemMessage(content=_SYSTEM_PROMPT),
+                HumanMessage(
+                    content=(
+                        f"Question: {query}\n\n"
+                        f"Node: {node['hostname']} (role: {node['role']})\n"
+                        f"Auth-anomaly (log-based): {auth['detail']}\n"
+                        f"Sec-group-diff (config): {sec_group['detail']}\n"
+                        f"CVE-match (config): {cve['detail']}\n"
+                        f"Exposed-port cross-check (config, confirmed): {exposed['detail']}\n"
+                        f"eBPF signal (kernel/behavioral): {ebpf['detail']}"
+                    )
+                ),
+            ]
+        )
+        text = (response.content or "").strip()
+        return text or fallback
+    except LLMConfigError:
+        return fallback
+    except Exception:
+        logger.exception("security_agent: LLM narration failed, using fallback summary")
+        return fallback
+
+
+def _investigate(query: str, node: KnownNode, narrate: bool = True) -> tuple[AgentResult, list]:
+    """Runs all four sub-checks and returns (AgentResult, embedded_failures)
+    without touching any graph state -- mirrors anomaly.py's `_investigate`
+    exactly, for the same reason: both the standalone leaf path
+    (security_agent) and the fan-out Send target
+    (security_investigate_one) need it, kept in one place so they can't
+    drift apart.
+
+    `narrate=False` (routers/security.py's Phase Sec-2 dashboard
+    endpoints) skips the LLM call and uses `_fallback_summary` directly --
+    a panel a dashboard polls every few seconds for every known node
+    shouldn't pay an LLM invocation per host per poll just to restate the
+    same four sub-checks in prose; the fallback sentence is the real
+    evidence, which is all a panel needs. The chat path (security_agent,
+    security_investigate_one below) always narrates, unchanged.
+    """
+    auth = _check_auth_anomaly(node)
+    sec_group = _check_sec_group_diff(node)
+    cve = _check_cve_match(node)
+    # Reuses sec_group's already-fetched risky_rules -- see
+    # _check_exposed_ports's own docstring for why this isn't a second
+    # independent Neutron read.
+    exposed = _check_exposed_ports(node, sec_group)
+    ebpf = _check_ebpf_signal(node)
+
+    summary = (
+        _narrate(query, node, auth, sec_group, cve, exposed, ebpf)
+        if narrate else _fallback_summary(node, auth, sec_group, cve, exposed, ebpf)
+    )
+    confidence = _confidence(auth, sec_group, cve, exposed, ebpf)
+    has_signal = any(s["has_signal"] for s in (auth, sec_group, cve, exposed, ebpf))
+
+    agent_result: AgentResult = {
+        "summary": summary,
+        "confidence": confidence,
+        "raw_data": {
+            "hostname": node["hostname"],
+            "role": node["role"],
+            "has_signal": has_signal,
+            "auth_signal": auth,
+            "sec_group_signal": sec_group,
+            "cve_signal": cve,
+            "exposed_port_signal": exposed,
+            "ebpf_signal": ebpf,
+        },
+    }
+
+    failures = [
+        s["failure"] for s in (auth, sec_group, cve, exposed, ebpf) if s.get("degraded") and s.get("failure")
+    ]
+    return agent_result, failures
+
+
+def security_agent(state: CortexState) -> CortexState:
+    known_nodes = state["known_nodes"]
+    node = resolve_node(state["user_query"], known_nodes, session_memory=state.get("session_memory"))
+
+    if node is None:
+        available = ", ".join(n["hostname"] for n in known_nodes) or "no nodes registered"
+        state["error"] = f"I couldn't tell which node you meant. Known nodes: {available}."
+        state["agent_result"] = None
+        return state
+
+    agent_result, failures = _investigate(state["user_query"], node)
+
+    state["agent_result"] = agent_result
+    state["error"] = None
+    for failure in failures:
+        state.setdefault("failures", []).append(failure)
+    state.setdefault("resolved_entities", {})["last_node"] = node
+    state["resolved_entities"]["last_agent"] = "security"
+    return state
+
+
+# --------------------------------------------------------------------
+# v0.9: fan-out Send target -- one branch of the multi-agent incident
+# investigation (see graph.py's `_fan_out_to_investigate` and
+# nodes/anomaly.py's `anomaly_arbitrate`, which is what actually joins
+# this back together with anomaly's and network's own findings).
+# --------------------------------------------------------------------
+
+def _security_investigate_one_impl(payload: dict) -> dict:
+    query = payload["user_query"]
+    node = payload["node"]
+    agent_result, failures = _investigate(query, node)
+    finding: IncidentFinding = {
+        "hostname": node["hostname"],
+        "agent": "security",
+        "agent_result": agent_result,
+        "failures": failures,
+    }
+    return {"agent_results": [finding]}
+
+
+security_investigate_one = guarded_send("security.investigate", timeout_seconds=60.0)(_security_investigate_one_impl)
