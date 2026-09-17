@@ -951,6 +951,27 @@ export interface KeystoneTokenSignal {
   event_count?: number;
 }
 
+/** Phase Sec-6: one row of GET /api/security/audit-log -- mirrors
+ * schemas.SecurityAuditLogEntry (services/api/app/schemas.py) exactly.
+ * `redacted` is computed server-side from the same rule
+ * filter_security_response_for_role already applies live
+ * (services/security_rbac.py), not re-derived here.
+ */
+export interface SecurityAuditLogEntry {
+  trace_id: string;
+  created_at: string;
+  user_query: string;
+  username: string | null;
+  user_role: string | null;
+  target_agent: string | null;
+  redacted: boolean;
+}
+
+export interface SecurityAuditLogResponse {
+  since: string;
+  entries: SecurityAuditLogEntry[];
+}
+
 export type AgentRawData =
   | AgentMonitoringData
   | AgentPredictionData

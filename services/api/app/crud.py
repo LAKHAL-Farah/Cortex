@@ -422,6 +422,9 @@ def create_agent_trace(
     steps: list,
     final_answer: str,
     duration_ms: float,
+    user_id: uuid.UUID | None = None,
+    user_role: str | None = None,
+    security_involved: bool = False,
 ) -> models.AgentTrace:
     trace = models.AgentTrace(
         id=trace_id,
@@ -433,6 +436,9 @@ def create_agent_trace(
         steps=steps,
         final_answer=final_answer,
         duration_ms=duration_ms,
+        user_id=user_id,
+        user_role=user_role,
+        security_involved=security_involved,
     )
     db.add(trace)
     db.commit()
@@ -500,3 +506,38 @@ def agent_trace_stats(db: Session, *, since: datetime) -> dict:
         "degraded_rate": round(degraded_count / total, 4) if total else 0.0,
         "critic_flagged_rate": round(flagged_count / total, 4) if total else 0.0,
     }
+
+
+def list_security_audit_log(
+    db: Session, *, since: datetime, limit: int = 200
+) -> list[tuple[models.AgentTrace, str | None]]:
+    """Phase Sec-6: every trace where the Security Agent contributed a
+    finding (`security_involved`, computed once at write time -- see
+    models.AgentTrace), newest first, joined against `users` for the
+    asker's username. This is the evidence trail §7.11 (Gouvernance &
+    Garde-fous) asks for: who asked, under what role, and (derivable by
+    the caller from `user_role`/`security_involved` via the exact same
+    `security_rbac.filter_security_response_for_role` rule already gates
+    live answers with) whether the answer they got back was redacted --
+    see routers/security.py's `list_security_audit_log` endpoint, which
+    is the one place that actually applies that rule to these rows rather
+    than re-deriving "involved" from scratch.
+
+    A left outer join, not an inner one: `user_id` is nullable (a
+    pre-migration row, or a stateless/API caller with no session -- see
+    models.AgentTrace's own docstring), and a callerless security-flavored
+    turn is still something the audit trail should surface, just with no
+    username to show.
+
+    Indexed on `security_involved` (this query's whole filter) and
+    `created_at` (the ordering) -- no separate composite index yet; revisit
+    if this table's volume ever makes that combination worth it.
+    """
+    rows = db.execute(
+        select(models.AgentTrace, models.User.username)
+        .outerjoin(models.User, models.AgentTrace.user_id == models.User.id)
+        .where(models.AgentTrace.security_involved.is_(True), models.AgentTrace.created_at >= since)
+        .order_by(models.AgentTrace.created_at.desc())
+        .limit(limit)
+    ).all()
+    return [(row.AgentTrace, row.username) for row in rows]

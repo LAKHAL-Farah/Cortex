@@ -242,6 +242,39 @@ def _check_sec_group_diff(node: KnownNode) -> dict:
     # live incident, since that would need that deployment's own logs
     # (grep for "security.neutron" in the API's log output), which aren't
     # available from a static read of this repo.
+    #
+    # Phase Sec-6 follow-up on the compute2-sim timeout trace: the
+    # `FailureRecord` this breaker already produces on failure
+    # (resilience.py's `_failure_record`) is itself the disambiguator
+    # between the two candidate explanations, no code change needed to
+    # get an answer -- just read `error_type`/`attempts`/`duration_ms` off
+    # the trace event for that call:
+    #   - `error_type="circuit_open"`, `attempts=0`, near-zero duration
+    #     -> the breaker was already open from an earlier failure and
+    #     short-circuited; this call never actually reached
+    #     get_node_security_groups. Not a bug -- the breaker did exactly
+    #     what ADR-0007 describes -- just needs the earlier failure logged
+    #     alongside it to explain the open window.
+    #   - `error_type="timeout"`, `attempts>=1`, duration close to
+    #     `timeout_seconds` (or ~2s + 2x that, with the one retry)
+    #     -> genuinely slow, and *this* is the case worth tuning
+    #     timeout_seconds/failure_threshold for.
+    # Static read of this repo rules out a couple of candidate causes for
+    # the "genuine slowness" branch: openstack-sim has no injected delay,
+    # rate limiting, or resource caps for compute2-sim specifically (grep
+    # infra/openstack-sim/app.py), and compute1-sim/compute2-sim sit on
+    # the same sandbox Docker network as the API (no extra network hop
+    # unique to compute2-sim, see ebpf_sensor_simulator's defaults for the
+    # same observation about that topology). What *is* structurally true
+    # regardless of which host: get_node_security_groups makes one
+    # `_connect()` plus four sequential list() round-trips
+    # (servers/ports/security_group_rules/security_groups) inside this
+    # one breaker-guarded call -- heavier than a single-query breaker like
+    # security.loki -- so real latency (host under load, e.g. from the
+    # Sec-4/Sec-6 eBPF pilot's own background traffic) crossing 10s isn't
+    # implausible. Until the trace's error_type confirms which branch this
+    # was, timeout_seconds/failure_threshold below are left at their
+    # original values rather than tuned blind.
     breaker = get_breaker("security.neutron", timeout_seconds=10.0, max_retries=1, failure_threshold=2)
     call_result = breaker.call(security_audit.get_node_security_groups, node["hostname"])
 

@@ -4,9 +4,12 @@ import useSWR from "swr";
 import Link from "next/link";
 import { useMetricHistory } from "@/components/MetricChart";
 import PlotlyChart from "@/components/PlotlyChart";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/Card";
-import { ArrowLeft, Server, TrendingUp } from "lucide-react";
+import { ArrowLeft, Server, TrendingUp, ShieldAlert, ShieldQuestion, ShieldCheck, ChevronRight } from "lucide-react";
+import type { SecurityFinding } from "@/lib/types";
+import { overallSecurityTone } from "@/lib/securityStatus";
+import SecurityScopeTag from "@/components/SecurityScopeTag";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -94,6 +97,21 @@ export default function NodeDetailPage() {
   const mem = useMetricHistory(decoded, "memory_percent", m?.memory_percent, minutes);
   const disk = useMetricHistory(decoded, "disk_percent", m?.disk_percent, minutes);
 
+  // Phase Sec-6 cross-linking: "Each node's existing /nodes/[instance]
+  // detail page should gain a Security posture section linking into the
+  // relevant /security/* sub-page pre-filtered to that host -- the
+  // dashboard is a new front door, not a second place this data lives."
+  // Reuses the exact same GET /api/security/findings every /security/*
+  // page already polls, rather than a second per-node endpoint -- this
+  // node's own row is just the SecurityFinding whose hostname matches.
+  const { data: secData } = useSWR<{ findings: SecurityFinding[] }>("/api/security/findings", fetcher, {
+    refreshInterval: 15000,
+  });
+  const securityFinding = useMemo(
+    () => secData?.findings.find((f) => f.hostname === node?.hostname),
+    [secData, node?.hostname],
+  );
+
   if (!node) return <p className="p-6 text-sm text-text-faint">Loading…</p>;
 
   const latest = (arr: any[]) => (arr && arr.length ? arr[arr.length - 1].v : undefined);
@@ -173,6 +191,8 @@ export default function NodeDetailPage() {
               </div>
             </div>
           </div>
+
+          <SecurityPosturePanel hostname={node.hostname} finding={securityFinding} />
         </aside>
 
         <section className="space-y-4">
@@ -229,5 +249,69 @@ export default function NodeDetailPage() {
         </section>
       </div>
     </main>
+  );
+}
+
+// Phase Sec-6 cross-linking: the dashboard is a new front door, not a
+// second place this data lives -- so this panel never renders its own
+// security data, only a status pill (same overallSecurityTone every
+// /security page already uses) plus links out to the real sub-pages.
+// Security groups already has a real per-host route
+// (/security/security-groups/[hostname]); auth activity, exposed ports,
+// vulnerabilities, and kernel signals fetch the fleet-wide findings
+// client-side and accept ?host= to pre-filter (see
+// lib/securityStatus.ts's filterFindingsByHost). Keystone tokens is
+// Identity-scoped and fleet-wide (no host to filter by, see that page's
+// own docstring), so it's deliberately left off this per-node list.
+function SecurityPosturePanel({ hostname, finding }: { hostname: string; finding: SecurityFinding | undefined }) {
+  const links = [
+    { label: "Security groups", href: `/security/security-groups/${encodeURIComponent(hostname)}` },
+    { label: "Auth activity", href: `/security/auth-activity?host=${encodeURIComponent(hostname)}` },
+    { label: "Exposed ports", href: `/security/exposed-ports?host=${encodeURIComponent(hostname)}` },
+    { label: "Vulnerabilities", href: `/security/vulnerabilities?host=${encodeURIComponent(hostname)}` },
+    { label: "Kernel signals", href: `/security/kernel-signals?host=${encodeURIComponent(hostname)}` },
+  ];
+
+  const tone = finding ? overallSecurityTone(finding.raw_data) : null;
+
+  return (
+    <div className="panel p-4">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="eyebrow">Security posture</div>
+        <SecurityScopeTag scope="node" />
+      </div>
+
+      {!finding ? (
+        <div className="flex items-center gap-2 text-xs text-text-faint">
+          <ShieldQuestion className="h-3.5 w-3.5 shrink-0" strokeWidth={2} />
+          Not scanned yet, or not a monitored security host.
+        </div>
+      ) : (
+        <div
+          className="mb-3 flex items-center gap-2 rounded-[var(--radius-control)] p-2.5 text-sm"
+          style={{ background: tone!.soft, color: tone!.color }}
+        >
+          {tone!.label === "Clean" ? (
+            <ShieldCheck className="h-4 w-4 shrink-0" strokeWidth={2} />
+          ) : (
+            <ShieldAlert className="h-4 w-4 shrink-0" strokeWidth={2} />
+          )}
+          <span className="font-medium">{tone!.label}</span>
+        </div>
+      )}
+
+      <div className="divide-y" style={{ borderColor: "var(--border-soft)" }}>
+        {links.map((l) => (
+          <Link
+            key={l.href}
+            href={l.href}
+            className="flex items-center justify-between gap-2 py-2 text-sm text-text-dim hover:text-color-text"
+          >
+            {l.label}
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-faint" strokeWidth={2} />
+          </Link>
+        ))}
+      </div>
+    </div>
   );
 }

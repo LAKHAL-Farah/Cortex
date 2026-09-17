@@ -624,3 +624,19 @@ export function buildAuthInsight(hostStatuses: AuthHostStatus[], rows: AuthLogRo
 
   return { tone, headline, bullets, hosts, totalFlaggedEntries, categoryBreakdown };
 }
+
+/** Phase Sec-6 (cross-linking): a node's detail page (`/nodes/[instance]`)
+ * links into each Security sub-page with `?host=<hostname>` so the click
+ * lands pre-filtered rather than dumping the reader back on the
+ * fleet-wide table -- see that page's own "Security posture" section.
+ * Auth activity, exposed ports, vulnerabilities, and kernel signals all
+ * fetch the same fleet-wide GET /findings and slice it client-side by
+ * `SecurityFinding.hostname`; Security groups already has a real
+ * per-host route (`/security/security-groups/[hostname]`) and Keystone
+ * tokens has no host to filter by at all (Identity-scoped, fleet-wide --
+ * see that page's own docstring), so neither uses this helper.
+ */
+export function filterFindingsByHost<T extends { hostname: string }>(findings: T[], host: string | null): T[] {
+  if (!host) return findings;
+  return findings.filter((f) => f.hostname === host);
+}

@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, Suspense } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import useSWR from "swr";
 import { ArrowLeft, Cpu, AlertTriangle, RefreshCw, ShieldQuestion, ShieldCheck } from "lucide-react";
 import type { SecurityFinding } from "@/lib/types";
@@ -9,8 +10,9 @@ import { Card } from "@/components/ui/Card";
 import SecurityHealthBadge from "@/components/SecurityHealthBadge";
 import SecurityRescanButton from "@/components/SecurityRescanButton";
 import SecurityScopeTag from "@/components/SecurityScopeTag";
+import SecurityHostFilterBanner from "@/components/SecurityHostFilterBanner";
 import EbpfAlertsTable from "@/components/EbpfAlertsTable";
-import { EBPF_PRIORITY_ORDER, buildEbpfHostStatuses, ebpfPriorityTone, flattenEbpfFindings, type KnownEbpfPriority } from "@/lib/securityStatus";
+import { EBPF_PRIORITY_ORDER, buildEbpfHostStatuses, ebpfPriorityTone, filterFindingsByHost, flattenEbpfFindings, type KnownEbpfPriority } from "@/lib/securityStatus";
 
 const fetcher = async (url: string) => {
   const res = await fetch(url);
@@ -69,29 +71,42 @@ function PriorityStat({
  * light this page up -- `ebpf_signal` was already one of
  * security_rbac.py's four redacted sub-signal keys from day one.
  *
- * Compute-only pilot (Phase Sec-4's own scope decision, matching §5.2's
- * stated priority that VM attack surface -- and therefore sensor
- * coverage -- starts on compute hosts): controller/storage/monitoring
- * hosts are expected to read back "Clean" here, not "Unknown" -- a
- * reachable bridge with genuinely nothing recorded for an unpiloted
- * host is a real, honest state, not a gap. Only a host whose bridge call
- * fails outright shows "Unknown".
+ * Phase Sec-6 widened the ansible rollout (infra/ansible-sandbox/
+ * simulate-ebpf.yml) from a compute-only pilot to the full `monitoring`
+ * group (controllers+computes+storages -- there's no separate "network"
+ * host role in this sandbox); a host with no sensor at all still reads
+ * back "Clean" here rather than "Unknown", same reasoning as before, just
+ * a smaller set of hosts it can now apply to.
  *
- * Node-scoped (SecurityScopeTag): a sensor on a compute host sees that
- * host's own kernel -- QEMU/libvirtd processes, host-level syscalls --
- * never anything happening inside a guest VM's own kernel. That's the
- * KVM isolation boundary, not a Cortex limitation; the page copy below
- * says so explicitly rather than letting "kernel signals" read as
- * covering guest workloads.
+ * Node-scoped (SecurityScopeTag): a sensor sees that host's own kernel --
+ * QEMU/libvirtd processes, host-level syscalls -- never anything
+ * happening inside a guest VM's own kernel. That's the KVM isolation
+ * boundary, not a Cortex limitation; the page copy below says so
+ * explicitly rather than letting "kernel signals" read as covering guest
+ * workloads.
  */
 export default function KernelSignalsPage() {
+  // Reads ?host=<hostname> for the deep link from a node's own "Security
+  // posture" section (app/nodes/[instance]/page.tsx) -- Next's app
+  // router requires useSearchParams behind a Suspense boundary (same
+  // pattern as /logs).
+  return (
+    <Suspense fallback={null}>
+      <KernelSignalsPageInner />
+    </Suspense>
+  );
+}
+
+function KernelSignalsPageInner() {
+  const hostFilter = useSearchParams().get("host");
   const { data, error, isLoading, mutate } = useSWR<{ findings: SecurityFinding[] }>(
     "/api/security/findings",
     fetcher,
     { refreshInterval: 15000, revalidateOnFocus: true },
   );
 
-  const findings = useMemo(() => data?.findings ?? [], [data]);
+  const allFindings = useMemo(() => data?.findings ?? [], [data]);
+  const findings = useMemo(() => filterFindingsByHost(allFindings, hostFilter), [allFindings, hostFilter]);
   const [priority, setPriority] = useState<PriorityFilter>("all");
 
   const allRows = useMemo(() => flattenEbpfFindings(findings), [findings]);
@@ -125,10 +140,10 @@ export default function KernelSignalsPage() {
             <SecurityScopeTag scope="node" />
           </div>
           <p className="mt-1 max-w-2xl text-sm text-text-faint">
-            Live process/syscall-level alerts from a Falco- or Tetragon-style sensor, most-severe-first. Compute-only
-            pilot for now (Phase Sec-4) -- a sensor on a compute host sees that host&apos;s own kernel (QEMU/libvirtd,
-            host-level syscalls), never inside a guest VM&apos;s own kernel, which no sensor placement in Cortex today
-            can see.
+            Live process/syscall-level alerts from a Falco- or Tetragon-style sensor, most-severe-first. Deployed to
+            every controller/compute/storage host now (Phase Sec-6 widened this from Sec-4&apos;s compute-only pilot)
+            -- a sensor sees that host&apos;s own kernel (QEMU/libvirtd, host-level syscalls), never inside a guest
+            VM&apos;s own kernel, which no sensor placement in Cortex today can see.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-1">
@@ -136,6 +151,8 @@ export default function KernelSignalsPage() {
           <SecurityRescanButton />
         </div>
       </div>
+
+      {hostFilter && <SecurityHostFilterBanner host={hostFilter} clearHref="/security/kernel-signals" />}
 
       {error && (
         <Card>

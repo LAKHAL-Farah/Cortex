@@ -53,12 +53,12 @@ sync pass.
 """
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from .. import crud, graph_db, models
+from .. import crud, graph_db, models, schemas
 from ..auth import get_current_user, require_admin
 from ..db import get_db
 from ..services import instance_exposure, keystone_audit, security_rbac, security_sandbox
@@ -425,3 +425,57 @@ def reset_security_group_drift(hostname: str, rule_id: str, db: Session = Depend
         return security_sandbox.reset_demo_drift(db, hostname, rule_id)
     except security_sandbox.SandboxUnavailableError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------
+# Phase Sec-6: audit log. Not tied to any single sub-check -- this is the
+# RBAC/redaction story made visible, and the evidence trail §7.11
+# (Gouvernance & Garde-fous) asks for specifically around security-
+# sensitive answers.
+# ---------------------------------------------------------------------
+
+@router.get(
+    "/audit-log", response_model=schemas.SecurityAuditLogResponse, dependencies=[Depends(require_admin)]
+)
+def get_security_audit_log(hours: int = 24, db: Session = Depends(get_db)):
+    """Who asked a security question, what role they had, and whether the
+    answer was redacted -- over the last `hours` (default 24, same
+    dashboard-rollup shape as GET /api/v1/agents/stats).
+
+    Admin-only: this endpoint's whole purpose is to let an admin review
+    *other* accounts' security-flavored turns, including the ones that
+    were themselves redacted for a viewer -- so it needs to bypass the
+    same RBAC filter it's reporting on, not apply it to itself.
+
+    Deliberately reuses rather than re-derives the RBAC logic already
+    gating chat/dashboard answers (models.AgentTrace.security_involved is
+    computed once, at write time, via the exact same
+    `security_rbac.security_agent_involved` call routers/agents.py makes
+    for its own response filtering -- see that router and
+    models.AgentTrace's own docstring): every row returned here already
+    satisfies `security_involved`, so `redacted` below is just
+    `security_rbac.filter_security_response_for_role`'s own rule
+    (`role != "admin"`) replayed against the role snapshotted on the row,
+    not a second, parallel definition of "redacted" that could drift out
+    of sync with the one actually gating live answers.
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    rows = crud.list_security_audit_log(db, since=since)
+    entries = [
+        schemas.SecurityAuditLogEntry(
+            trace_id=str(trace.id),
+            created_at=trace.created_at.isoformat(),
+            user_query=trace.user_query,
+            username=username,
+            user_role=trace.user_role,
+            target_agent=trace.target_agent,
+            # security_involved is true for every row this query returns
+            # (crud.list_security_audit_log's own filter) -- the only
+            # remaining variable in filter_security_response_for_role's
+            # rule is the asker's role, so this is that same rule, not a
+            # re-implementation of it.
+            redacted=trace.user_role != "admin",
+        )
+        for trace, username in rows
+    ]
+    return schemas.SecurityAuditLogResponse(since=since.isoformat(), entries=entries)

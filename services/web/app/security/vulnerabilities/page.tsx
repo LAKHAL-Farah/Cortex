@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, Suspense } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import useSWR from "swr";
 import { ArrowLeft, ScrollText, AlertTriangle, RefreshCw, ShieldQuestion, ShieldCheck } from "lucide-react";
 import type { SecurityFinding } from "@/lib/types";
@@ -9,8 +10,9 @@ import { Card } from "@/components/ui/Card";
 import SecurityHealthBadge from "@/components/SecurityHealthBadge";
 import SecurityRescanButton from "@/components/SecurityRescanButton";
 import SecurityScopeTag from "@/components/SecurityScopeTag";
+import SecurityHostFilterBanner from "@/components/SecurityHostFilterBanner";
 import CveFindingsTable from "@/components/CveFindingsTable";
-import { CVE_SEVERITY_ORDER, buildCveHostStatuses, cveSeverityTone, flattenCveFindings, type KnownCveSeverity } from "@/lib/securityStatus";
+import { CVE_SEVERITY_ORDER, buildCveHostStatuses, cveSeverityTone, filterFindingsByHost, flattenCveFindings, type KnownCveSeverity } from "@/lib/securityStatus";
 
 const fetcher = async (url: string) => {
   const res = await fetch(url);
@@ -69,13 +71,27 @@ function SeverityStat({
  * packages, never anything inside a guest VM.
  */
 export default function VulnerabilitiesPage() {
+  // Reads ?host=<hostname> for the deep link from a node's own "Security
+  // posture" section (app/nodes/[instance]/page.tsx) -- Next's app
+  // router requires useSearchParams behind a Suspense boundary (same
+  // pattern as /logs).
+  return (
+    <Suspense fallback={null}>
+      <VulnerabilitiesPageInner />
+    </Suspense>
+  );
+}
+
+function VulnerabilitiesPageInner() {
+  const hostFilter = useSearchParams().get("host");
   const { data, error, isLoading, mutate } = useSWR<{ findings: SecurityFinding[] }>(
     "/api/security/findings",
     fetcher,
     { refreshInterval: 15000, revalidateOnFocus: true },
   );
 
-  const findings = useMemo(() => data?.findings ?? [], [data]);
+  const allFindings = useMemo(() => data?.findings ?? [], [data]);
+  const findings = useMemo(() => filterFindingsByHost(allFindings, hostFilter), [allFindings, hostFilter]);
   const [severity, setSeverity] = useState<SeverityFilter>("all");
 
   const allRows = useMemo(() => flattenCveFindings(findings), [findings]);
@@ -119,6 +135,8 @@ export default function VulnerabilitiesPage() {
           <SecurityRescanButton />
         </div>
       </div>
+
+      {hostFilter && <SecurityHostFilterBanner host={hostFilter} clearHref="/security/vulnerabilities" />}
 
       {error && (
         <Card>

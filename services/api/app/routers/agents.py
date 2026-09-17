@@ -106,6 +106,7 @@ def orchestrate(
     degraded = bool(result.get("failures")) or bool(
         critic_verdict and critic_verdict["status"] == "flagged"
     )
+    security_involved = _security_agent_involved(result["target_agent"], agent_result.get("raw_data"))
 
     crud.create_agent_trace(
         db,
@@ -118,6 +119,16 @@ def orchestrate(
         steps=result.get("trace_events") or [],
         final_answer=result["final_answer"],
         duration_ms=duration_ms,
+        # Phase Sec-6: who asked and under what role, snapshotted onto the
+        # row for GET /api/v1/security/audit-log -- see models.AgentTrace's
+        # own docstring on why this is a snapshot, not a live join.
+        # `security_involved` is computed just above (already needed for
+        # this turn's own RBAC filtering below) and persisted rather than
+        # thrown away, so the audit log doesn't have to re-derive it from
+        # `steps` the way GET /trace/{trace_id}'s older fallback does.
+        user_id=current_user.id,
+        user_role=current_user.role,
+        security_involved=security_involved,
     )
 
     # v0.9: RBAC output filtering -- applied here, to the *response*, never
@@ -130,7 +141,6 @@ def orchestrate(
     filtered_answer, filtered_raw_data = _filter_security_response_for_role(
         result["final_answer"], agent_result.get("raw_data"), result["target_agent"], current_user.role
     )
-    security_involved = _security_agent_involved(result["target_agent"], agent_result.get("raw_data"))
 
     return schemas.AgentOrchestrateResponse(
         answer=filtered_answer,

@@ -440,6 +440,40 @@ class AgentTrace(Base):
     final_answer: Mapped[str] = mapped_column(Text, nullable=False)
     duration_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
+    # Phase Sec-6: who asked, and under what role, so GET
+    # /api/v1/security/audit-log (routers/security.py) can show "who asked
+    # a security question, what role they had, and whether the answer was
+    # redacted" -- the RBAC/redaction story made visible, not a new
+    # gating mechanism. Nullable because rows written before this column
+    # existed have no way to backfill an asker (and a stateless/API caller
+    # with no session still runs today, see routers/agents.py's own
+    # docstring on conversation_id being optional) -- an old or callerless
+    # row just can't appear in the audit log's per-user filtering, it
+    # isn't backfilled with a fake owner.
+    #
+    # `user_role` is a snapshot of `User.role` *at request time*, not a
+    # live join to the current `users` row: this table is an audit trail,
+    # and a promotion/demotion after the fact shouldn't rewrite what
+    # actually happened on a past turn -- the same reasoning
+    # critic_verdict_status above already applies to freezing a fact onto
+    # the row instead of re-deriving it later.
+    #
+    # `security_involved` is computed once, at write time, from the exact
+    # same `security_rbac.security_agent_involved(target_agent, raw_data)`
+    # call routers/agents.py already makes for RBAC filtering (see that
+    # router) -- persisted here instead of re-derived, because raw_data
+    # itself isn't a column on this table (see `steps` above) and
+    # GET /trace/{trace_id}'s own fallback (reconstructing involvement
+    # from `steps`' node names/contributing_agents) is a heuristic worth
+    # avoiding for an audit surface when the real, raw_data-based answer
+    # was available for free at write time. Indexed: the audit log's whole
+    # query shape is "security-involved rows only".
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    user_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    security_involved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 

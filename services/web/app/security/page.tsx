@@ -32,18 +32,17 @@ const fetcher = async (url: string) => {
 // stored-snapshot diff), "Vulnerabilities" (Phase Sec-3's
 // package-inventory collector), "Auth activity" (Phase Sec-6's Loki
 // auth-log entries, already part of GET /findings' auth_signal),
-// "Kernel signals" (Phase Sec-4's Falco/Tetragon-bridge sensor, compute
-// nodes only for now), and "Exposed ports"/"Keystone tokens" (Phase Sec-5)
-// have real pages behind them now; "Audit log" still routes to a plain
-// "not available yet" placeholder rather than pretending there's a built
-// page (or worse, real data) behind it -- see that page's own ComingSoon
-// `blockedOn` text for exactly what's missing. `description` is what the
-// integration-style card in "Browse by category" shows under the title --
-// one line on what that category actually checks. `scope` (Phase 0,
-// security scope-clarification roadmap) says which of OpenStack's three
-// layers that check actually reads from -- see SecurityScopeTag's own
-// docstring and this roadmap's §2 master table for why each category
-// below is tagged the way it is.
+// "Kernel signals" (Phase Sec-4's pilot, widened to every monitoring host
+// in Phase Sec-6 -- see infra/ansible-sandbox/simulate-ebpf.yml),
+// "Exposed ports"/"Keystone tokens" (Phase Sec-5), and now "Audit log"
+// (Phase Sec-6's RBAC/redaction trail, GET /api/security/audit-log) all
+// have real pages behind them. `description` is what the integration-
+// style card in "Browse by category" shows under the title -- one line
+// on what that category actually checks. `scope` (Phase 0, security
+// scope-clarification roadmap) says which of OpenStack's three layers
+// that check actually reads from -- see SecurityScopeTag's own docstring
+// and this roadmap's §2 master table for why each category below is
+// tagged the way it is.
 const CATEGORIES: SecurityCategory[] = [
   {
     label: "Auth activity",
@@ -74,7 +73,7 @@ const CATEGORIES: SecurityCategory[] = [
   },
   {
     label: "Kernel signals (eBPF)",
-    description: "Falco alerts for suspicious syscalls, capability use, and container escapes (compute-only pilot).",
+    description: "Falco alerts for suspicious syscalls, capability use, and container escapes -- every monitoring host now.",
     href: "/security/kernel-signals",
     icon: Cpu,
     color: "var(--chart-5)",
@@ -101,11 +100,11 @@ const CATEGORIES: SecurityCategory[] = [
   },
   {
     label: "Audit log",
-    description: "Every Keystone/Nova/Neutron API call, searchable by actor, project, and action.",
+    description: "Who asked a security question, what role they had, and whether the answer was redacted.",
     href: "/security/audit-log",
     icon: FileClock,
     color: "var(--chart-2)",
-    available: false,
+    available: true,
     scope: "identity",
   },
 ];

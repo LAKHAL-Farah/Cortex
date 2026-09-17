@@ -427,6 +427,29 @@ class AgentTraceResponse(BaseModel):
     created_at: str
 
 
+class SecurityAuditLogEntry(BaseModel):
+    """Phase Sec-6: one row of GET /api/v1/security/audit-log -- the
+    RBAC/redaction story made visible, not a new gating mechanism (see
+    services/security_rbac.py). `redacted` is computed by the router from
+    the exact rule `filter_security_response_for_role` already applies
+    live (`user_role != "admin"`, since `security_involved` is true for
+    every row this endpoint returns by construction), replayed over
+    history rather than re-implemented.
+    """
+    trace_id: str
+    created_at: str
+    user_query: str
+    username: str | None
+    user_role: str | None
+    target_agent: str | None
+    redacted: bool
+
+
+class SecurityAuditLogResponse(BaseModel):
+    since: str
+    entries: list[SecurityAuditLogEntry]
+
+
 class AgentStatsResponse(BaseModel):
     since: str
     total_invocations: int
