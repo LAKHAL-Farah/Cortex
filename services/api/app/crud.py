@@ -541,3 +541,137 @@ def list_security_audit_log(
         .limit(limit)
     ).all()
     return [(row.AgentTrace, row.username) for row in rows]
+
+
+# --------------------------------------------------------------------------
+# OpenStack Expert Agent v1.0 (adr-0010) -- catalog-entry feedback loop.
+# --------------------------------------------------------------------------
+
+def get_latest_resolved_anomaly_event(
+    db: Session, hostname: str, metric_name: str
+) -> models.AnomalyEvent | None:
+    """Most recently *resolved* episode for this (hostname, metric_name) --
+    what "save this as a catalog entry" (routers/openstack_expert.py's
+    draft-from-incident endpoint) reads to pre-fill a new CatalogEntry
+    draft. Deliberately resolved-only (unlike list_open_anomaly_flags,
+    which is open-only): turning a still-active incident into a runbook
+    entry before anyone knows how it actually got fixed would just be
+    guessing, and resolution_note (see AnomalyEvent's own docstring) is
+    exactly the human-written "what actually happened" this pre-fill
+    wants to seed `what_it_means` with.
+    """
+    return (
+        db.query(models.AnomalyEvent)
+        .filter(
+            models.AnomalyEvent.hostname == hostname,
+            models.AnomalyEvent.metric_name == metric_name,
+            models.AnomalyEvent.resolved_at.isnot(None),
+        )
+        .order_by(models.AnomalyEvent.resolved_at.desc())
+        .first()
+    )
+
+
+def get_catalog_entry(db: Session, entry_id: uuid.UUID) -> models.CatalogEntry | None:
+    return db.get(models.CatalogEntry, entry_id)
+
+
+def get_catalog_entry_by_symptom_id(db: Session, symptom_id: str) -> models.CatalogEntry | None:
+    return db.scalar(select(models.CatalogEntry).where(models.CatalogEntry.symptom_id == symptom_id))
+
+
+def list_catalog_entries(db: Session, status: str | None = None) -> list[models.CatalogEntry]:
+    query = db.query(models.CatalogEntry)
+    if status:
+        query = query.filter(models.CatalogEntry.status == status)
+    return query.order_by(models.CatalogEntry.created_at.desc()).all()
+
+
+def list_published_catalog_entries(db: Session) -> list[models.CatalogEntry]:
+    """What agents/nodes/openstack_expert_catalog_store.py's
+    `load_published_entries` reads -- only "published" rows ever reach the
+    live symptom matcher, see models.CatalogEntry's own docstring on why
+    "draft" is deliberately invisible here."""
+    return (
+        db.query(models.CatalogEntry)
+        .filter(models.CatalogEntry.status == "published")
+        .order_by(models.CatalogEntry.published_at.asc())
+        .all()
+    )
+
+
+def create_catalog_entry(
+    db: Session,
+    *,
+    symptom_id: str,
+    title: str,
+    category: str,
+    what_it_means: str = "",
+    metric_names: list[str] | None = None,
+    service_binaries: list[str] | None = None,
+    keywords: list[str] | None = None,
+    confirm_commands: list[dict] | None = None,
+    remediation_commands: list[dict] | None = None,
+    doc_ref: str = "",
+    source_hostname: str | None = None,
+    source_metric_name: str | None = None,
+    source_anomaly_event_id: uuid.UUID | None = None,
+    created_by: uuid.UUID | None = None,
+) -> models.CatalogEntry:
+    entry = models.CatalogEntry(
+        symptom_id=symptom_id,
+        title=title,
+        category=category,
+        what_it_means=what_it_means,
+        metric_names=metric_names or [],
+        service_binaries=service_binaries or [],
+        keywords=keywords or [],
+        confirm_commands=confirm_commands or [],
+        remediation_commands=remediation_commands or [],
+        doc_ref=doc_ref,
+        status="draft",
+        source_hostname=source_hostname,
+        source_metric_name=source_metric_name,
+        source_anomaly_event_id=source_anomaly_event_id,
+        created_by=created_by,
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def update_catalog_entry(
+    db: Session, entry: models.CatalogEntry, payload: "schemas.CatalogEntryUpdate"
+) -> models.CatalogEntry:
+    """Only fields actually set on the request body are applied (standard
+    partial-update shape, same as e.g. UserUpdate's own callers) --
+    routers/openstack_expert.py is what enforces "draft only", not this
+    function, so a future admin "force-edit a published entry" path can
+    reuse this without a new crud function."""
+    # model_dump() already recursively turns nested CommandIn models into
+    # plain dicts -- confirm_commands/remediation_commands land here in
+    # exactly the JSON-serializable shape the column expects, no separate
+    # conversion needed.
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        if value is not None:
+            setattr(entry, field, value)
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def publish_catalog_entry(db: Session, entry: models.CatalogEntry) -> models.CatalogEntry:
+    entry.status = "published"
+    entry.published_at = datetime.utcnow()
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def archive_catalog_entry(db: Session, entry: models.CatalogEntry) -> models.CatalogEntry:
+    entry.status = "archived"
+    db.commit()
+    db.refresh(entry)
+    return entry

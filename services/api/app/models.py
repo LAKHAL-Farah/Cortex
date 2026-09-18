@@ -631,6 +631,97 @@ class SecurityFindingCache(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class CatalogEntry(Base):
+    """OpenStack Expert Agent runbook entries submitted from the UI (v1.0,
+    docs/architecture/adr-0010-openstack-expert-v1-expansion.md) -- the
+    feedback loop the original planning doc's §4 ("how the catalog grows")
+    called for: "every time a real incident gets resolved, the resolution
+    should get written back as a new catalog entry."
+
+    `openstack_expert_catalog.py`'s CATALOG stays exactly the hand-reviewed,
+    process-static Python list it was in v0.6 (adr-0008 decision #1 is
+    explicit that this is the right tradeoff for a *reviewed* baseline
+    catalog) -- this table is an additive layer of operator-submitted
+    entries, loaded alongside it at match time
+    (agents/nodes/openstack_expert_catalog_store.py::load_published_entries)
+    rather than merged into the Python literal, so a bad submission can
+    never corrupt the reviewed baseline the way a bad code review could.
+
+    Mirrors SymptomEntry/Command's shape field-for-field (see
+    openstack_expert_catalog.py's TypedDicts) so
+    openstack_expert_catalog_store.row_to_symptom_entry can convert a row
+    straight into the exact type the symptom matcher and renderer already
+    know how to score and render -- there is no second matching/rendering
+    code path for a DB-backed entry.
+
+    `status` gates whether a submission actually affects the live agent
+    for every user, not just its author:
+    - "draft": pre-filled from a resolved incident (or started blank),
+      freely editable, invisible to `_match_symptoms`. This is the safety
+      net a hand-authored CATALOG entry gets "for free" from code review
+      (adr-0008 decision #5: an incorrect command is actively harmful, not
+      just a bad sentence) -- a submission has to pass
+      `openstack_expert_catalog_store.validate_symptom_entry` (the exact
+      invariants test_openstack_expert_catalog.py already enforces on the
+      static CATALOG: every confirm_command read-only, every command
+      labeled + described, etc.) before it can move to "published".
+    - "published": validated and now participates in `_match_symptoms` for
+      every user, same as a hand-written CATALOG entry.
+    - "archived": retired from matching without deleting the row -- avoids
+      orphaning a citation a past answer already showed someone, and keeps
+      the id (`symptom_id`) from being silently reused by a future draft.
+    Never a hard delete once it's ever been published, for the same reason.
+    """
+    __tablename__ = "catalog_entries"
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft','published','archived')",
+            name="ck_catalog_entries_status_allowed",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Human-readable slug, not just the surrogate `id` -- this is what
+    # slots into SymptomEntry["id"] exactly the way a static CATALOG
+    # entry's id does (AgentResult.raw_data["matched_symptom_id"], used
+    # for lookup/citation), so a submitted entry cites and is cited the
+    # same way a hand-authored one is.
+    symptom_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    metric_names: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    service_binaries: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    keywords: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    what_it_means: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # list[Command] -- {"command": str, "description": str, "read_only": bool},
+    # same shape openstack_expert_catalog.Command's TypedDict declares.
+    confirm_commands: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    remediation_commands: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    doc_ref: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+
+    # Where this draft came from, if the "save this as a catalog entry" UI
+    # action on a resolved incident created it (routers/openstack_expert.py) --
+    # all three nullable since an entry can also be started blank by an
+    # operator with no specific incident in hand.
+    source_hostname: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_metric_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_anomaly_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("anomaly_events.id", ondelete="SET NULL"), nullable=True
+    )
+
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class RoleBaseline(Base):
     """Baseline statistics grouped by node role instead of hostname."""
     __tablename__ = "role_baselines"

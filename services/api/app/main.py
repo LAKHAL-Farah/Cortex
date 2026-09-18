@@ -21,6 +21,8 @@ from .routers import settings
 from .routers import quotas
 from .routers import agents
 from .routers import security
+from .routers import openstack_docs
+from .routers import openstack_expert
 from .routers import auth as auth_router
 from .auth import get_current_user, hash_password
 from . import models
@@ -431,6 +433,16 @@ app.include_router(agents.router, dependencies=_auth_required)
 # is the shared helper both routers call).
 app.include_router(security.router, dependencies=_auth_required)
 app.include_router(settings.router, dependencies=_auth_required)
+# v1.0 (docs/architecture/adr-0010-openstack-expert-v1-expansion.md): the
+# official-docs embedding pipeline (its own on-demand /ingest, same
+# rationale as knowledge.router above -- upstream OpenStack docs don't
+# drift on this deployment's clock either) and the catalog-entry
+# feedback loop. Both admin-only actions (publishing an entry, running a
+# docs ingest) are gated per-route with require_admin, same pattern
+# knowledge.router's own /ingest already uses -- login alone is enough to
+# read/draft, not enough to change what the live agent matches against.
+app.include_router(openstack_docs.router, dependencies=_auth_required)
+app.include_router(openstack_expert.router, dependencies=_auth_required)
 app.mount("/ui", StaticFiles(directory="app/static", html=True), name="ui")
 
 @app.get("/health")

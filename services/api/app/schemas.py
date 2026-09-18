@@ -518,3 +518,137 @@ class UserUpdate(BaseModel):
     # on the target account -- an admin-set password is a temporary one by
     # definition (see models.User's docstring).
     new_password: str | None = Field(default=None, min_length=8, max_length=256)
+
+
+# --------------------------------------------------------------------------
+# OpenStack Expert Agent v1.0 (adr-0010) -- official-docs embedding pipeline
+# read/write schemas, mirroring the Knowledge* / Chat* family above but for
+# the separate `cortex-openstack-official-docs` Qdrant collection (see
+# services/openstack_docs/). No chat schema here on purpose -- that corpus
+# stays retrieval-only, see services/openstack_docs/search.py's docstring.
+# --------------------------------------------------------------------------
+
+class OpenStackDocsIngestResult(BaseModel):
+    collection: str
+    embedding_model: str
+    sources_configured: int
+    sources_fetched: int
+    sources_failed: int
+    chunks_embedded: int
+    failed_urls: list[str]
+    duration_seconds: float
+
+
+class OpenStackDocsStatus(BaseModel):
+    collection: str
+    exists: bool
+    points_count: int | None = None
+    vectors_count: int | None = None
+    status: str | None = None
+
+
+class OpenStackDocsSearchQuery(BaseModel):
+    query: str = Field(min_length=1)
+    top_k: int = Field(default=3, ge=1, le=10)
+    service: str | None = None
+
+
+class OpenStackDocsSearchResult(BaseModel):
+    score: float
+    text: str
+    source_url: str
+    doc_title: str
+    heading: str | None = None
+    service: str
+
+
+class OpenStackDocsSearchResponse(BaseModel):
+    results: list[OpenStackDocsSearchResult]
+
+
+# --------------------------------------------------------------------------
+# OpenStack Expert Agent v1.0 (adr-0010) -- catalog-entry feedback loop.
+# Mirrors openstack_expert_catalog.SymptomEntry/Command field-for-field (see
+# that module's TypedDicts and models.CatalogEntry's own docstring on why):
+# a submission has to carry the exact shape the symptom matcher and
+# renderer already know how to consume, so nothing agent-side needs a
+# second code path for a DB-backed entry vs. a hand-authored one.
+# --------------------------------------------------------------------------
+
+class CatalogEntryStatus(str, Enum):
+    draft = "draft"
+    published = "published"
+    archived = "archived"
+
+
+class CommandIn(BaseModel):
+    command: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    read_only: bool
+
+
+class CatalogEntryDraftFromIncident(BaseModel):
+    """POST body for "save this as a catalog entry" on a resolved incident
+    -- see routers/openstack_expert.py's draft-from-incident endpoint.
+    Looks up the matching resolved `AnomalyEvent` row server-side (by
+    hostname + metric_name); the operator only has to point at *which*
+    resolved incident they're turning into a runbook entry, not retype
+    anything the incident already recorded."""
+    hostname: str = Field(min_length=1)
+    metric_name: str = Field(min_length=1)
+
+
+class CatalogEntryCreate(BaseModel):
+    """Start a blank draft with no source incident -- for an operator who
+    wants to author a runbook entry from scratch rather than from a
+    resolved incident."""
+    symptom_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    title: str = Field(min_length=1, max_length=255)
+    category: str
+
+
+class CatalogEntryUpdate(BaseModel):
+    """Every field optional -- an operator fills a draft in incrementally
+    (see routers/openstack_expert.py::update_catalog_entry), only the
+    fields actually present in the request body are applied. Only allowed
+    while status="draft"; a published entry is immutable (archive it and
+    create a fresh draft to revise it -- see models.CatalogEntry's
+    docstring on why nothing here is a hard delete)."""
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    category: str | None = None
+    metric_names: list[str] | None = None
+    service_binaries: list[str] | None = None
+    keywords: list[str] | None = None
+    what_it_means: str | None = None
+    confirm_commands: list[CommandIn] | None = None
+    remediation_commands: list[CommandIn] | None = None
+    doc_ref: str | None = None
+
+
+class CatalogEntryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    symptom_id: str
+    title: str
+    category: str
+    metric_names: list[str]
+    service_binaries: list[str]
+    keywords: list[str]
+    what_it_means: str
+    confirm_commands: list[dict]
+    remediation_commands: list[dict]
+    doc_ref: str
+    status: CatalogEntryStatus
+    source_hostname: str | None = None
+    source_metric_name: str | None = None
+    source_anomaly_event_id: uuid.UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+    published_at: datetime | None = None
+
+
+class CatalogEntryValidation(BaseModel):
+    """Returned by the publish endpoint on a 422 -- every reason the entry
+    isn't publishable yet, so the UI can show all of them at once instead
+    of a fix-one-resubmit-see-the-next loop."""
+    errors: list[str]

@@ -98,6 +98,14 @@ services:
       # infra/.env.example.
       NVIDIA_NIM_FAST_MODEL: ${NVIDIA_NIM_FAST_MODEL:-nvidia/nemotron-3-super-120b-a12b}
       KNOWLEDGE_CHAT_MIN_SCORE: ${KNOWLEDGE_CHAT_MIN_SCORE:-0.2}
+      # OpenStack Expert Agent v1.0 (adr-0010) -- official-docs collection
+      # lives on the same Qdrant Cloud cluster as QDRANT_URL/QDRANT_API_KEY
+      # above, just a different collection; the web-search fallback tier
+      # degrades to "unavailable" (not an error) with TAVILY_API_KEY unset.
+      QDRANT_OFFICIAL_DOCS_COLLECTION: ${QDRANT_OFFICIAL_DOCS_COLLECTION:-cortex-openstack-official-docs}
+      OPENSTACK_DOCS_MIN_SCORE: ${OPENSTACK_DOCS_MIN_SCORE:-0.25}
+      OPENSTACK_DOCS_FETCH_TIMEOUT: ${OPENSTACK_DOCS_FETCH_TIMEOUT:-15}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
     volumes:
       - ../services/api:/app
       - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd

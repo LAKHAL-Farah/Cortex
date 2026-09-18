@@ -58,6 +58,35 @@ note) with no Neutron *agent* involved at all, so `_evidence_from_network`
 now also recognizes a down/disabled Neutron port and an instance stuck in
 ERROR alongside one, via the two new catalog entries (`port-down`,
 `instance-stuck-in-error`) this version adds.
+
+v1.0 (docs/architecture/adr-0010-openstack-expert-v1-expansion.md) adds
+two things, both scoped to what the original v0.6/v0.9/v0.10 design left
+as explicit follow-ups (adr-0008 §OS.4-OS.6):
+
+- **The matcher's `catalog` is no longer just the static CATALOG list.**
+  `_combined_catalog` appends every currently-"published" feedback-loop
+  entry (agents/nodes/openstack_expert_catalog_store.py, backed by
+  models.CatalogEntry) on every call, so an incident type that got
+  resolved and turned into a catalog entry from the UI now matches the
+  next time it recurs -- chained or standalone -- without a code change
+  or a restart. `_match_symptoms`/`_detect_service_binaries` both take an
+  explicit `catalog` argument (default: just the static CATALOG, so
+  every v0.6-era direct unit test of either function is unaffected).
+- **Standalone no-match now falls through two more tiers** before giving
+  up (`_standalone_fallback`): official OpenStack documentation
+  (services/openstack_docs/search.py, a separate Qdrant collection from
+  both this catalog and the internal RAG/Knowledge Agent's own corpus --
+  see that module's docstring) and, below that, a community web search
+  (services/web_search.py, biased toward Launchpad/mailing-list/Q&A
+  sources). Each tier is visibly labeled by source ("catalog" /
+  "official_docs" / "web_search" / "none" in `raw_data["source"]`, and in
+  the rendered markdown itself) so nobody mistakes a Launchpad forum post
+  for either this deployment's curated catalog or actual upstream docs.
+  Deliberately standalone-only: a *chained* no-match still leaves the
+  upstream diagnosis as the final answer unmodified (see `_run_chained`'s
+  own comment) -- that v0.6 decision (adr-0008 decision #4) is preserved
+  as-is here, not widened, since a good specific diagnosis still beats a
+  generic-but-sourced layer stacked on top of it.
 """
 import logging
 import re
@@ -65,6 +94,16 @@ import re
 from ..node_resolver import resolve_node
 from ..state import CortexState
 from .openstack_expert_catalog import CATALOG, SymptomEntry
+from .openstack_expert_catalog_store import load_published_entries
+
+# Imported as plain module-level names (rather than reached for through a
+# package prefix at call time) specifically so tests can
+# `monkeypatch.setattr(expert, "search_official_docs", ...)` /
+# `monkeypatch.setattr(expert, "run_web_search", ...)` the same way
+# rag.py's own tests monkeypatch its embed_query/qdrant_search imports --
+# see tests/test_openstack_expert.py's v1.0 fallback tests.
+from ...services.openstack_docs.search import DocResult, search_official_docs
+from ...services.web_search import WebSearchResult, search as run_web_search
 
 logger = logging.getLogger(__name__)
 
@@ -114,19 +153,30 @@ def _match_symptoms(
     service_binaries: list[str] | None = None,
     query: str = "",
     log_lines: list[str] | None = None,
+    catalog: list[SymptomEntry] | None = None,
 ) -> list[tuple[SymptomEntry, int]]:
     """Every catalog entry with a positive score, most-relevant first.
-    Ties keep CATALOG's own order (Python sort is stable) -- CATALOG is
-    already ordered most-likely-to-fire-first per its module docstring, so
-    that's a reasonable tiebreak, not an arbitrary one.
+    Ties keep the catalog's own order (Python sort is stable) -- CATALOG
+    is already ordered most-likely-to-fire-first per its module
+    docstring, so that's a reasonable tiebreak, not an arbitrary one; any
+    dynamic entries (v1.0, see `catalog` below) are appended after it by
+    `_combined_catalog`, so a hand-authored entry still wins a tie over a
+    UI-submitted one covering the same symptom.
+
+    `catalog` defaults to just the static CATALOG -- every v0.6-era direct
+    call site (including this module's own unit tests) that doesn't pass
+    one gets exactly the old, fully offline, fully deterministic behavior.
+    `openstack_expert_agent` (v1.0) passes `_combined_catalog()`, which
+    also folds in every currently-published feedback-loop entry.
     """
+    catalog = catalog if catalog is not None else CATALOG
     service_binaries = service_binaries or []
     log_lines = log_lines or []
     query_lower = query.lower()
     log_lower = [line.lower() for line in log_lines]
 
     scored: list[tuple[SymptomEntry, int]] = []
-    for entry in CATALOG:
+    for entry in catalog:
         score = 0
         if metric_name and metric_name in entry["metric_names"]:
             score += _SCORE_METRIC_NAME
@@ -144,9 +194,35 @@ def _match_symptoms(
     return scored
 
 
-def _detect_service_binaries(text: str) -> list[str]:
+def _detect_service_binaries(text: str, catalog: list[SymptomEntry] | None = None) -> list[str]:
+    """`catalog=None` (the v0.6-era default every direct unit test of
+    this function still uses) scans against `_ALL_SERVICE_BINARIES`, the
+    static CATALOG's own precomputed set. Passing a combined catalog
+    (v1.0, see `_combined_catalog`) recomputes the set fresh from it
+    instead, so a dynamic entry's service_binaries become recognizable in
+    free text immediately, without needing `_ALL_SERVICE_BINARIES` itself
+    (a module-load-time constant) to somehow stay in sync with a table
+    that changes at runtime.
+    """
     text_lower = text.lower()
-    return [b for b in _ALL_SERVICE_BINARIES if b in text_lower or b.replace("-", " ") in text_lower]
+    binaries = (
+        _ALL_SERVICE_BINARIES
+        if catalog is None
+        else sorted({b for entry in catalog for b in entry["service_binaries"]})
+    )
+    return [b for b in binaries if b in text_lower or b.replace("-", " ") in text_lower]
+
+
+def _combined_catalog() -> list[SymptomEntry]:
+    """CATALOG (static, hand-reviewed -- adr-0008 decision #1) plus every
+    currently-"published" feedback-loop entry (v1.0, adr-0010; see
+    openstack_expert_catalog_store.load_published_entries). A fresh DB
+    read on every call rather than a cached merge: a newly-published entry
+    should be visible to the very next query, not after a process
+    restart, and `load_published_entries` already degrades to an empty
+    list (i.e. this just becomes CATALOG) on any DB hiccup -- see that
+    function's own docstring."""
+    return CATALOG + load_published_entries()
 
 
 # --------------------------------------------------------------------
@@ -441,8 +517,118 @@ def _build_result(entry: SymptomEntry, evidence_line: str, hostname: str | None,
             "confirm_commands": _to_command_dicts(entry["confirm_commands"], hostname),
             "remediation_commands": _to_command_dicts(entry["remediation_commands"], hostname),
             "doc_ref": entry["doc_ref"],
+            # v1.0: same "source" label the fallback tiers use (see
+            # _build_docs_fallback_result / _build_web_fallback_result /
+            # _standalone_fallback's final tier) so a frontend can render
+            # a citation badge the same way regardless of which tier
+            # produced the answer, without inferring it from whether
+            # matched_symptom_id is set.
+            "source": "catalog",
             **extra_raw,
         },
+    }
+
+
+# --------------------------------------------------------------------
+# v1.0 (adr-0010): standalone-only fallback tiers, tried in order when
+# _match_symptoms finds nothing in the combined catalog -- official
+# OpenStack docs, then a community web search, then finally the original
+# v0.6 "no runbook entry" text. See the module docstring's v1.0 section
+# for why this is standalone-only (chained no-match keeps its v0.6
+# behavior of leaving the upstream diagnosis unmodified).
+# --------------------------------------------------------------------
+
+def _render_docs_fallback(query: str, hits: list[DocResult]) -> str:
+    excerpts = []
+    for hit in hits:
+        heading = f" — {hit.heading}" if hit.heading else ""
+        excerpts.append(f"**{hit.doc_title}{heading}**\n{hit.text}\n_Source: {hit.source_url}_")
+    return (
+        f"### From official OpenStack documentation\n\n"
+        f"_No entry in the curated runbook catalog matches \"{query}\" yet, but the official "
+        f"OpenStack docs cover it:_\n\n"
+        f"{chr(10).join(excerpts)}\n\n"
+        f"---\n"
+        f"**Source (official docs):** the excerpts above are from docs.openstack.org, not "
+        f"this deployment's curated catalog -- confirm they apply to your setup before acting."
+    )
+
+
+def _build_docs_fallback_result(query: str, hits: list[DocResult]) -> dict:
+    return {
+        "summary": _render_docs_fallback(query, hits),
+        "confidence": 0.5,
+        "raw_data": {
+            "matched_symptom_id": None,
+            "source": "official_docs",
+            "query": query,
+            "doc_results": [
+                {"title": h.doc_title, "heading": h.heading, "url": h.source_url, "score": h.score}
+                for h in hits
+            ],
+        },
+    }
+
+
+def _render_web_fallback(query: str, hits: list[WebSearchResult]) -> str:
+    lines = [f"- [{h.title}]({h.url})" + (f" — {h.snippet}" if h.snippet else "") for h in hits]
+    return (
+        f"### Community-sourced results (unverified)\n\n"
+        f"_No catalog entry or official documentation matches \"{query}\" -- here's what turned "
+        f"up in the OpenStack community (Launchpad, mailing lists, Q&A). This is **not** "
+        f"official documentation and hasn't been reviewed -- verify anything here before "
+        f"acting on it._\n\n"
+        f"{chr(10).join(lines)}\n\n"
+        f"---\n"
+        f"**Source:** community web search -- not docs.openstack.org, and not this "
+        f"deployment's curated catalog."
+    )
+
+
+def _build_web_fallback_result(query: str, hits: list[WebSearchResult]) -> dict:
+    return {
+        "summary": _render_web_fallback(query, hits),
+        "confidence": 0.3,
+        "raw_data": {
+            "matched_symptom_id": None,
+            "source": "web_search",
+            "query": query,
+            "web_results": [{"title": h.title, "url": h.url, "snippet": h.snippet} for h in hits],
+        },
+    }
+
+
+def _standalone_fallback(query: str) -> dict:
+    """Tries official docs, then a community web search, before finally
+    giving up. Each tier is wrapped broadly: a missing TAVILY_API_KEY, an
+    unreachable Qdrant Cloud cluster, or an embedding model that can't
+    load are all just "this tier isn't available right now" -- never a
+    crash, and never something that blocks trying the next tier or
+    falling back to the original v0.6 text. See services/openstack_docs/
+    search.py and services/web_search.py's own docstrings for what each
+    tier is grounded in and why they're kept visibly distinct."""
+    try:
+        docs_hits = search_official_docs(query, top_k=3)
+    except Exception:
+        logger.info("openstack_expert: official-docs fallback unavailable", exc_info=True)
+        docs_hits = []
+
+    if docs_hits:
+        return _build_docs_fallback_result(query, docs_hits)
+
+    try:
+        web_hits = run_web_search(query, max_results=5)
+    except Exception:
+        logger.info("openstack_expert: web-search fallback unavailable", exc_info=True)
+        web_hits = []
+
+    if web_hits:
+        return _build_web_fallback_result(query, web_hits)
+
+    return {
+        "summary": _no_match_standalone_answer(query),
+        "confidence": 0.2,
+        "raw_data": {"matched_symptom_id": None, "source": "none", "query": query},
     }
 
 
@@ -450,7 +636,7 @@ def _build_result(entry: SymptomEntry, evidence_line: str, hostname: str | None,
 # The two entry paths
 # --------------------------------------------------------------------
 
-def _run_chained(state: CortexState, upstream: str) -> CortexState:
+def _run_chained(state: CortexState, upstream: str, catalog: list[SymptomEntry]) -> CortexState:
     upstream_result = state["agent_result"]
     raw_data = upstream_result["raw_data"]
 
@@ -466,6 +652,7 @@ def _run_chained(state: CortexState, upstream: str) -> CortexState:
         service_binaries=evidence["service_binaries"],
         query=state["user_query"],
         log_lines=evidence["log_lines"],
+        catalog=catalog,
     )
 
     if not matches:
@@ -491,12 +678,12 @@ def _run_chained(state: CortexState, upstream: str) -> CortexState:
     return state
 
 
-def _run_standalone(state: CortexState) -> CortexState:
+def _run_standalone(state: CortexState, catalog: list[SymptomEntry]) -> CortexState:
     query = state["user_query"]
     known_nodes = state.get("known_nodes") or []
 
-    service_binaries = _detect_service_binaries(query)
-    matches = _match_symptoms(query=query, service_binaries=service_binaries)
+    service_binaries = _detect_service_binaries(query, catalog=catalog)
+    matches = _match_symptoms(query=query, service_binaries=service_binaries, catalog=catalog)
 
     # Best-effort only -- a standalone "how do I check nova-compute"
     # question doesn't need a specific host, but if one's clearly named
@@ -506,11 +693,9 @@ def _run_standalone(state: CortexState) -> CortexState:
     hostname = node["hostname"] if node else None
 
     if not matches:
-        state["agent_result"] = {
-            "summary": _no_match_standalone_answer(query),
-            "confidence": 0.2,
-            "raw_data": {"matched_symptom_id": None, "query": query},
-        }
+        # v1.0: no longer immediately the static "no runbook entry" text --
+        # see _standalone_fallback and the module docstring's v1.0 section.
+        state["agent_result"] = _standalone_fallback(query)
         state["error"] = None
         return state
 
@@ -522,7 +707,11 @@ def _run_standalone(state: CortexState) -> CortexState:
 
 
 def openstack_expert_agent(state: CortexState) -> CortexState:
+    # v1.0: built once per call so both paths below see the same snapshot
+    # of static-plus-published entries -- see _combined_catalog's own
+    # docstring for why this is a fresh read rather than a cached one.
+    catalog = _combined_catalog()
     upstream = state.get("target_agent")
     if upstream in ("anomaly", "monitoring", "network") and state.get("agent_result") and not state.get("error"):
-        return _run_chained(state, upstream)
-    return _run_standalone(state)
+        return _run_chained(state, upstream, catalog)
+    return _run_standalone(state, catalog)
