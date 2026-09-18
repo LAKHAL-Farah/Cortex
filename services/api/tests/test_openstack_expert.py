@@ -468,3 +468,22 @@ def test_standalone_resolves_a_named_node_into_commands():
     # that resolution didn't blow up and a match was still found.
     assert result["agent_result"]["raw_data"]["matched_symptom_id"] == "host-disk-pressure"
     assert commands
+
+
+def test_docs_fallback_drops_index_chunks_and_renders_structured_markdown(monkeypatch):
+    toc = "\n".join(["Network components", "Overlay protocols", "DNS Integration", "QoS"] * 8)
+    hits = [
+        DocResult(text=toc, source_url="https://docs.openstack.org/neutron/latest/admin/index.html",
+                  doc_title="OpenStack Networking Guide", heading=None, service="neutron", score=0.7),
+        DocResult(text="Agents\n$ openstack network agent list\n+--+--+\n| ID | Host |\n+--+--+\n| a1 | h1 |\n",
+                  source_url="https://docs.openstack.org/neutron/latest/admin/ovn/troubleshooting.html",
+                  doc_title="Troubleshooting", heading="Agents", service="neutron", score=0.6),
+    ]
+    monkeypatch.setattr(expert, "search_official_docs", lambda query, top_k=3: hits)
+    result = expert.openstack_expert_agent(_standalone_state("what's the meaning of life"))
+
+    summary = result["agent_result"]["summary"]
+    assert len(result["agent_result"]["raw_data"]["doc_results"]) == 1
+    assert "Networking Guide" not in summary
+    assert "```bash" in summary and "| ID | Host |" in summary
+    assert "> [!NOTE]" in summary

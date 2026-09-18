@@ -102,6 +102,7 @@ from .openstack_expert_catalog_store import load_published_entries
 # `monkeypatch.setattr(expert, "run_web_search", ...)` the same way
 # rag.py's own tests monkeypatch its embed_query/qdrant_search imports --
 # see tests/test_openstack_expert.py's v1.0 fallback tests.
+from ...services.openstack_docs.format import clean_inline, doc_text_to_markdown, looks_like_index
 from ...services.openstack_docs.search import DocResult, search_official_docs
 from ...services.web_search import WebSearchResult, search as run_web_search
 
@@ -538,19 +539,44 @@ def _build_result(entry: SymptomEntry, evidence_line: str, hostname: str | None,
 # behavior of leaving the upstream diagnosis unmodified).
 # --------------------------------------------------------------------
 
+_MIN_EXCERPT_CHARS = 200
+
+
+def _callout(kind: str, body: str) -> str:
+    """GitHub-style admonition blockquote -- the web client's Markdown
+    renderer turns `> [!WARNING]` / `> [!NOTE]` into a small colored callout
+    (components/CopilotAgentPanels.tsx). Plain blockquote elsewhere."""
+    lines = body.strip().splitlines()
+    return f"> [!{kind}]\n" + "\n".join(f"> {ln}" for ln in lines)
+
+
 def _render_docs_fallback(query: str, hits: list[DocResult]) -> str:
-    excerpts = []
+    rendered = []
     for hit in hits:
-        heading = f" — {hit.heading}" if hit.heading else ""
-        excerpts.append(f"**{hit.doc_title}{heading}**\n{hit.text}\n_Source: {hit.source_url}_")
+        excerpt = doc_text_to_markdown(hit.text, hit.heading)
+        rendered.append((hit, excerpt))
+    # A hit that is just a heading plus one intro sentence adds noise next to
+    # a substantive one -- drop it unless it is all we have.
+    substantive = [(h, e) for h, e in rendered if len(e) >= _MIN_EXCERPT_CHARS]
+    rendered = substantive or rendered
+
+    sections = []
+    for n, (hit, excerpt) in enumerate(rendered, start=1):
+        title = clean_inline(hit.doc_title)
+        heading = clean_inline(hit.heading or "")
+        label = f"{title} — {heading}" if heading and heading != title else title
+        sections.append(
+            f"#### {n}. {label}\n\n{excerpt}\n\n[Open in docs.openstack.org]({hit.source_url})"
+        )
     return (
         f"### From official OpenStack documentation\n\n"
-        f"_No entry in the curated runbook catalog matches \"{query}\" yet, but the official "
-        f"OpenStack docs cover it:_\n\n"
-        f"{chr(10).join(excerpts)}\n\n"
-        f"---\n"
-        f"**Source (official docs):** the excerpts above are from docs.openstack.org, not "
-        f"this deployment's curated catalog -- confirm they apply to your setup before acting."
+        + "\n\n".join(sections)
+        + "\n\n---\n"
+        + _callout(
+            "NOTE",
+            "**Source (official docs):** the excerpts above are from docs.openstack.org, not "
+            "this deployment's curated catalog -- confirm they apply to your setup before acting.",
+        )
     )
 
 
@@ -563,7 +589,17 @@ def _build_docs_fallback_result(query: str, hits: list[DocResult]) -> dict:
             "source": "official_docs",
             "query": query,
             "doc_results": [
-                {"title": h.doc_title, "heading": h.heading, "url": h.source_url, "score": h.score}
+                {
+                    "title": clean_inline(h.doc_title),
+                    "heading": clean_inline(h.heading) if h.heading else None,
+                    "url": h.source_url,
+                    "score": h.score,
+                    # The raw excerpt is the evidence the summary was built
+                    # from -- kept here so critic.py's numeric-grounding
+                    # check sees it (otherwise every UUID/port number quoted
+                    # from the docs looked "ungrounded").
+                    "text": h.text,
+                }
                 for h in hits
             ],
         },
@@ -574,14 +610,18 @@ def _render_web_fallback(query: str, hits: list[WebSearchResult]) -> str:
     lines = [f"- [{h.title}]({h.url})" + (f" — {h.snippet}" if h.snippet else "") for h in hits]
     return (
         f"### Community-sourced results (unverified)\n\n"
-        f"_No catalog entry or official documentation matches \"{query}\" -- here's what turned "
-        f"up in the OpenStack community (Launchpad, mailing lists, Q&A). This is **not** "
-        f"official documentation and hasn't been reviewed -- verify anything here before "
-        f"acting on it._\n\n"
-        f"{chr(10).join(lines)}\n\n"
-        f"---\n"
-        f"**Source:** community web search -- not docs.openstack.org, and not this "
-        f"deployment's curated catalog."
+        + _callout(
+            "WARNING",
+            f'No catalog entry or official documentation matches "{query}" -- here\'s what turned '
+            f"up in the OpenStack community (Launchpad, mailing lists, Q&A). This is **not** "
+            f"official documentation and hasn't been reviewed -- verify anything here before "
+            f"acting on it.",
+        )
+        + "\n\n"
+        + "\n".join(lines)
+        + "\n\n---\n"
+        + "**Source:** community web search -- not docs.openstack.org, and not this "
+        "deployment's curated catalog."
     )
 
 
@@ -612,6 +652,11 @@ def _standalone_fallback(query: str) -> dict:
     except Exception:
         logger.info("openstack_expert: official-docs fallback unavailable", exc_info=True)
         docs_hits = []
+
+    # Table-of-contents / navigation chunks are semantically close to almost
+    # any question but contain no answer -- drop them so the next tier gets a
+    # chance instead of showing a wall of link titles as "documentation".
+    docs_hits = [h for h in docs_hits if not looks_like_index(h.text)]
 
     if docs_hits:
         return _build_docs_fallback_result(query, docs_hits)

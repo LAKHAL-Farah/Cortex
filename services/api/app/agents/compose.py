@@ -35,6 +35,8 @@ enough that a false positive is possible, and telling the user "verify
 this" costs far less than silently discarding a mostly-correct finding
 over one flagged sentence would.
 """
+import re
+
 from .resilience import FailureRecord
 from .state import CortexState
 
@@ -62,24 +64,41 @@ def _describe_source(source: str) -> str:
     return "the " + source.replace(".", " ").replace("_", " ") + " step"
 
 
+def _brief(text: str, limit: int = 140) -> str:
+    """One short, single-line, markdown-safe excerpt of a flagged sentence.
+    A flagged "sentence" can be an entire pasted command table, which must
+    never be dumped whole into a one-line warning."""
+    flat = re.sub(r"\s+", " ", text)
+    flat = re.sub(r"[`|*_>#\[\]]+", "", flat).replace('"', "'").strip()
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+
+
+def _warning(body: str) -> str:
+    """`> [!WARNING]` admonition -- rendered as a small yellow callout by the
+    web client's Markdown component. No blank lines inside, so the note stays
+    one paragraph-sized block."""
+    return "> [!WARNING]\n" + "\n".join(f"> {ln}" for ln in body.splitlines())
+
+
 def _degraded_note(failures: list[FailureRecord]) -> str:
     parts = sorted({_describe_source(f["source"]) for f in failures})
     if len(parts) == 1:
         described = parts[0]
     else:
         described = ", ".join(parts[:-1]) + f", and {parts[-1]}"
-    return (
-        f"_Note: {described} failed while gathering evidence for this answer -- what follows "
-        "reflects the evidence that did come back, with reduced confidence._"
+    return _warning(
+        f"**Partial evidence** — {described} failed while gathering evidence for this answer. "
+        "What follows reflects the evidence that did come back, with reduced confidence."
     )
 
 
 def _critic_note(flagged_claims: list[str]) -> str:
-    example = flagged_claims[0]
-    return (
-        "_Note: this answer contains at least one claim "
-        f'("{example}") that could not be verified against the evidence '
-        "gathered for it -- treat it with extra caution._"
+    count = len(flagged_claims)
+    noun = "claim" if count == 1 else "claims"
+    return _warning(
+        f"**Unverified {noun}** — this answer contains {count} {noun} that could not be "
+        f"verified against the evidence gathered for it. Treat with extra caution.\n"
+        f"First flagged: \u201c{_brief(flagged_claims[0])}\u201d"
     )
 
 

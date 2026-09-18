@@ -618,6 +618,12 @@ export interface AgentExpertData {
   // agent's own original summary, kept rather than discarded.
   diagnosed_by?: "anomaly" | "monitoring" | "network" | null;
   upstream_summary?: string;
+  // Which tier produced the answer (openstack_expert.py): the curated
+  // catalog, official docs, community web search, or nothing.
+  source?: "catalog" | "official_docs" | "web_search" | "none";
+  query?: string;
+  doc_results?: { title: string; heading?: string | null; url: string; score?: number }[];
+  web_results?: { title: string; url: string; snippet?: string }[];
 }
 
 // Network agent (v0.9/v0.10, services/api/app/agents/nodes/network.py) --

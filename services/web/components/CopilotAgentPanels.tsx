@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { isValidElement, useEffect, useMemo, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -20,6 +20,7 @@ import {
   Gauge,
   Globe,
   HardDrive,
+  Info,
   Lightbulb,
   Loader2,
   Lock,
@@ -414,6 +415,46 @@ function withCiteLinks(text: string) {
   return text.replace(/\[([a-zA-Z0-9_.\-/]+\.md)\]/g, `[$1](${CITE_SCHEME}$1)`);
 }
 
+/** Older stored answers carry the compose-step notes as a plain italic
+ * paragraph (`_Note: ..._`). Rewrites them into the same `> [!WARNING]`
+ * callout new answers ship with, so history looks the same as fresh turns. */
+function withCallouts(text: string) {
+  const brief = (t: string, n = 140) => {
+    const flat = t.replace(/[`|*_>#[\]]+/g, "").replace(/\s+/g, " ").trim();
+    return flat.length <= n ? flat : `${flat.slice(0, n - 1).trimEnd()}…`;
+  };
+  return text
+    .replace(
+      /^_Note: this answer contains at least one claim \("([\s\S]*?)"\) that could not be verified[\s\S]*?extra caution\._/gm,
+      (_m, claim: string) =>
+        `> [!WARNING]\n> **Unverified claim** — this answer contains a claim that could not be verified against the evidence gathered for it. Treat with extra caution.\n> First flagged: \u201c${brief(claim)}\u201d`,
+    )
+    .replace(/^_Note: ([^\n]+?)_$/gm, (_m, body: string) => `> [!WARNING]\n> ${body}`);
+}
+
+type MdNode = { type: string; value?: string; children?: MdNode[]; data?: Record<string, unknown> };
+const CALLOUT_RE = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i;
+
+/** Minimal remark plugin (no extra dependency): a blockquote whose first
+ * line is `[!KIND]` becomes `<div class="md-callout md-callout--kind">`. */
+function remarkCallouts() {
+  const visit = (node: MdNode) => {
+    const para = node.type === "blockquote" ? node.children?.[0] : undefined;
+    const first = para?.type === "paragraph" ? para.children?.[0] : undefined;
+    if (node.type === "blockquote" && first?.type === "text" && first.value) {
+      const m = first.value.match(CALLOUT_RE);
+      if (m) {
+        const kind = m[1].toLowerCase() === "caution" || m[1].toLowerCase() === "important" ? "warning" : m[1].toLowerCase();
+        first.value = first.value.slice(m[0].length);
+        if (!first.value) para!.children!.shift();
+        node.data = { hName: "div", hProperties: { className: ["md-callout", `md-callout--${kind}`] } };
+      }
+    }
+    node.children?.forEach(visit);
+  };
+  return (tree: MdNode) => visit(tree);
+}
+
 function CiteChip({ file }: { file: string }) {
   return (
     <span
@@ -426,11 +467,52 @@ function CiteChip({ file }: { file: string }) {
   );
 }
 
+function nodeText(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join("");
+  if (isValidElement(node)) return nodeText((node.props as { children?: ReactNode }).children);
+  return "";
+}
+
+function CodeBlock({ lang, code }: { lang?: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard unavailable -- the block stays selectable by hand.
+    }
+  }
+  const label = !lang || lang === "bash" || lang === "sh" || lang === "shell" ? "shell" : lang;
+  return (
+    <div className="md-codeblock">
+      <div className="md-codeblock__bar">
+        <span className="inline-flex items-center gap-1.5">
+          <Terminal className="h-3 w-3" strokeWidth={2} />
+          {label}
+        </span>
+        <button type="button" onClick={copy} aria-label="Copy" title="Copy" className="md-codeblock__copy">
+          {copied ? <Check className="h-3 w-3" style={{ color: "var(--ok)" }} /> : <Copy className="h-3 w-3" />}
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre>
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
+const CALLOUT_ICON = { note: Info, tip: Lightbulb, warning: AlertTriangle } as const;
+
 export function Markdown({ text }: { text: string }) {
   return (
     <div className="md-content">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkCallouts]}
         components={{
           a({ href, children }) {
             if (href?.startsWith(CITE_SCHEME)) {
@@ -442,9 +524,33 @@ export function Markdown({ text }: { text: string }) {
               </a>
             );
           },
+          table({ children }) {
+            return (
+              <div className="md-table-wrap">
+                <table>{children}</table>
+              </div>
+            );
+          },
+          pre({ children }) {
+            const child = Array.isArray(children) ? children[0] : children;
+            const props = (isValidElement(child) ? child.props : {}) as { className?: string; children?: ReactNode };
+            const lang = /language-([\w-]+)/.exec(props.className ?? "")?.[1];
+            return <CodeBlock lang={lang} code={nodeText(props.children).replace(/\n$/, "")} />;
+          },
+          div({ className, children }) {
+            const kind = /md-callout--(\w+)/.exec(className ?? "")?.[1] as keyof typeof CALLOUT_ICON | undefined;
+            if (!kind) return <div className={className}>{children}</div>;
+            const Icon = CALLOUT_ICON[kind] ?? Info;
+            return (
+              <div className={className} role={kind === "warning" ? "alert" : "note"}>
+                <Icon className="md-callout__icon" strokeWidth={2} />
+                <div className="md-callout__body">{children}</div>
+              </div>
+            );
+          },
         }}
       >
-        {withCiteLinks(text)}
+        {withCallouts(withCiteLinks(text))}
       </ReactMarkdown>
     </div>
   );
@@ -1225,8 +1331,67 @@ function CommandSection({ title, commands }: { title: string; commands: AgentExp
   );
 }
 
+function hostOf(url: string) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** Sources card for the two non-catalog tiers (official docs / community
+ * search). Official docs get the accent tone; community results get the
+ * warning tone because they're unreviewed. */
+function ExpertSourcesPanel({ data }: { data: AgentExpertData }) {
+  const official = data.source === "official_docs";
+  const items = official
+    ? (data.doc_results ?? []).map((d) => ({
+        title: d.heading && d.heading !== d.title ? `${d.title} — ${d.heading}` : d.title,
+        url: d.url,
+        meta: typeof d.score === "number" ? `${Math.round(d.score * 100)}% match` : undefined,
+      }))
+    : (data.web_results ?? []).map((w) => ({ title: w.title, url: w.url, meta: hostOf(w.url) }));
+  if (items.length === 0) return null;
+
+  const tone = official
+    ? { color: "var(--accent)", soft: "var(--accent-soft)", label: "Official OpenStack docs" }
+    : { color: "var(--warn)", soft: "var(--warn-soft)", label: "Community sources · unverified" };
+  const Icon = official ? BookOpen : AlertTriangle;
+
+  return (
+    <div className="agent-panel" style={{ borderColor: `color-mix(in srgb, ${tone.color} 25%, var(--border))` }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <Icon className="h-3.5 w-3.5" style={{ color: tone.color }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">Sources</span>
+        </div>
+        <span className="agent-pill" style={{ color: tone.color, background: tone.soft }}>
+          {tone.label}
+        </span>
+      </div>
+      <ul className="flex flex-col gap-1.5">
+        {items.map((item, i) => (
+          <li key={`${item.url}-${i}`}>
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-1.5 text-[12px] no-underline"
+              style={{ background: "var(--canvas)", color: "var(--text)" }}
+            >
+              <ExternalLink className="h-3 w-3 shrink-0" style={{ color: tone.color }} strokeWidth={2} />
+              <span className="min-w-0 flex-1 truncate">{item.title}</span>
+              {item.meta && <span className="shrink-0 text-[11px] text-text-muted">{item.meta}</span>}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function ExpertPanel({ data }: { data: AgentExpertData }) {
-  if (!data.matched_symptom_id) return null;
+  if (!data.matched_symptom_id) return <ExpertSourcesPanel data={data} />;
 
   return (
     <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--accent) 22%, var(--border))" }}>
@@ -1707,7 +1872,16 @@ export function AnimatedAgentAnswer({
   onSettled?: () => void;
   confidence?: number | null;
 }) {
-  const { visible, finished } = useTypewriter(answer, animate, onSettled);
+  // Word-by-word typing shreds tables, fenced blocks and callouts (half a
+  // table is just pipes), so structured answers are shown whole.
+  const rich = /^```|^\|.*\|\s*$|^> \[!/m.test(answer);
+  const typing = animate && !rich;
+  const { visible, finished } = useTypewriter(answer, typing, onSettled);
+
+  useEffect(() => {
+    if (animate && rich) onSettled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!animate) {
     return <AgentAnswerPanel agentUsed={agentUsed} rawData={rawData} answer={answer} confidence={confidence} />;

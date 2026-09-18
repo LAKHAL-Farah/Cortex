@@ -205,6 +205,12 @@ def fetch_page(url: str) -> str:
         response.raise_for_status()
     except requests.RequestException as exc:
         raise ScrapeError(f"failed to fetch {url}: {exc}") from exc
+    # requests falls back to ISO-8859-1 for text/* responses with no charset
+    # header, which turns every UTF-8 quote/pilcrow into mojibake ("Â¶",
+    # "â\x80\x9c") in the stored chunks. docs.openstack.org is UTF-8.
+    headers = getattr(response, "headers", None) or {}
+    if "charset" not in str(headers.get("content-type", "")).lower():
+        response.encoding = "utf-8"
     return response.text
 
 
