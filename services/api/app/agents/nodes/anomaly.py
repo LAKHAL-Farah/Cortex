@@ -111,7 +111,7 @@ from ... import crud
 from ...services import ebpf_signal, loki_client, network_health
 from ...services.llm_client import LLMConfigError, get_chat_model
 from ...services.metrics_collector import collect_metrics
-from ..node_resolver import resolve_node
+from ..node_resolver import resolve_node, resolve_nodes
 from ..resilience import get_breaker, guarded_send
 from ..state import AgentResult, CortexState, IncidentFinding, KnownNode
 
@@ -691,7 +691,21 @@ def anomaly_dispatch(state: CortexState) -> CortexState:
     known_nodes = state["known_nodes"]
     query = state["user_query"]
 
-    node = resolve_node(query, known_nodes, session_memory=state.get("session_memory"))
+    session_memory = state.get("session_memory")
+
+    # Several nodes named outright (or a role group): investigate exactly
+    # those. Checked *before* resolve_node, which treats two hostnames in one
+    # sentence as ambiguous and would let the LLM tier quietly pick just one.
+    # A fleet-wide "all nodes" is deliberately not handled here -- the Living
+    # Model scoping below is smarter than "the first N nodes".
+    named = resolve_nodes(query, known_nodes, session_memory=session_memory, include_all=False)
+    if named:
+        state["incident_scope"] = named[:_MAX_INCIDENT_FANOUT]
+        state["error"] = None
+        state.setdefault("resolved_entities", {})["last_nodes"] = named
+        return state
+
+    node = resolve_node(query, known_nodes, session_memory=session_memory)
     if node is not None:
         state["incident_scope"] = [node]
         state["error"] = None
@@ -700,6 +714,14 @@ def anomaly_dispatch(state: CortexState) -> CortexState:
     scope = _incident_scope_from_living_model(query, known_nodes)
     if scope:
         state["incident_scope"] = scope
+        state["error"] = None
+        return state
+
+    # "check all nodes" with nothing flagged in the Living Model: still a
+    # legitimate ask -- sweep the fleet (bounded) rather than refusing.
+    fleet = resolve_nodes(query, known_nodes, session_memory=session_memory)
+    if fleet:
+        state["incident_scope"] = fleet[:_MAX_INCIDENT_FANOUT]
         state["error"] = None
         return state
 

@@ -56,6 +56,8 @@ import type {
   AgentExpertCommand,
   AgentExpertData,
   AgentMonitoringData,
+  AgentMonitoringFleetData,
+  AgentPredictionFleetData,
   AgentName,
   AgentNetworkData,
   AgentPredictionData,
@@ -592,6 +594,174 @@ function MiniStat({ label, value }: { label: string; value: ReactNode }) {
     <div className="agent-mini-stat">
       <div className="agent-mini-stat__label">{label}</div>
       <div className="agent-mini-stat__value">{value}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-node (fleet) panels -- monitoring/prediction answers about several
+// nodes at once (raw_data.scope === "multi"). The answer text already carries
+// the comparison table; these add the at-a-glance version: one row per node,
+// worst first (the backend sorts), with severity-colored bars.
+// ---------------------------------------------------------------------------
+
+function isFleet(data: unknown): boolean {
+  return !!data && typeof data === "object" && (data as { scope?: string }).scope === "multi";
+}
+
+function MiniBar({ label, value }: { label: string; value: number }) {
+  const tone = pctTone(value);
+  return (
+    <div className="min-w-0">
+      <div className="flex items-baseline justify-between text-[10.5px] text-text-muted">
+        <span>{label}</span>
+        <span className="font-mono font-semibold" style={{ color: tone }}>
+          {value}%
+        </span>
+      </div>
+      <div className="mt-0.5 h-1 overflow-hidden rounded-full" style={{ background: "var(--border-soft)" }}>
+        <div className="h-full rounded-full" style={{ width: `${Math.min(100, Math.max(0, value))}%`, background: tone }} />
+      </div>
+    </div>
+  );
+}
+
+function FleetSummaryPill({ color, soft, children }: { color: string; soft: string; children: ReactNode }) {
+  return (
+    <span className="agent-pill" style={{ color, background: soft }}>
+      {children}
+    </span>
+  );
+}
+
+function MonitoringFleetPanel({ data }: { data: AgentMonitoringFleetData }) {
+  const { counts } = data;
+  const attention = counts.down + counts.warning + counts.critical;
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--ok) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <Activity className="h-3.5 w-3.5" style={{ color: "var(--ok)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">Fleet · {counts.total} nodes</span>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <FleetSummaryPill color="var(--ok)" soft="var(--ok-soft)">
+            <CheckCircle2 className="h-3 w-3" strokeWidth={2} />
+            {counts.up} up
+          </FleetSummaryPill>
+          {counts.down > 0 && (
+            <FleetSummaryPill color="var(--crit)" soft="var(--crit-soft)">
+              <XCircle className="h-3 w-3" strokeWidth={2} />
+              {counts.down} down
+            </FleetSummaryPill>
+          )}
+          {attention > 0 && (
+            <FleetSummaryPill color="var(--warn)" soft="var(--warn-soft)">
+              <AlertTriangle className="h-3 w-3" strokeWidth={2} />
+              {data.concerning.length} need attention
+            </FleetSummaryPill>
+          )}
+        </div>
+      </div>
+
+      <ul className="flex flex-col gap-1.5">
+        {data.nodes.map((n) => {
+          const up = n.status === "up";
+          const tone = !up || n.health === "critical" ? "var(--crit)" : n.health === "warning" ? "var(--warn)" : "var(--ok)";
+          return (
+            <li
+              key={n.node}
+              className="grid grid-cols-1 items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-2 sm:grid-cols-[minmax(0,1.3fr)_repeat(3,minmax(0,1fr))]"
+              style={{ background: "var(--canvas)", borderLeft: `3px solid ${tone}` }}
+            >
+              <div className="min-w-0">
+                <div className="truncate text-[12.5px] font-semibold text-color-text">{n.node}</div>
+                <div className="text-[11px] text-text-muted">
+                  {n.role} · {up ? n.health : "down"} · up {n.uptime}
+                </div>
+              </div>
+              <MiniBar label="CPU" value={n.cpu_percent} />
+              <MiniBar label="RAM" value={n.memory_percent} />
+              <MiniBar label="Disk" value={n.disk_percent} />
+            </li>
+          );
+        })}
+      </ul>
+
+      {data.missing.length > 0 && (
+        <div className="flex items-start gap-2 text-[11.5px] text-text-muted">
+          <AlertTriangle className="mt-[1px] h-3 w-3 shrink-0" style={{ color: "var(--warn)" }} strokeWidth={2} />
+          No live data yet for {data.missing.join(", ")}.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PredictionFleetPanel({ data }: { data: AgentPredictionFleetData }) {
+  const isPercent = data.metric.endsWith("_percent");
+  const unit = isPercent ? "%" : "";
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--medium) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <TrendingUp className="h-3.5 w-3.5" style={{ color: "var(--medium)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">
+            {humanizeMetric(data.metric)} · {data.counts.total} nodes
+          </span>
+        </div>
+        <FleetSummaryPill
+          color={data.at_risk.length ? "var(--crit)" : "var(--medium)"}
+          soft={data.at_risk.length ? "var(--crit-soft)" : "var(--medium-soft)"}
+        >
+          {data.at_risk.length > 0 && <AlertTriangle className="h-3 w-3" strokeWidth={2} />}
+          {data.at_risk.length ? `${data.at_risk.length} at risk` : data.horizon_days ? `${data.horizon_days}d forecast` : "forecast"}
+        </FleetSummaryPill>
+      </div>
+
+      <ul className="flex flex-col gap-1.5">
+        {data.nodes.map((n) => {
+          const tone = n.will_breach ? "var(--crit)" : n.may_breach ? "var(--warn)" : "var(--ok)";
+          const TrendIcon = n.delta > 0.5 ? TrendingUp : n.delta < -0.5 ? TrendingDown : Minus;
+          return (
+            <li
+              key={n.hostname}
+              className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.6fr)_auto] items-center gap-3 rounded-[var(--radius-control)] px-2.5 py-2"
+              style={{ background: "var(--canvas)", borderLeft: `3px solid ${tone}` }}
+            >
+              <div className="min-w-0">
+                <div className="truncate text-[12.5px] font-semibold text-color-text">{n.hostname}</div>
+                <div className="text-[11px] text-text-muted">{n.role}</div>
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 font-mono text-[11.5px] text-text-dim">
+                  {n.start}
+                  {unit} → <span style={{ color: tone, fontWeight: 600 }}>{n.end}{unit}</span>
+                  <TrendIcon className="h-3 w-3" style={{ color: "var(--text-muted)" }} strokeWidth={2} />
+                </div>
+                {isPercent && (
+                  <div className="mt-1 h-1 overflow-hidden rounded-full" style={{ background: "var(--border-soft)" }}>
+                    <div
+                      className="h-full rounded-full"
+                      style={{ width: `${Math.min(100, Math.max(0, n.end))}%`, background: tone }}
+                    />
+                  </div>
+                )}
+              </div>
+              <span className="agent-pill shrink-0" style={{ color: tone, background: "var(--canvas)", border: `1px solid ${tone}` }}>
+                {n.will_breach ? "will cross" : n.may_breach ? "may cross" : "ok"}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+
+      {data.missing.length > 0 && (
+        <div className="flex items-start gap-2 text-[11.5px] text-text-muted">
+          <AlertTriangle className="mt-[1px] h-3 w-3 shrink-0" style={{ color: "var(--warn)" }} strokeWidth={2} />
+          Not enough data to forecast {data.missing.join(", ")}.
+        </div>
+      )}
     </div>
   );
 }
@@ -1823,6 +1993,22 @@ function AgentPanelSkeleton({ agentUsed }: { agentUsed?: string }) {
 // Dispatcher -- answer text (always) plus whichever panel matches agent_used.
 // ---------------------------------------------------------------------------
 
+function MonitoringSwitch({ data }: { data: AgentRawData }) {
+  return isFleet(data) ? (
+    <MonitoringFleetPanel data={data as AgentMonitoringFleetData} />
+  ) : (
+    <MonitoringPanel data={data as AgentMonitoringData} />
+  );
+}
+
+function PredictionSwitch({ data }: { data: AgentRawData }) {
+  return isFleet(data) ? (
+    <PredictionFleetPanel data={data as AgentPredictionFleetData} />
+  ) : (
+    <PredictionPanel data={data as AgentPredictionData} />
+  );
+}
+
 /** Static render -- full answer + panel, no animation. Used for messages
  * loaded from history (they've already "arrived"). */
 export function AgentAnswerPanel({
@@ -1839,10 +2025,10 @@ export function AgentAnswerPanel({
   return (
     <div className="min-w-0">
       <Markdown text={answer} />
-      {agentUsed === "monitoring" && rawData && <MonitoringPanel data={rawData as AgentMonitoringData} />}
+      {agentUsed === "monitoring" && rawData && <MonitoringSwitch data={rawData} />}
       {agentUsed === "network" && rawData && <NetworkPanel data={rawData as AgentNetworkData} />}
       {agentUsed === "security" && rawData && <SecurityPanel data={rawData as AgentSecurityData} />}
-      {agentUsed === "prediction" && rawData && <PredictionPanel data={rawData as AgentPredictionData} />}
+      {agentUsed === "prediction" && rawData && <PredictionSwitch data={rawData} />}
       {agentUsed === "rag" && rawData && <RagPanel data={rawData as AgentRagData} />}
       {agentUsed === "anomaly" && rawData && (
         <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />
@@ -1894,10 +2080,10 @@ export function AnimatedAgentAnswer({
       {!showPanel && rawData && <AgentPanelSkeleton agentUsed={agentUsed} />}
       {showPanel && (
         <motion.div initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
-          {agentUsed === "monitoring" && <MonitoringPanel data={rawData as AgentMonitoringData} />}
+          {agentUsed === "monitoring" && <MonitoringSwitch data={rawData} />}
           {agentUsed === "network" && <NetworkPanel data={rawData as AgentNetworkData} />}
           {agentUsed === "security" && <SecurityPanel data={rawData as AgentSecurityData} />}
-          {agentUsed === "prediction" && <PredictionPanel data={rawData as AgentPredictionData} />}
+          {agentUsed === "prediction" && <PredictionSwitch data={rawData} />}
           {agentUsed === "rag" && <RagPanel data={rawData as AgentRagData} />}
           {agentUsed === "anomaly" && <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />}
           {agentUsed === "openstack_expert" && <ExpertPanel data={rawData as AgentExpertData} />}

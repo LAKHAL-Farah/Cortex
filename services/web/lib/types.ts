@@ -476,6 +476,61 @@ export interface ActualPoint {
   value: number;
 }
 
+// v1.1 -- multi-node answers (services/api/app/agents/nodes/monitoring.py's
+// _run_multi / prediction.py's _run_multi). Discriminated from the single-node
+// shapes by `scope: "multi"`.
+export interface AgentFleetRow {
+  node: string;
+  role: string;
+  instance: string;
+  cpu_percent: number;
+  memory_percent: number;
+  swap_percent: number;
+  disk_percent: number;
+  load1: number;
+  uptime: string;
+  status: "up" | "down" | string;
+  health: "healthy" | "warning" | "critical" | string;
+}
+
+export interface AgentFleetMetricAggregate {
+  avg: number;
+  max: number;
+  max_node: string;
+  min: number;
+  min_node: string;
+}
+
+export interface AgentMonitoringFleetData {
+  scope: "multi";
+  nodes: AgentFleetRow[];
+  missing: string[];
+  counts: { total: number; up: number; down: number; healthy: number; warning: number; critical: number };
+  aggregates: Record<"cpu_percent" | "memory_percent" | "disk_percent", AgentFleetMetricAggregate>;
+  concerning: string[];
+  insights: string[];
+}
+
+export interface AgentPredictionFleetData {
+  scope: "multi";
+  metric: string;
+  horizon_days: number | null;
+  concern_percent: number;
+  nodes: {
+    hostname: string;
+    role: string;
+    start: number;
+    end: number;
+    delta: number;
+    peak: number;
+    may_breach: boolean;
+    will_breach: boolean;
+  }[];
+  missing: string[];
+  at_risk: string[];
+  counts: { total: number; at_risk: number };
+}
+
 export interface AgentPredictionData {
   hostname: string;
   metric: string;
@@ -981,6 +1036,8 @@ export interface SecurityAuditLogResponse {
 export type AgentRawData =
   | AgentMonitoringData
   | AgentPredictionData
+  | AgentMonitoringFleetData
+  | AgentPredictionFleetData
   | AgentRagData
   | AgentAnomalyData
   | AgentExpertData
