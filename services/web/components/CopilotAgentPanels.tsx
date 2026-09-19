@@ -1883,16 +1883,16 @@ function confidenceTone(confidence: number) {
 }
 
 function AnomalyMetricCard({ signal }: { signal: AgentAnomalyData["metric_signal"] }) {
-  const data = signal.data;
+  const data = signal?.data;
 
-  if (!signal.has_signal || !data) {
+  if (!signal?.has_signal || !data) {
     return (
       <div className="agent-anomaly-subcard">
         <div className="agent-anomaly-subcard__head" style={{ color: "var(--ok)" }}>
           <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2} />
           Metric check
         </div>
-        <p className="text-[12px] leading-relaxed text-text-muted">{signal.detail}</p>
+        <p className="text-[12px] leading-relaxed text-text-muted">{signal?.detail ?? "No metric signal was returned."}</p>
       </div>
     );
   }
