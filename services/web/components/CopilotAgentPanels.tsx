@@ -236,6 +236,8 @@ export function ReasoningTrace({
   agentUsed,
   elapsedMs,
   steps,
+  onboarding = false,
+  onOnboardingShown,
 }: {
   active: boolean;
   agentUsed?: string;
@@ -245,15 +247,33 @@ export function ReasoningTrace({
   // that expands into it -- "routed to the network agent" stops being the
   // whole story and becomes the summary of a real, inspectable sequence.
   steps?: AgentTraceStep[];
+  // v1.3/task 3.7 (onboarding mode): true for the one turn CopilotChat has
+  // picked as this browser's first-ever steps-backed answer (see its
+  // COPILOT_TRACE_ONBOARDED_KEY). Auto-expands the timeline instead of
+  // waiting for a click and adds one explanatory line, so the *first*
+  // answer teaches "you can see why it investigated this way" -- every
+  // later turn (and this same turn, once acknowledged) is the plain
+  // click-to-expand behavior above, unchanged.
+  onboarding?: boolean;
+  onOnboardingShown?: () => void;
 }) {
   const [step, setStep] = useState(0);
-  const [expanded, setExpanded] = useState(false);
+  const hasRealSteps = !!steps && steps.length > 0;
+  const [expanded, setExpanded] = useState(onboarding && hasRealSteps);
 
   useEffect(() => {
     if (!active) return;
     const id = setInterval(() => setStep((s) => (s + 1) % THINKING_STEPS.length), 700);
     return () => clearInterval(id);
   }, [active]);
+
+  // A single render with the timeline auto-expanded is the whole "lesson" --
+  // tell CopilotChat right away so it can flip the browser-local flag and
+  // no other turn (including a reload of this one) auto-expands again.
+  useEffect(() => {
+    if (onboarding && hasRealSteps) onOnboardingShown?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onboarding, hasRealSteps]);
 
   if (active) {
     return (
@@ -277,7 +297,6 @@ export function ReasoningTrace({
   if (!agentUsed) return null;
   const meta = agentMeta(agentUsed);
   const Icon = meta.icon;
-  const hasRealSteps = !!steps && steps.length > 0;
   // The last non-structural step before compose is what actually produced
   // the answer -- if that's a different agent than target_agent (i.e. it
   // got chained, see openstack_expert.py), say so instead of only naming
@@ -353,6 +372,14 @@ export function ReasoningTrace({
       </button>
       {hasRealSteps && expanded && (
         <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} transition={{ duration: 0.15 }}>
+          {onboarding && (
+            <div
+              className="mb-1.5 mt-1 text-[11px] leading-relaxed"
+              style={{ color: "var(--text-muted)" }}
+            >
+              This is the real step-by-step trace of how Cockpit investigated your question — every turn has one; click the line above to open or close it.
+            </div>
+          )}
           <AgentTraceTimeline steps={steps} />
         </motion.div>
       )}
