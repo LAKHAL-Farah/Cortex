@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 
 from ...services.forecast_service import get_forecast
 from ...services.llm_client import LLMConfigError, get_chat_model
-from ..node_resolver import resolve_node
+from ..node_resolver import resolve_node, resolve_nodes
 from ..state import CortexState
 
 logger = logging.getLogger(__name__)
@@ -120,9 +120,123 @@ def _narrate(query: str, node, metric: str, forecast: dict) -> str:
         return _fallback_summary(node, metric, forecast)
 
 
+_CONCERN_PERCENT = 90.0
+_METRIC_LABEL = {"cpu_percent": "CPU", "memory_percent": "memory", "disk_percent": "disk"}
+
+
+def _forecast_row(node, metric: str, forecast: dict) -> dict | None:
+    points = forecast.get("forecast") or []
+    if not points:
+        return None
+    first, last = points[0], points[-1]
+    peak = max(p["predicted"] for p in points)
+    return {
+        "hostname": node["hostname"],
+        "role": node["role"],
+        "start": first["predicted"],
+        "end": last["predicted"],
+        "delta": round(last["predicted"] - first["predicted"], 1),
+        "peak": peak,
+        "may_breach": max(p.get("upper", p["predicted"]) for p in points) >= _CONCERN_PERCENT,
+        "will_breach": peak >= _CONCERN_PERCENT,
+    }
+
+
+def _fleet_forecast_table(rows: list[dict], is_percent: bool) -> str:
+    unit = "%" if is_percent else ""
+    lines = [
+        "| Node | Role | Now | End of horizon | Change | Peak | Risk |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for r in rows:
+        risk = "will cross 90%" if r["will_breach"] else "may cross 90%" if r["may_breach"] else "ok"
+        sign = "+" if r["delta"] > 0 else ""
+        lines.append(
+            f"| {r['hostname']} | {r['role']} | {r['start']}{unit} | {r['end']}{unit} | "
+            f"{sign}{r['delta']} | {r['peak']}{unit} | {risk} |"
+        )
+    return "\n".join(lines)
+
+
+def _run_multi(state: CortexState, nodes: list, session_memory: dict) -> CortexState:
+    metric = _resolve_metric(state["user_query"], default=session_memory.get("last_metric") or DEFAULT_METRIC)
+    rows: list[dict] = []
+    missing: list[str] = []
+    horizon_days = None
+    # Sequential on purpose: get_forecast loads/reuses cached model bundles,
+    # and nothing in it is documented as safe to call concurrently.
+    for node in nodes:
+        try:
+            forecast = get_forecast(node["instance"].split(":", 1)[0], metric)
+        except Exception:
+            logger.exception("prediction_agent: get_forecast failed for %s", node["hostname"])
+            forecast = None
+        row = _forecast_row(node, metric, forecast) if forecast else None
+        if row is None:
+            missing.append(node["hostname"])
+            continue
+        horizon_days = horizon_days or forecast.get("horizon_days")
+        rows.append(row)
+
+    if not rows:
+        state["error"] = (
+            f"Not enough data to forecast {metric.replace('_', ' ')} for any of the {len(nodes)} nodes you asked about."
+        )
+        state["agent_result"] = None
+        return state
+
+    rows.sort(key=lambda r: (not r["will_breach"], not r["may_breach"], -r["peak"]))
+    is_percent = metric.endswith("_percent")
+    at_risk = [r["hostname"] for r in rows if r["will_breach"] or r["may_breach"]]
+    label = _METRIC_LABEL.get(metric, metric.replace("_", " "))
+    counts = {"total": len(rows), "at_risk": len(at_risk)}
+    if is_percent:
+        lead = (
+            f"{len(at_risk)} of {len(rows)} nodes are projected to reach {int(_CONCERN_PERCENT)}% "
+            f"{label}: {', '.join(at_risk)}."
+            if at_risk
+            else f"None of the {len(rows)} nodes is projected to reach {int(_CONCERN_PERCENT)}% {label}."
+        )
+    else:
+        lead = f"Forecast for {len(rows)} nodes."
+    top = max(rows, key=lambda r: r["end"])
+    insights = [f"Highest projected end value: {top['hostname']} ({top['end']}{'%' if is_percent else ''})."]
+    if missing:
+        insights.append(f"Not enough data to forecast: {', '.join(missing)}.")
+
+    summary = (
+        f"### {label[0].upper() + label[1:]} forecast — {len(rows)} nodes\n\n"
+        f"{lead}\n\n{_fleet_forecast_table(rows, is_percent)}\n\n"
+        f"#### Insights\n" + "\n".join(f"- {i}" for i in insights)
+    )
+    state["agent_result"] = {
+        "summary": summary,
+        "confidence": 0.8,
+        "raw_data": {
+            "scope": "multi",
+            "metric": metric,
+            "horizon_days": horizon_days,
+            "concern_percent": _CONCERN_PERCENT,
+            "nodes": rows,
+            "missing": missing,
+            "at_risk": at_risk,
+            "counts": counts,
+        },
+    }
+    state["error"] = None
+    resolved = state.setdefault("resolved_entities", {})
+    resolved["last_nodes"] = list(nodes)
+    resolved["last_metric"] = metric
+    resolved["last_agent"] = "prediction"
+    return state
+
+
 def prediction_agent(state: CortexState) -> CortexState:
     known_nodes = state["known_nodes"]
     session_memory = state.get("session_memory") or {}
+    multi = resolve_nodes(state["user_query"], known_nodes, session_memory=session_memory)
+    if multi:
+        return _run_multi(state, multi, session_memory)
     node = resolve_node(state["user_query"], known_nodes, session_memory=session_memory)
 
     if node is None:

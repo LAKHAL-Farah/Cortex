@@ -207,3 +207,120 @@ def resolve_node(
         return node
 
     return _session_memory_match(known_nodes, session_memory)
+
+
+# ---------------------------------------------------------------------------
+# Multi-node scope (v1.1)
+#
+# `resolve_node` above answers "which ONE node" and deliberately gives up
+# (None / LLM pick) when two hostnames both appear -- fine for an agent that
+# can only look at one node, wrong for "compare compute1-sim and compute2-sim"
+# or "how are all my compute nodes doing". `resolve_nodes` is the sibling for
+# that case: deterministic (no LLM -- a list of hostnames read out of the
+# sentence is exactly what a regex can do exactly, and an LLM would only add
+# a way to invent one), and it returns [] unless the question really is about
+# several nodes, so every caller keeps its single-node path untouched:
+#
+#     nodes = resolve_nodes(query, known_nodes, session_memory)
+#     if nodes: ...multi-node path...
+#     else:     ...existing resolve_node path...
+# ---------------------------------------------------------------------------
+
+# "all nodes", "every host", "the whole cluster", "each server", "the fleet" ...
+_ALL_NODES_RE = re.compile(
+    r"\b(?:all|every|each|entire|whole)\b(?:\s+(?:of\s+)?(?:the|my|our|your))?\s+(?:nodes?|hosts?|servers?|machines?|cluster|fleet|infrastructure)\b"
+    r"|\b(?:the|my|our)\s+(?:cluster|fleet)\b"
+    r"|\bacross\s+(?:the|all|our|my)\s+(?:nodes|cluster|fleet|infrastructure)\b"
+    r"|\ball\s+of\s+(?:them|us)\b"
+)
+_GROUP_NOUN_PLURAL_RE = re.compile(r"\b(?:nodes|hosts|servers|machines)\b")
+_QUANTIFIER_RE = re.compile(r"\b(?:all|every|each|both)\b")
+# A follow-up that points back at the nodes just discussed.
+_PRONOUN_RE = re.compile(r"\b(?:them|those|these|same\s+nodes|those\s+nodes|these\s+nodes|both)\b")
+
+# One turn never fans out to more than this many nodes -- bounds cost/latency
+# the same way anomaly.py's _MAX_INCIDENT_FANOUT bounds an incident sweep.
+MAX_MULTI_NODES = 12
+
+
+def _explicit_mentions(query_lower: str, known_nodes: list[KnownNode]) -> list[KnownNode]:
+    tokens = _HOSTNAME_TOKEN.findall(query_lower)
+    # "compute 02" -> "compute-02", "compute 1 sim" -> "compute-1-sim": adjacent tokens joined with hyphens.
+    candidates = (
+        set(tokens)
+        | {f"{a}-{b}" for a, b in zip(tokens, tokens[1:])}
+        | {f"{a}-{b}-{c}" for a, b, c in zip(tokens, tokens[1:], tokens[2:])}
+    )
+    compact = {c.replace("-", "") for c in candidates}
+
+    found: list[KnownNode] = []
+    for node in known_nodes:
+        host = node["hostname"]
+        if host in candidates or host.replace("-", "") in compact:
+            found.append(node)
+
+    # A dropped role/env suffix ("compute2" for "compute2-sim") counts only
+    # when it is unambiguous -- the same rule _stem_match applies for one node.
+    already = {n["hostname"] for n in found}
+    for token in tokens:
+        stem_matches = [
+            n for n in known_nodes
+            if n["hostname"].rsplit("-", 1)[0] == token or n["hostname"].startswith(f"{token}-")
+        ]
+        stem_matches = _dedupe(stem_matches)
+        if len(stem_matches) == 1 and stem_matches[0]["hostname"] not in already:
+            found.append(stem_matches[0])
+            already.add(stem_matches[0]["hostname"])
+    return found
+
+
+def _role_group(query_lower: str, known_nodes: list[KnownNode]) -> list[KnownNode]:
+    """Nodes of every role named as a group -- "all compute nodes",
+    "storage nodes", "both controllers". A bare singular "the compute node"
+    is not a group."""
+    tokens = set(_HOSTNAME_TOKEN.findall(query_lower))
+    has_group_cue = bool(_GROUP_NOUN_PLURAL_RE.search(query_lower) or _QUANTIFIER_RE.search(query_lower))
+    if not has_group_cue:
+        return []
+    roles = {n["role"].lower() for n in known_nodes if n.get("role")}
+    named = {r for r in roles if r in tokens or f"{r}s" in tokens}
+    return [n for n in known_nodes if n["role"].lower() in named]
+
+
+def resolve_nodes(
+    query: str,
+    known_nodes: list[KnownNode],
+    session_memory: dict | None = None,
+    include_all: bool = True,
+) -> list[KnownNode]:
+    """The nodes a question is about, when that is *more than one*; [] when
+    it is about one node (or none) so the caller's single-node path runs.
+
+    Recognizes, and unions:
+    - several hostnames named outright ("compare compute1-sim and compute2-sim");
+    - a role group ("all compute nodes", "the storage nodes");
+    - the whole fleet ("all nodes", "the cluster", "every host") -- only when
+      `include_all` (anomaly_dispatch turns it off because it has its own,
+      smarter scoping for a fleet-wide question);
+    - a follow-up pointing at the last multi-node answer ("and them?", "what
+      about those?"), re-validated against today's `known_nodes`.
+
+    Result is ordered as in `known_nodes`, deduped, capped at MAX_MULTI_NODES.
+    """
+    if len(known_nodes) < 2:
+        return []
+    q = query.lower()
+
+    if include_all and _ALL_NODES_RE.search(q):
+        return known_nodes[:MAX_MULTI_NODES]
+
+    picked = {n["hostname"] for n in _explicit_mentions(q, known_nodes)}
+    picked |= {n["hostname"] for n in _role_group(q, known_nodes)}
+
+    if not picked and session_memory and _PRONOUN_RE.search(q):
+        remembered = {n.get("hostname") for n in session_memory.get("last_nodes") or []}
+        picked = {n["hostname"] for n in known_nodes if n["hostname"] in remembered}
+
+    if len(picked) < 2:
+        return []
+    return [n for n in known_nodes if n["hostname"] in picked][:MAX_MULTI_NODES]

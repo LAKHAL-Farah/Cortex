@@ -1,11 +1,20 @@
 """Tests for app/agents/nodes/openstack_expert.py -- the v0.6 "teaching,
-not just reporting" agent. See docs/architecture/adr-0008.
+not just reporting" agent (adr-0008), extended in v1.0 (adr-0010) with a
+combined static+dynamic catalog and a two-tier standalone fallback.
 
 Covers the two entry paths (chained after anomaly/monitoring, and
 standalone) plus the symptom matcher and the trigger predicates graph.py's
 conditional edges call directly.
 """
+import uuid
+
+import pytest
+
 import app.agents.nodes.openstack_expert as expert
+from app import crud
+from app.db import SessionLocal
+from app.services.openstack_docs.search import DocResult
+from app.services.web_search import WebSearchResult
 
 NODE = {"hostname": "compute-02", "role": "compute", "instance": "10.0.1.12:9100"}
 KNOWN_NODES = [NODE]
@@ -281,13 +290,173 @@ def test_standalone_matches_named_service_and_labels_commands():
     assert result["error"] is None
 
 
-def test_standalone_no_match_gives_graceful_fallback_not_an_error():
+def test_standalone_no_match_gives_graceful_fallback_not_an_error(monkeypatch):
+    # v1.0: _standalone_fallback tries official docs then web search
+    # before the original v0.6 text -- mocked here as both unavailable so
+    # this test stays fast, deterministic, and exercises the genuine
+    # "nothing anywhere" path without a real embedding model, Qdrant, or
+    # Tavily call. See test_standalone_no_match_falls_back_to_official_docs
+    # / test_standalone_no_match_falls_back_to_web_search below for the
+    # other two tiers.
+    monkeypatch.setattr(expert, "search_official_docs", lambda query, top_k=3: [])
+    monkeypatch.setattr(
+        expert, "run_web_search",
+        lambda query, max_results=5: (_ for _ in ()).throw(RuntimeError("no TAVILY_API_KEY")),
+    )
+
     state = _standalone_state("what's the meaning of life")
     result = expert.openstack_expert_agent(state)
 
     assert result["agent_result"]["raw_data"]["matched_symptom_id"] is None
+    assert result["agent_result"]["raw_data"]["source"] == "none"
     assert result["error"] is None
     assert "don't have a specific runbook entry" in result["agent_result"]["summary"]
+
+
+def test_standalone_no_match_falls_back_to_official_docs(monkeypatch):
+    hits = [
+        DocResult(
+            text="Reset the volume state only after confirming the backend is healthy.",
+            source_url="https://docs.openstack.org/cinder/latest/admin/blockstorage-troubleshoot.html",
+            doc_title="Block Storage Troubleshooting", heading="Volume stuck in error",
+            service="cinder", score=0.61,
+        )
+    ]
+    monkeypatch.setattr(expert, "search_official_docs", lambda query, top_k=3: hits)
+
+    def _fail_web_search(*a, **k):
+        raise AssertionError("web search should not be tried when the docs tier already found something")
+
+    monkeypatch.setattr(expert, "run_web_search", _fail_web_search)
+
+    state = _standalone_state("what's the meaning of life")
+    result = expert.openstack_expert_agent(state)
+
+    raw = result["agent_result"]["raw_data"]
+    assert raw["matched_symptom_id"] is None
+    assert raw["source"] == "official_docs"
+    assert raw["doc_results"][0]["url"] == hits[0].source_url
+    summary = result["agent_result"]["summary"]
+    assert "official OpenStack documentation" in summary
+    assert "docs.openstack.org" in summary
+    # visibly distinct from a catalog match's framing
+    assert "Deeper reference" not in summary
+    assert result["error"] is None
+
+
+def test_standalone_no_match_falls_back_to_web_search(monkeypatch):
+    monkeypatch.setattr(expert, "search_official_docs", lambda query, top_k=3: [])
+    hits = [
+        WebSearchResult(
+            title="Bug 12345: nova-compute wedges after RabbitMQ blip",
+            url="https://bugs.launchpad.net/nova/+bug/12345",
+            snippet="Restarting nova-compute after the connection drops seems to clear it.",
+        )
+    ]
+    monkeypatch.setattr(expert, "run_web_search", lambda query, max_results=5: hits)
+
+    state = _standalone_state("what's the meaning of life")
+    result = expert.openstack_expert_agent(state)
+
+    raw = result["agent_result"]["raw_data"]
+    assert raw["matched_symptom_id"] is None
+    assert raw["source"] == "web_search"
+    assert raw["web_results"][0]["url"] == hits[0].url
+    summary = result["agent_result"]["summary"]
+    assert "Community-sourced" in summary
+    assert "**not** official documentation" in summary
+    assert "bugs.launchpad.net" in summary
+    assert result["error"] is None
+
+
+def test_standalone_catalog_match_still_wins_over_fallback_tiers(monkeypatch):
+    def _fail(*a, **k):
+        raise AssertionError("fallback tiers should never be tried when the catalog itself matches")
+
+    monkeypatch.setattr(expert, "search_official_docs", _fail)
+    monkeypatch.setattr(expert, "run_web_search", _fail)
+
+    state = _standalone_state("how do I check if nova-compute is running")
+    result = expert.openstack_expert_agent(state)
+    assert result["agent_result"]["raw_data"]["matched_symptom_id"] == "nova-compute-down"
+    assert result["agent_result"]["raw_data"]["source"] == "catalog"
+
+
+# ------------------------------------------------------- v1.0: dynamic catalog --
+
+def _cleanup_catalog_entry(symptom_id: str):
+    db = SessionLocal()
+    try:
+        row = crud.get_catalog_entry_by_symptom_id(db, symptom_id)
+        if row is not None:
+            db.delete(row)
+            db.commit()
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def published_catalog_entry():
+    """A feedback-loop entry (v1.0, adr-0010) for a symptom the static
+    CATALOG doesn't cover, published so _combined_catalog picks it up."""
+    symptom_id = f"pytest-widget-jammed-{uuid.uuid4().hex[:8]}"
+    db = SessionLocal()
+    try:
+        entry = crud.create_catalog_entry(
+            db,
+            symptom_id=symptom_id,
+            title="Widget service jammed",
+            category="compute",
+            what_it_means="The made-up widget service jams under made-up load, per a resolved incident.",
+            keywords=["widget", "jammed"],
+            confirm_commands=[
+                {"command": "widget-ctl status", "description": "check widget status", "read_only": True},
+            ],
+            remediation_commands=[
+                {"command": "widget-ctl unjam", "description": "clear the jam", "read_only": False},
+            ],
+        )
+        crud.publish_catalog_entry(db, entry)
+    finally:
+        db.close()
+    yield symptom_id
+    _cleanup_catalog_entry(symptom_id)
+
+
+def test_standalone_matches_a_published_dynamic_catalog_entry(monkeypatch, published_catalog_entry):
+    def _fail(*a, **k):
+        raise AssertionError("a real catalog match should short-circuit the fallback tiers")
+
+    monkeypatch.setattr(expert, "search_official_docs", _fail)
+    monkeypatch.setattr(expert, "run_web_search", _fail)
+
+    state = _standalone_state("the widget service looks jammed again")
+    result = expert.openstack_expert_agent(state)
+
+    assert result["agent_result"]["raw_data"]["matched_symptom_id"] == published_catalog_entry
+    assert result["agent_result"]["raw_data"]["source"] == "catalog"
+
+
+def test_draft_catalog_entry_is_invisible_to_the_matcher(monkeypatch):
+    monkeypatch.setattr(expert, "search_official_docs", lambda query, top_k=3: [])
+    monkeypatch.setattr(expert, "run_web_search", lambda query, max_results=5: [])
+    symptom_id = f"pytest-draft-only-{uuid.uuid4().hex[:8]}"
+    db = SessionLocal()
+    try:
+        crud.create_catalog_entry(
+            db, symptom_id=symptom_id, title="Draft-only widget issue", category="compute",
+            what_it_means="x", keywords=["notyetpublishedwidget"],
+            confirm_commands=[{"command": "x", "description": "x", "read_only": True}],
+            remediation_commands=[{"command": "x", "description": "x", "read_only": False}],
+        )
+    finally:
+        db.close()
+    try:
+        state = _standalone_state("notyetpublishedwidget is broken")
+        result = expert.openstack_expert_agent(state)
+        assert result["agent_result"]["raw_data"]["matched_symptom_id"] != symptom_id
+    finally:
+        _cleanup_catalog_entry(symptom_id)
 
 
 def test_standalone_resolves_a_named_node_into_commands():
@@ -299,3 +468,22 @@ def test_standalone_resolves_a_named_node_into_commands():
     # that resolution didn't blow up and a match was still found.
     assert result["agent_result"]["raw_data"]["matched_symptom_id"] == "host-disk-pressure"
     assert commands
+
+
+def test_docs_fallback_drops_index_chunks_and_renders_structured_markdown(monkeypatch):
+    toc = "\n".join(["Network components", "Overlay protocols", "DNS Integration", "QoS"] * 8)
+    hits = [
+        DocResult(text=toc, source_url="https://docs.openstack.org/neutron/latest/admin/index.html",
+                  doc_title="OpenStack Networking Guide", heading=None, service="neutron", score=0.7),
+        DocResult(text="Agents\n$ openstack network agent list\n+--+--+\n| ID | Host |\n+--+--+\n| a1 | h1 |\n",
+                  source_url="https://docs.openstack.org/neutron/latest/admin/ovn/troubleshooting.html",
+                  doc_title="Troubleshooting", heading="Agents", service="neutron", score=0.6),
+    ]
+    monkeypatch.setattr(expert, "search_official_docs", lambda query, top_k=3: hits)
+    result = expert.openstack_expert_agent(_standalone_state("what's the meaning of life"))
+
+    summary = result["agent_result"]["summary"]
+    assert len(result["agent_result"]["raw_data"]["doc_results"]) == 1
+    assert "Networking Guide" not in summary
+    assert "```bash" in summary and "| ID | Host |" in summary
+    assert "> [!NOTE]" in summary

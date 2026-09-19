@@ -111,7 +111,8 @@ from ... import crud
 from ...services import ebpf_signal, loki_client, network_health
 from ...services.llm_client import LLMConfigError, get_chat_model
 from ...services.metrics_collector import collect_metrics
-from ..node_resolver import resolve_node
+from ..node_resolver import resolve_node, resolve_nodes
+from ..incident_fanout import explain_decision, log_parallelism, summarize_parallelism, theory_ledger, timed_branch
 from ..resilience import get_breaker, guarded_send
 from ..state import AgentResult, CortexState, IncidentFinding, KnownNode
 
@@ -691,7 +692,21 @@ def anomaly_dispatch(state: CortexState) -> CortexState:
     known_nodes = state["known_nodes"]
     query = state["user_query"]
 
-    node = resolve_node(query, known_nodes, session_memory=state.get("session_memory"))
+    session_memory = state.get("session_memory")
+
+    # Several nodes named outright (or a role group): investigate exactly
+    # those. Checked *before* resolve_node, which treats two hostnames in one
+    # sentence as ambiguous and would let the LLM tier quietly pick just one.
+    # A fleet-wide "all nodes" is deliberately not handled here -- the Living
+    # Model scoping below is smarter than "the first N nodes".
+    named = resolve_nodes(query, known_nodes, session_memory=session_memory, include_all=False)
+    if named:
+        state["incident_scope"] = named[:_MAX_INCIDENT_FANOUT]
+        state["error"] = None
+        state.setdefault("resolved_entities", {})["last_nodes"] = named
+        return state
+
+    node = resolve_node(query, known_nodes, session_memory=session_memory)
     if node is not None:
         state["incident_scope"] = [node]
         state["error"] = None
@@ -700,6 +715,14 @@ def anomaly_dispatch(state: CortexState) -> CortexState:
     scope = _incident_scope_from_living_model(query, known_nodes)
     if scope:
         state["incident_scope"] = scope
+        state["error"] = None
+        return state
+
+    # "check all nodes" with nothing flagged in the Living Model: still a
+    # legitimate ask -- sweep the fleet (bounded) rather than refusing.
+    fleet = resolve_nodes(query, known_nodes, session_memory=session_memory)
+    if fleet:
+        state["incident_scope"] = fleet[:_MAX_INCIDENT_FANOUT]
         state["error"] = None
         return state
 
@@ -731,7 +754,9 @@ def _anomaly_investigate_one_impl(payload: dict) -> dict:
 # TEMP (2026-09-04, revised): 60s (not None) -- see graph.py's build_graph
 # for why. _narrate() inside this call is what hits the LLM. Put 30.0 back
 # once NIM's current instability is resolved.
-anomaly_investigate_one = guarded_send("anomaly.investigate", timeout_seconds=60.0)(_anomaly_investigate_one_impl)
+anomaly_investigate_one = timed_branch("anomaly")(
+    guarded_send("anomaly.investigate", timeout_seconds=60.0)(_anomaly_investigate_one_impl)
+)
 
 
 _ARBITRATION_SYSTEM_PROMPT = """You are Cortex's incident investigation assistant. You're given \
@@ -905,6 +930,54 @@ def anomaly_arbitrate(state: CortexState) -> CortexState:
 
     host_findings = by_host[primary["hostname"]]
     cross_agent = len(host_findings) > 1
+
+    # v1.2: make the decision inspectable -- were the branches really
+    # concurrent, and why did this agent's theory win? (incident_fanout.py)
+    parallelism = summarize_parallelism(findings)
+    log_parallelism(parallelism)
+    ledger = theory_ledger(
+        host_findings,
+        primary,
+        has_signal=_finding_has_signal,
+        bonus=lambda f: _corroboration_bonus(host_findings),
+        score=_boosted_confidence,
+    )
+    arbitration = {
+        "host": primary["hostname"],
+        "winner": primary["agent"],
+        "method": "signal first, then own confidence plus a corroboration bonus per other agent that also flagged the host",
+        "theories": ledger,
+        "why": explain_decision(primary["hostname"], ledger),
+        # Never the security agent's text: this block travels in raw_data for
+        # every role. (Security's own numbers are redacted for non-admins in
+        # services/security_rbac.py.)
+        "winner_summary": None if primary["agent"] == "security" else primary["agent_result"]["summary"],
+    }
+    if parallelism:
+        arbitration["parallelism"] = parallelism
+    if len(ranked_hosts) > 1:
+        arbitration["hosts"] = [
+            {"hostname": f["hostname"], "agent": f["agent"], "score": round(_boosted_confidence(f), 2)}
+            for f in ranked_hosts
+        ]
+    merged_raw["arbitration"] = arbitration
+    logger.info("incident arbitration: %s", arbitration["why"])
+
+    # The losing-but-flagged agents' own evidence, for the expert step: the
+    # runbook match should see everything operational that pointed at this
+    # host, not only the winner's slice. Security is deliberately never
+    # included (no runbook catalog for it yet, and its evidence is RBAC-gated).
+    if primary["agent"] != "security":
+        merged_raw["supporting_evidence"] = [
+            {
+                "agent": f["agent"],
+                "confidence": f["agent_result"]["confidence"],
+                "summary": f["agent_result"]["summary"],
+                "raw_data": f["agent_result"]["raw_data"],
+            }
+            for f in host_findings
+            if f is not primary and f["agent"] in ("anomaly", "network") and _finding_has_signal(f)
+        ]
     if cross_agent:
         merged_raw["cross_agent_findings"] = [
             {

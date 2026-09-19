@@ -96,6 +96,7 @@ from ...services.llm_client import LLMConfigError, get_chat_model
 from ...services.metrics_collector import collect_network_metrics
 from ..network_resolver import KnownNetworkEntity, resolve_network_entity
 from ..node_resolver import resolve_node
+from ..incident_fanout import timed_branch
 from ..resilience import get_breaker, guarded_send
 from ..state import CortexState, IncidentFinding
 
@@ -571,7 +572,9 @@ def _network_investigate_one_impl(payload: dict) -> dict:
     return {"agent_results": [finding]}
 
 
-network_investigate_one = guarded_send("network.investigate", timeout_seconds=60.0)(_network_investigate_one_impl)
+network_investigate_one = timed_branch("network")(
+    guarded_send("network.investigate", timeout_seconds=60.0)(_network_investigate_one_impl)
+)
 
 
 def _run_entity_scope(state: CortexState, known_nodes) -> CortexState:

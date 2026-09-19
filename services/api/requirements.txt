@@ -12,6 +12,11 @@ httpx==0.27.2
 ruff==0.6.9
 ansible-core==2.17.6
 requests==2.32.3
+# HTML parsing for the v1.0 official-OpenStack-docs scraper
+# (services/openstack_docs/scraper.py, adr-0010) -- docs.openstack.org is
+# Sphinx-generated HTML, not Markdown, so this pipeline needs a real DOM
+# parser rather than loader.py's plain-text heading regex.
+beautifulsoup4==4.12.3
 pandas==2.2.3
 scipy==1.13.1
 scikit-learn==1.5.2

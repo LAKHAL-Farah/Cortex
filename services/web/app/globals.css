@@ -778,3 +778,110 @@ select {
   font-family: var(--font-mono, ui-monospace, monospace);
   color: var(--text-dim);
 }
+
+/* -- Report-style answers (Markdown component in CopilotAgentPanels.tsx) -- */
+.md-content h3 {
+  font-size: 1.12em;
+  padding: 0.15em 0 0.35em 0.65em;
+  margin: 0.2em 0 0.7em;
+  border-left: 3px solid var(--accent);
+  border-bottom: 1px solid var(--border-soft);
+}
+.md-content h4 {
+  font-family: var(--font-display);
+  font-size: 0.78em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 1.3em 0 0.5em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border-soft);
+}
+.md-table-wrap {
+  margin: 0.7em 0;
+  overflow-x: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-control);
+}
+.md-table-wrap table { margin: 0; border-collapse: collapse; }
+.md-table-wrap th, .md-table-wrap td { border: none; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
+.md-table-wrap tbody tr:last-child td { border-bottom: none; }
+.md-table-wrap tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--canvas) 55%, transparent); }
+.md-table-wrap td { font-family: var(--font-mono); font-size: 0.9em; }
+
+.md-codeblock {
+  margin: 0.7em 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+  background: var(--canvas);
+}
+.md-codeblock__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.3em 0.7em;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-soft);
+}
+.md-codeblock__copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.md-codeblock__copy:hover { color: var(--text); }
+.md-content .md-codeblock pre { margin: 0; border: none; border-radius: 0; overflow-x: auto; }
+
+.md-callout {
+  display: flex;
+  gap: 0.6em;
+  align-items: flex-start;
+  margin: 0.55em 0;
+  padding: 0.5em 0.75em;
+  font-size: 12px;
+  line-height: 1.5;
+  border-radius: var(--radius-control);
+  border: 1px solid color-mix(in srgb, var(--callout-color) 30%, transparent);
+  background: color-mix(in srgb, var(--callout-color) 11%, transparent);
+  color: var(--text);
+}
+.md-callout--warning { --callout-color: var(--warn); }
+.md-callout--note, .md-callout--tip { --callout-color: var(--accent); }
+.md-callout__icon { width: 14px; height: 14px; flex: none; margin-top: 2px; color: var(--callout-color); }
+.md-callout__body { min-width: 0; }
+.md-callout__body p { margin: 0; }
+.md-callout__body p + p { margin-top: 0.3em; }
+.md-callout__body strong { color: var(--callout-color); }
+
+/* -- Trace timeline: the agents that investigated in parallel (v1.2) -- */
+.agent-trace-timeline__branches {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+  margin: 0.1em 0 0.35em 0.7em;
+  padding-left: 0.9em;
+  border-left: 2px solid var(--border-soft);
+}
+.agent-trace-timeline__branch {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.15em 0;
+  font-size: 11.5px;
+}
+.agent-trace-timeline__branch .agent-trace-timeline__duration { margin-left: auto; margin-right: 0; }
+.agent-trace-timeline__branch-note {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}

@@ -85,6 +85,21 @@ def redact_security_raw_data(raw_data: dict | None) -> dict | None:
         if isinstance(signal, dict):
             redacted[key] = {"has_signal": signal.get("has_signal"), "degraded": signal.get("degraded"), "restricted": True}
 
+    # v1.2: the arbitration ledger (agents/incident_fanout.py) carries the
+    # security agent's confidence/score -- reduce that row to "ran, flagged or
+    # not" like every other Security field here. `winner_summary` is already
+    # None whenever Security won.
+    arbitration = redacted.get("arbitration")
+    if isinstance(arbitration, dict):
+        redacted["arbitration"] = {
+            **arbitration,
+            "theories": [
+                {"agent": t.get("agent"), "has_signal": t.get("has_signal"), "verdict": t.get("verdict"), "restricted": True}
+                if t.get("agent") == "security" else t
+                for t in arbitration.get("theories") or []
+            ],
+        }
+
     for key in ("cross_agent_findings", "multi_node_findings"):
         entries = redacted.get(key)
         if not entries:

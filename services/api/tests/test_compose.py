@@ -116,3 +116,22 @@ def test_degraded_note_deduplicates_repeated_sources():
 
     note = result["final_answer"].split("\n\n")[0]
     assert note.lower().count("log-check") == 1
+
+
+# --------------------------------------------------------------------
+# Notes are `> [!WARNING]` callouts (rendered as small yellow boxes)
+# --------------------------------------------------------------------
+
+def test_critic_note_is_a_compact_warning_callout_even_for_a_huge_claim():
+    huge = "| ID | Host |\n" * 200
+    state = {
+        "error": None,
+        "agent_result": {"summary": "body.", "confidence": 0.9, "raw_data": {}},
+        "critic_verdict": {"status": "flagged", "checked_sentences": 1, "flagged_claims": [huge]},
+    }
+    answer = compose.compose_answer(state)["final_answer"]
+    note = answer.split("\n\n")[0]
+    assert note.startswith("> [!WARNING]")
+    assert "Unverified claim" in note
+    assert len(note) < 400
+    assert answer.endswith("body.")

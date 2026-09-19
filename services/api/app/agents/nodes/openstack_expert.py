@@ -58,13 +58,54 @@ note) with no Neutron *agent* involved at all, so `_evidence_from_network`
 now also recognizes a down/disabled Neutron port and an instance stuck in
 ERROR alongside one, via the two new catalog entries (`port-down`,
 `instance-stuck-in-error`) this version adds.
+
+v1.0 (docs/architecture/adr-0010-openstack-expert-v1-expansion.md) adds
+two things, both scoped to what the original v0.6/v0.9/v0.10 design left
+as explicit follow-ups (adr-0008 §OS.4-OS.6):
+
+- **The matcher's `catalog` is no longer just the static CATALOG list.**
+  `_combined_catalog` appends every currently-"published" feedback-loop
+  entry (agents/nodes/openstack_expert_catalog_store.py, backed by
+  models.CatalogEntry) on every call, so an incident type that got
+  resolved and turned into a catalog entry from the UI now matches the
+  next time it recurs -- chained or standalone -- without a code change
+  or a restart. `_match_symptoms`/`_detect_service_binaries` both take an
+  explicit `catalog` argument (default: just the static CATALOG, so
+  every v0.6-era direct unit test of either function is unaffected).
+- **Standalone no-match now falls through two more tiers** before giving
+  up (`_standalone_fallback`): official OpenStack documentation
+  (services/openstack_docs/search.py, a separate Qdrant collection from
+  both this catalog and the internal RAG/Knowledge Agent's own corpus --
+  see that module's docstring) and, below that, a community web search
+  (services/web_search.py, biased toward Launchpad/mailing-list/Q&A
+  sources). Each tier is visibly labeled by source ("catalog" /
+  "official_docs" / "web_search" / "none" in `raw_data["source"]`, and in
+  the rendered markdown itself) so nobody mistakes a Launchpad forum post
+  for either this deployment's curated catalog or actual upstream docs.
+  Deliberately standalone-only: a *chained* no-match still leaves the
+  upstream diagnosis as the final answer unmodified (see `_run_chained`'s
+  own comment) -- that v0.6 decision (adr-0008 decision #4) is preserved
+  as-is here, not widened, since a good specific diagnosis still beats a
+  generic-but-sourced layer stacked on top of it.
 """
+import copy
 import logging
 import re
 
 from ..node_resolver import resolve_node
 from ..state import CortexState
 from .openstack_expert_catalog import CATALOG, SymptomEntry
+from .openstack_expert_catalog_store import load_published_entries
+
+# Imported as plain module-level names (rather than reached for through a
+# package prefix at call time) specifically so tests can
+# `monkeypatch.setattr(expert, "search_official_docs", ...)` /
+# `monkeypatch.setattr(expert, "run_web_search", ...)` the same way
+# rag.py's own tests monkeypatch its embed_query/qdrant_search imports --
+# see tests/test_openstack_expert.py's v1.0 fallback tests.
+from ...services.openstack_docs.format import clean_inline, doc_text_to_markdown, looks_like_index
+from ...services.openstack_docs.search import DocResult, search_official_docs
+from ...services.web_search import WebSearchResult, search as run_web_search
 
 logger = logging.getLogger(__name__)
 
@@ -114,19 +155,30 @@ def _match_symptoms(
     service_binaries: list[str] | None = None,
     query: str = "",
     log_lines: list[str] | None = None,
+    catalog: list[SymptomEntry] | None = None,
 ) -> list[tuple[SymptomEntry, int]]:
     """Every catalog entry with a positive score, most-relevant first.
-    Ties keep CATALOG's own order (Python sort is stable) -- CATALOG is
-    already ordered most-likely-to-fire-first per its module docstring, so
-    that's a reasonable tiebreak, not an arbitrary one.
+    Ties keep the catalog's own order (Python sort is stable) -- CATALOG
+    is already ordered most-likely-to-fire-first per its module
+    docstring, so that's a reasonable tiebreak, not an arbitrary one; any
+    dynamic entries (v1.0, see `catalog` below) are appended after it by
+    `_combined_catalog`, so a hand-authored entry still wins a tie over a
+    UI-submitted one covering the same symptom.
+
+    `catalog` defaults to just the static CATALOG -- every v0.6-era direct
+    call site (including this module's own unit tests) that doesn't pass
+    one gets exactly the old, fully offline, fully deterministic behavior.
+    `openstack_expert_agent` (v1.0) passes `_combined_catalog()`, which
+    also folds in every currently-published feedback-loop entry.
     """
+    catalog = catalog if catalog is not None else CATALOG
     service_binaries = service_binaries or []
     log_lines = log_lines or []
     query_lower = query.lower()
     log_lower = [line.lower() for line in log_lines]
 
     scored: list[tuple[SymptomEntry, int]] = []
-    for entry in CATALOG:
+    for entry in catalog:
         score = 0
         if metric_name and metric_name in entry["metric_names"]:
             score += _SCORE_METRIC_NAME
@@ -144,9 +196,35 @@ def _match_symptoms(
     return scored
 
 
-def _detect_service_binaries(text: str) -> list[str]:
+def _detect_service_binaries(text: str, catalog: list[SymptomEntry] | None = None) -> list[str]:
+    """`catalog=None` (the v0.6-era default every direct unit test of
+    this function still uses) scans against `_ALL_SERVICE_BINARIES`, the
+    static CATALOG's own precomputed set. Passing a combined catalog
+    (v1.0, see `_combined_catalog`) recomputes the set fresh from it
+    instead, so a dynamic entry's service_binaries become recognizable in
+    free text immediately, without needing `_ALL_SERVICE_BINARIES` itself
+    (a module-load-time constant) to somehow stay in sync with a table
+    that changes at runtime.
+    """
     text_lower = text.lower()
-    return [b for b in _ALL_SERVICE_BINARIES if b in text_lower or b.replace("-", " ") in text_lower]
+    binaries = (
+        _ALL_SERVICE_BINARIES
+        if catalog is None
+        else sorted({b for entry in catalog for b in entry["service_binaries"]})
+    )
+    return [b for b in binaries if b in text_lower or b.replace("-", " ") in text_lower]
+
+
+def _combined_catalog() -> list[SymptomEntry]:
+    """CATALOG (static, hand-reviewed -- adr-0008 decision #1) plus every
+    currently-"published" feedback-loop entry (v1.0, adr-0010; see
+    openstack_expert_catalog_store.load_published_entries). A fresh DB
+    read on every call rather than a cached merge: a newly-published entry
+    should be visible to the very next query, not after a process
+    restart, and `load_published_entries` already degrades to an empty
+    list (i.e. this just becomes CATALOG) on any DB hiccup -- see that
+    function's own docstring."""
+    return CATALOG + load_published_entries()
 
 
 # --------------------------------------------------------------------
@@ -298,16 +376,30 @@ def _evidence_from_network(raw_data: dict) -> dict:
 
 
 def should_trigger_after_anomaly(state: CortexState) -> bool:
-    """Whether anomaly_agent's result has anything for this agent to
-    explain -- called from graph.py's conditional edge, and mirrors what
-    this module's own chained path checks internally (see
-    _evidence_from_anomaly / the "no positive match" fallback in
-    _run_chained) so a "yes, chain" decision here is never followed by
-    "actually, nothing to say" once inside the node.
+    """Whether the incident investigation's *winning theory* has anything for
+    this agent to explain -- called from graph.py's conditional edge, and
+    mirrors what this module's own chained path checks internally (see
+    _evidence_for_winner / the "no positive match" fallback in _run_chained)
+    so a "yes, chain" decision here is never followed by "actually, nothing
+    to say" once inside the node.
+
+    v1.2: the anomaly join node (anomaly_arbitrate) now hands over whichever
+    agent's theory won (`raw_data["investigating_agent"]`), and the check
+    follows the winner's own evidence shape -- before, it only ever read the
+    anomaly agent's metric/log signals, so a network-won incident chained on
+    the wrong fields (or not at all) and a security-won one was silently
+    read as if it were an anomaly finding. A security winner still doesn't
+    chain: there are no security runbook entries to walk through yet (the
+    same deliberate deferral graph.py's v0.9 note describes).
     """
     if state.get("error") or not state.get("agent_result"):
         return False
     raw_data = state["agent_result"]["raw_data"]
+    winner = raw_data.get("investigating_agent") or "anomaly"
+    if winner == "security":
+        return False
+    if winner == "network":
+        return _network_raw_has_signal(raw_data)
     metric_signal = raw_data.get("metric_signal") or {}
     log_signal = raw_data.get("log_signal") or {}
     return bool(metric_signal.get("has_signal") or log_signal.get("has_signal") or log_signal.get("degraded"))
@@ -323,7 +415,28 @@ def should_trigger_after_monitoring(state: CortexState) -> bool:
     if state.get("error") or not state.get("agent_result"):
         return False
     metrics = state["agent_result"]["raw_data"]
+    if metrics.get("scope") == "multi":
+        # A fleet answer has no single host's status/health to walk through
+        # (and _evidence_from_monitoring expects exactly that shape) -- the
+        # per-node table already says which nodes need attention.
+        return False
     return metrics.get("status") != "up" or metrics.get("health") != "healthy"
+
+
+def _network_raw_has_signal(raw_data: dict) -> bool:
+    scope = raw_data.get("scope", "node")
+
+    if scope != "node":
+        entity_signal = raw_data.get("entity_signal") or {}
+        return bool(entity_signal.get("has_signal") or entity_signal.get("degraded"))
+
+    metric_signal = raw_data.get("metric_signal") or {}
+    neutron_signal = raw_data.get("neutron_signal") or {}
+    return bool(
+        metric_signal.get("has_signal")
+        or neutron_signal.get("has_signal")
+        or neutron_signal.get("degraded")
+    )
 
 
 def should_trigger_after_network(state: CortexState) -> bool:
@@ -342,20 +455,7 @@ def should_trigger_after_network(state: CortexState) -> bool:
     """
     if state.get("error") or not state.get("agent_result"):
         return False
-    raw_data = state["agent_result"]["raw_data"]
-    scope = raw_data.get("scope", "node")
-
-    if scope != "node":
-        entity_signal = raw_data.get("entity_signal") or {}
-        return bool(entity_signal.get("has_signal") or entity_signal.get("degraded"))
-
-    metric_signal = raw_data.get("metric_signal") or {}
-    neutron_signal = raw_data.get("neutron_signal") or {}
-    return bool(
-        metric_signal.get("has_signal")
-        or neutron_signal.get("has_signal")
-        or neutron_signal.get("degraded")
-    )
+    return _network_raw_has_signal(state["agent_result"]["raw_data"])
 
 
 # --------------------------------------------------------------------
@@ -441,8 +541,162 @@ def _build_result(entry: SymptomEntry, evidence_line: str, hostname: str | None,
             "confirm_commands": _to_command_dicts(entry["confirm_commands"], hostname),
             "remediation_commands": _to_command_dicts(entry["remediation_commands"], hostname),
             "doc_ref": entry["doc_ref"],
+            # v1.0: same "source" label the fallback tiers use (see
+            # _build_docs_fallback_result / _build_web_fallback_result /
+            # _standalone_fallback's final tier) so a frontend can render
+            # a citation badge the same way regardless of which tier
+            # produced the answer, without inferring it from whether
+            # matched_symptom_id is set.
+            "source": "catalog",
             **extra_raw,
         },
+    }
+
+
+# --------------------------------------------------------------------
+# v1.0 (adr-0010): standalone-only fallback tiers, tried in order when
+# _match_symptoms finds nothing in the combined catalog -- official
+# OpenStack docs, then a community web search, then finally the original
+# v0.6 "no runbook entry" text. See the module docstring's v1.0 section
+# for why this is standalone-only (chained no-match keeps its v0.6
+# behavior of leaving the upstream diagnosis unmodified).
+# --------------------------------------------------------------------
+
+_MIN_EXCERPT_CHARS = 200
+
+
+def _callout(kind: str, body: str) -> str:
+    """GitHub-style admonition blockquote -- the web client's Markdown
+    renderer turns `> [!WARNING]` / `> [!NOTE]` into a small colored callout
+    (components/CopilotAgentPanels.tsx). Plain blockquote elsewhere."""
+    lines = body.strip().splitlines()
+    return f"> [!{kind}]\n" + "\n".join(f"> {ln}" for ln in lines)
+
+
+def _render_docs_fallback(query: str, hits: list[DocResult]) -> str:
+    rendered = []
+    for hit in hits:
+        excerpt = doc_text_to_markdown(hit.text, hit.heading)
+        rendered.append((hit, excerpt))
+    # A hit that is just a heading plus one intro sentence adds noise next to
+    # a substantive one -- drop it unless it is all we have.
+    substantive = [(h, e) for h, e in rendered if len(e) >= _MIN_EXCERPT_CHARS]
+    rendered = substantive or rendered
+
+    sections = []
+    for n, (hit, excerpt) in enumerate(rendered, start=1):
+        title = clean_inline(hit.doc_title)
+        heading = clean_inline(hit.heading or "")
+        label = f"{title} — {heading}" if heading and heading != title else title
+        sections.append(
+            f"#### {n}. {label}\n\n{excerpt}\n\n[Open in docs.openstack.org]({hit.source_url})"
+        )
+    return (
+        f"### From official OpenStack documentation\n\n"
+        + "\n\n".join(sections)
+        + "\n\n---\n"
+        + _callout(
+            "NOTE",
+            "**Source (official docs):** the excerpts above are from docs.openstack.org, not "
+            "this deployment's curated catalog -- confirm they apply to your setup before acting.",
+        )
+    )
+
+
+def _build_docs_fallback_result(query: str, hits: list[DocResult]) -> dict:
+    return {
+        "summary": _render_docs_fallback(query, hits),
+        "confidence": 0.5,
+        "raw_data": {
+            "matched_symptom_id": None,
+            "source": "official_docs",
+            "query": query,
+            "doc_results": [
+                {
+                    "title": clean_inline(h.doc_title),
+                    "heading": clean_inline(h.heading) if h.heading else None,
+                    "url": h.source_url,
+                    "score": h.score,
+                    # The raw excerpt is the evidence the summary was built
+                    # from -- kept here so critic.py's numeric-grounding
+                    # check sees it (otherwise every UUID/port number quoted
+                    # from the docs looked "ungrounded").
+                    "text": h.text,
+                }
+                for h in hits
+            ],
+        },
+    }
+
+
+def _render_web_fallback(query: str, hits: list[WebSearchResult]) -> str:
+    lines = [f"- [{h.title}]({h.url})" + (f" — {h.snippet}" if h.snippet else "") for h in hits]
+    return (
+        f"### Community-sourced results (unverified)\n\n"
+        + _callout(
+            "WARNING",
+            f'No catalog entry or official documentation matches "{query}" -- here\'s what turned '
+            f"up in the OpenStack community (Launchpad, mailing lists, Q&A). This is **not** "
+            f"official documentation and hasn't been reviewed -- verify anything here before "
+            f"acting on it.",
+        )
+        + "\n\n"
+        + "\n".join(lines)
+        + "\n\n---\n"
+        + "**Source:** community web search -- not docs.openstack.org, and not this "
+        "deployment's curated catalog."
+    )
+
+
+def _build_web_fallback_result(query: str, hits: list[WebSearchResult]) -> dict:
+    return {
+        "summary": _render_web_fallback(query, hits),
+        "confidence": 0.3,
+        "raw_data": {
+            "matched_symptom_id": None,
+            "source": "web_search",
+            "query": query,
+            "web_results": [{"title": h.title, "url": h.url, "snippet": h.snippet} for h in hits],
+        },
+    }
+
+
+def _standalone_fallback(query: str) -> dict:
+    """Tries official docs, then a community web search, before finally
+    giving up. Each tier is wrapped broadly: a missing TAVILY_API_KEY, an
+    unreachable Qdrant Cloud cluster, or an embedding model that can't
+    load are all just "this tier isn't available right now" -- never a
+    crash, and never something that blocks trying the next tier or
+    falling back to the original v0.6 text. See services/openstack_docs/
+    search.py and services/web_search.py's own docstrings for what each
+    tier is grounded in and why they're kept visibly distinct."""
+    try:
+        docs_hits = search_official_docs(query, top_k=3)
+    except Exception:
+        logger.info("openstack_expert: official-docs fallback unavailable", exc_info=True)
+        docs_hits = []
+
+    # Table-of-contents / navigation chunks are semantically close to almost
+    # any question but contain no answer -- drop them so the next tier gets a
+    # chance instead of showing a wall of link titles as "documentation".
+    docs_hits = [h for h in docs_hits if not looks_like_index(h.text)]
+
+    if docs_hits:
+        return _build_docs_fallback_result(query, docs_hits)
+
+    try:
+        web_hits = run_web_search(query, max_results=5)
+    except Exception:
+        logger.info("openstack_expert: web-search fallback unavailable", exc_info=True)
+        web_hits = []
+
+    if web_hits:
+        return _build_web_fallback_result(query, web_hits)
+
+    return {
+        "summary": _no_match_standalone_answer(query),
+        "confidence": 0.2,
+        "raw_data": {"matched_symptom_id": None, "source": "none", "query": query},
     }
 
 
@@ -450,23 +704,146 @@ def _build_result(entry: SymptomEntry, evidence_line: str, hostname: str | None,
 # The two entry paths
 # --------------------------------------------------------------------
 
-def _run_chained(state: CortexState, upstream: str) -> CortexState:
+def _merge_corroboration(evidence: dict, raw_data: dict) -> list[dict]:
+    """Folds the *other* operational agents' evidence (anomaly / network) that
+    also flagged the winning host into `evidence` (mutated in place): a metric
+    name the winner lacked, extra service binaries, extra log lines, and a
+    "corroborated by" sentence for the answer. Returns the agents that
+    contributed (`{"agent", "evidence_line"}` each -- kept on the answer's raw_data so the critic can ground the
+    "corroborated by" sentence). The caller decides how much weight that merged view gets --
+    see _run_chained: the winner's own evidence is matched first, so a
+    corroborating signal can fill a gap but never overrule the winner."""
+    contributed: list[dict] = []
+    for support in raw_data.get("supporting_evidence") or []:
+        agent = support.get("agent")
+        support_raw = support.get("raw_data") or {}
+        if agent == "anomaly":
+            extra = _evidence_from_anomaly(support_raw)
+        elif agent == "network":
+            extra = _evidence_from_network(support_raw)
+        else:
+            continue
+        contributed.append({"agent": agent, "evidence_line": extra["evidence_line"]})
+        evidence["metric_name"] = evidence["metric_name"] or extra["metric_name"]
+        for binary in extra["service_binaries"]:
+            if binary not in evidence["service_binaries"]:
+                evidence["service_binaries"].append(binary)
+        evidence["log_lines"] = list(evidence["log_lines"]) + list(extra["log_lines"])
+        if extra["evidence_line"]:
+            evidence["evidence_line"] = (
+                f"{_as_sentence(evidence['evidence_line'])} "
+                f"Corroborated by the {agent} agent: {_as_sentence(extra['evidence_line'])}"
+            ).strip()
+    return contributed
+
+
+def _as_sentence(text: str) -> str:
+    text = (text or "").strip()
+    return text if not text or text[-1] in ".!?" else f"{text}."
+
+
+_DECISION_LABEL = {
+    "winner": "Best-supported theory",
+    "also_flagged": "Also flagged",
+    "no_signal": "No signal",
+    "failed": "Did not complete",
+}
+
+
+def _public_arbitration(arbitration: dict) -> dict:
+    """The arbitration block minus the security agent's numbers -- this copy
+    rides on an answer a non-admin may see (the chained expert answer is not
+    replaced by the RBAC notice), so it keeps only what security_rbac.py says
+    survives redaction for that agent: that it ran and whether it flagged."""
+    public = dict(arbitration)
+    public["theories"] = [
+        {"agent": t["agent"], "has_signal": t["has_signal"], "verdict": t["verdict"], "restricted": True}
+        if t["agent"] == "security" else t
+        for t in arbitration.get("theories") or []
+    ]
+    return public
+
+
+def _render_incident_analysis(arbitration: dict) -> str:
+    """The "what did the agents find and why this theory" section shown
+    ahead of the runbook when the expert was reached through the parallel
+    incident investigation. Deterministic on purpose (no LLM): agent names,
+    booleans and numbers from the arbitration block only."""
+    host = arbitration["host"]
+    theories = arbitration.get("theories") or []
+    parallelism = arbitration.get("parallelism")
+
+    lead = f"{len(theories)} agents investigated **{host}** in parallel."
+    if parallelism and parallelism.get("concurrent"):
+        lead = (
+            f"{len(theories)} agents investigated **{host}** in parallel — peak concurrency "
+            f"{parallelism['peak_concurrency']}, {parallelism['wall_s']} s wall-clock versus "
+            f"{parallelism['sequential_s']} s had they run one after another."
+        )
+
+    rows = ["| Agent | Signal | Confidence | Decision |", "| --- | --- | --- | --- |"]
+    for t in theories:
+        secured = t["agent"] == "security"
+        confidence = "—" if secured else f"{t['confidence_pct']}%"
+        decision = _DECISION_LABEL.get(t["verdict"], t["verdict"])
+        if t["verdict"] == "also_flagged" and not secured and t.get("corroboration_bonus"):
+            decision += f" (+{t['corroboration_bonus']} corroboration)"
+        rows.append(f"| {t['agent']} | {'yes' if t['has_signal'] else 'no'} | {confidence} | {decision} |")
+
+    parts = [f"### Incident analysis — {host}", lead, "\n".join(rows)]
+    winner_summary = arbitration.get("winner_summary")
+    if winner_summary:
+        parts.append(f"**Leading theory ({arbitration['winner']} agent):** {winner_summary}")
+    if arbitration.get("hosts") and len(arbitration["hosts"]) > 1:
+        others = ", ".join(
+            f"{h['hostname']} ({h['agent']}, score {h['score']})"
+            for h in arbitration["hosts"] if h["hostname"] != host
+        )
+        parts.append(f"Also investigated: {others}.")
+    return "\n\n".join(parts)
+
+
+def _run_chained(state: CortexState, upstream: str, catalog: list[SymptomEntry]) -> CortexState:
     upstream_result = state["agent_result"]
     raw_data = upstream_result["raw_data"]
 
-    if upstream == "anomaly":
+    # v1.2: after the parallel incident investigation, `upstream` is still
+    # "anomaly" (that's the router's target and the arbitrate node's trace
+    # name), but the evidence has the shape of whichever agent's theory won
+    # -- read it accordingly, then fold in what the other operational agents
+    # that also flagged this host found.
+    arbitration = raw_data.get("arbitration")
+    winner = (raw_data.get("investigating_agent") or upstream) if upstream == "anomaly" else upstream
+
+    if winner == "anomaly":
         evidence = _evidence_from_anomaly(raw_data)
-    elif upstream == "network":
+    elif winner == "network":
         evidence = _evidence_from_network(raw_data)
     else:
         evidence = _evidence_from_monitoring(raw_data)
 
-    matches = _match_symptoms(
-        metric_name=evidence["metric_name"],
-        service_binaries=evidence["service_binaries"],
-        query=state["user_query"],
-        log_lines=evidence["log_lines"],
-    )
+    # The winner's own evidence decides which runbook is walked through. The
+    # other agents that also flagged the host only (a) fill a gap when the
+    # winner's evidence matches nothing and (b) add a "corroborated by" line to
+    # the answer -- a corroborating CPU anomaly must not talk the expert out of
+    # the down-Neutron-agent runbook that the winning theory is actually about.
+    def _match(ev: dict):
+        return _match_symptoms(
+            metric_name=ev["metric_name"],
+            service_binaries=ev["service_binaries"],
+            query=state["user_query"],
+            log_lines=ev["log_lines"],
+            catalog=catalog,
+        )
+
+    corroboration: list[dict] = []
+    matches = _match(evidence)
+    if arbitration:
+        merged = copy.deepcopy(evidence)
+        corroboration = _merge_corroboration(merged, raw_data)
+        if not matches and corroboration:
+            matches = _match(merged)
+        evidence = {**evidence, "evidence_line": merged["evidence_line"]}
 
     if not matches:
         # should_trigger_after_* already confirmed there's *something*
@@ -475,28 +852,37 @@ def _run_chained(state: CortexState, upstream: str) -> CortexState:
         # than forcing a generic, unhelpful "teaching" layer on top of it.
         logger.info(
             "openstack_expert: chained from %s but no catalog entry matched, "
-            "leaving upstream diagnosis as the final answer", upstream,
+            "leaving upstream diagnosis as the final answer", winner,
         )
         return state
 
     entry, _score = matches[0]
-    result = _build_result(
-        entry,
-        evidence["evidence_line"],
-        evidence["hostname"],
-        extra_raw={"diagnosed_by": upstream, "upstream_summary": upstream_result["summary"]},
-    )
+    extra_raw = {"diagnosed_by": winner, "upstream_summary": upstream_result["summary"]}
+    if arbitration:
+        extra_raw.update(
+            arbitrated=True,
+            investigating_agent=winner,
+            corroborated_by=[c["agent"] for c in corroboration],
+            corroboration=corroboration,
+            arbitration=_public_arbitration(arbitration),
+            # The winner's own summary, not the cross-agent narrative -- that
+            # one may quote a Security finding (see _public_arbitration).
+            upstream_summary=arbitration.get("winner_summary") or upstream_result["summary"],
+        )
+    result = _build_result(entry, evidence["evidence_line"], evidence["hostname"], extra_raw=extra_raw)
+    if arbitration:
+        result["summary"] = f"{_render_incident_analysis(arbitration)}\n\n---\n\n{result['summary']}"
     state["agent_result"] = result
     state["target_agent"] = "openstack_expert"
     return state
 
 
-def _run_standalone(state: CortexState) -> CortexState:
+def _run_standalone(state: CortexState, catalog: list[SymptomEntry]) -> CortexState:
     query = state["user_query"]
     known_nodes = state.get("known_nodes") or []
 
-    service_binaries = _detect_service_binaries(query)
-    matches = _match_symptoms(query=query, service_binaries=service_binaries)
+    service_binaries = _detect_service_binaries(query, catalog=catalog)
+    matches = _match_symptoms(query=query, service_binaries=service_binaries, catalog=catalog)
 
     # Best-effort only -- a standalone "how do I check nova-compute"
     # question doesn't need a specific host, but if one's clearly named
@@ -506,11 +892,9 @@ def _run_standalone(state: CortexState) -> CortexState:
     hostname = node["hostname"] if node else None
 
     if not matches:
-        state["agent_result"] = {
-            "summary": _no_match_standalone_answer(query),
-            "confidence": 0.2,
-            "raw_data": {"matched_symptom_id": None, "query": query},
-        }
+        # v1.0: no longer immediately the static "no runbook entry" text --
+        # see _standalone_fallback and the module docstring's v1.0 section.
+        state["agent_result"] = _standalone_fallback(query)
         state["error"] = None
         return state
 
@@ -522,7 +906,11 @@ def _run_standalone(state: CortexState) -> CortexState:
 
 
 def openstack_expert_agent(state: CortexState) -> CortexState:
+    # v1.0: built once per call so both paths below see the same snapshot
+    # of static-plus-published entries -- see _combined_catalog's own
+    # docstring for why this is a fresh read rather than a cached one.
+    catalog = _combined_catalog()
     upstream = state.get("target_agent")
     if upstream in ("anomaly", "monitoring", "network") and state.get("agent_result") and not state.get("error"):
-        return _run_chained(state, upstream)
-    return _run_standalone(state)
+        return _run_chained(state, upstream, catalog)
+    return _run_standalone(state, catalog)

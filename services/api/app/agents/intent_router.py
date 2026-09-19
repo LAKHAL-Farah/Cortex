@@ -81,6 +81,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from ..services.llm_client import LLMConfigError, get_chat_model
+from .node_resolver import resolve_nodes
 from .resilience import get_breaker
 from .state import CortexState
 
@@ -109,7 +110,9 @@ _CLARIFYING_QUESTION = (
 
 _SYSTEM_PROMPT = """You route a user's infrastructure question to exactly one specialist agent:
 
-- monitoring: current/live status right now -- CPU, RAM, disk, uptime, up/down, health.
+- monitoring: current/live status right now -- CPU, RAM, disk, uptime, up/down, health -- for one \
+node OR several ("compare compute-01 and compute-02", "how are all my compute nodes", "status of the \
+whole cluster").
 - network: network/connectivity health -- for a physical node: router or floating-IP status, \
 whether a Neutron agent (neutron-l3-agent/neutron-dhcp-agent/neutron-openvswitch-agent) is up, or \
 node-level network interface errors/drops/throughput. E.g. "is the network okay on compute-02", \
@@ -117,7 +120,7 @@ node-level network interface errors/drops/throughput. E.g. "is the network okay 
 the same kind of question scoped to a network/subnet/instance instead of a node: "which VMs are on \
 network X", "is anything down on subnet Z", "why can't instance Y reach the internet".
 - prediction: forecast / future-trend questions -- "will X run out of disk", "CPU trend for \
-the next week", "when will Y hit 90%".
+the next week", "when will Y hit 90%" -- for one node or several ("which nodes will run out of disk").
 - rag: how-to / troubleshooting / explanatory questions -- "how do we fix X", "why does Y \
 happen", "what's the procedure for Z", anything about docs, runbooks, or how a system works.
 - anomaly: something is wrong / investigate an incident -- "something's wrong with compute-01", \
@@ -219,6 +222,16 @@ def route(state: CortexState) -> CortexState:
         return state
 
     target = classification.agent
+    # network/security look at ONE node. A question naming several (or a whole
+    # role/fleet) goes to the anomaly fan-out instead, which runs the
+    # anomaly + network + security agents on every node concurrently and
+    # arbitrates across them -- rather than silently answering for whichever
+    # node the resolver happened to pick.
+    if target in ("network", "security") and resolve_nodes(
+        query, state.get("known_nodes") or [], session_memory=state.get("session_memory")
+    ):
+        logger.info("intent_router: %r question spans several nodes, routing to the anomaly fan-out", target)
+        target = "anomaly"
     state["intent"] = target  # intent label == agent name 1:1, same as v0.1
     state["target_agent"] = target
     return state

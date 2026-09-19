@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { isValidElement, useEffect, useMemo, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -15,11 +15,14 @@ import {
   Clock,
   Copy,
   Cpu,
+  Crown,
   ExternalLink,
   FileText,
   Gauge,
   Globe,
   HardDrive,
+  Info,
+  Layers,
   Lightbulb,
   Loader2,
   Lock,
@@ -38,6 +41,7 @@ import {
   Waypoints,
   Wrench,
   XCircle,
+  Zap,
 } from "lucide-react";
 import {
   Area,
@@ -54,7 +58,11 @@ import type {
   AgentAnomalyData,
   AgentExpertCommand,
   AgentExpertData,
+  IncidentArbitration,
+  ParallelismSummary,
   AgentMonitoringData,
+  AgentMonitoringFleetData,
+  AgentPredictionFleetData,
   AgentName,
   AgentNetworkData,
   AgentPredictionData,
@@ -145,6 +153,70 @@ export function agentMeta(agentUsed?: string | null) {
 }
 
 // ---------------------------------------------------------------------------
+// Parallel investigation, as seen from the trace: the "anomaly" step is the
+// join of anomaly + network + security branches (agents/nodes/anomaly.py's
+// anomaly_arbitrate), so its detail names every agent that investigated. The
+// one-liner and the timeline both read it, so all three agents show up
+// instead of just the one the step is named after.
+// ---------------------------------------------------------------------------
+
+interface InvestigatedAgent {
+  agent: string;
+  verdict?: string;
+  durationMs?: number;
+}
+
+function investigatedAgents(steps?: AgentTraceStep[]): { agents: InvestigatedAgent[]; winner?: string; peak?: number } | null {
+  const step = steps?.find((s) => s.node === "anomaly");
+  if (!step) return null;
+  const detail = step.detail as {
+    investigated?: { agent: string; verdict?: string }[];
+    contributing_agents?: string[];
+    parallelism?: ParallelismSummary | null;
+    winner?: string;
+  };
+  const base: { agent: string; verdict?: string }[] =
+    detail.investigated?.length
+      ? detail.investigated
+      : (detail.contributing_agents ?? []).map((agent) => ({ agent }));
+  if (base.length < 2) return null;
+
+  // Longest branch per agent (an agent runs once per node in scope).
+  const longest: Record<string, number> = {};
+  for (const b of detail.parallelism?.branches ?? []) {
+    longest[b.agent] = Math.max(longest[b.agent] ?? 0, b.duration_ms);
+  }
+  return {
+    agents: base.map((a) => ({ ...a, durationMs: longest[a.agent] })),
+    winner: detail.winner,
+    peak: detail.parallelism?.peak_concurrency,
+  };
+}
+
+/** "Anomaly agent" -> "Anomaly" so a list reads "Anomaly, Network and Security agents". */
+function shortAgentLabel(agent: string) {
+  return agentMeta(agent).label.replace(/\s+agent$/i, "");
+}
+
+const AGENT_ORDER = ["anomaly", "network", "security"];
+
+function AgentNameList({ agents }: { agents: string[] }) {
+  // Stable reading order (not the ranking order the timeline uses).
+  const ordered = [...agents].sort((a, b) => AGENT_ORDER.indexOf(a) - AGENT_ORDER.indexOf(b));
+  return (
+    <>
+      {ordered.map((agent, i) => (
+        <span key={agent}>
+          <span style={{ color: agentMeta(agent).color, fontWeight: 600 }}>{shortAgentLabel(agent)}</span>
+          {i < ordered.length - 2 ? ", " : i === ordered.length - 2 ? " and " : ""}
+        </span>
+      ))}{" "}
+      agents
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Reasoning trace -- shown above the answer. While a request is in flight it
 // cycles through generic staged copy (there's no token-level reasoning
 // stream from the orchestrator yet, see routers/agents.py); once the answer
@@ -164,6 +236,8 @@ export function ReasoningTrace({
   agentUsed,
   elapsedMs,
   steps,
+  onboarding = false,
+  onOnboardingShown,
 }: {
   active: boolean;
   agentUsed?: string;
@@ -173,15 +247,33 @@ export function ReasoningTrace({
   // that expands into it -- "routed to the network agent" stops being the
   // whole story and becomes the summary of a real, inspectable sequence.
   steps?: AgentTraceStep[];
+  // v1.3/task 3.7 (onboarding mode): true for the one turn CopilotChat has
+  // picked as this browser's first-ever steps-backed answer (see its
+  // COPILOT_TRACE_ONBOARDED_KEY). Auto-expands the timeline instead of
+  // waiting for a click and adds one explanatory line, so the *first*
+  // answer teaches "you can see why it investigated this way" -- every
+  // later turn (and this same turn, once acknowledged) is the plain
+  // click-to-expand behavior above, unchanged.
+  onboarding?: boolean;
+  onOnboardingShown?: () => void;
 }) {
   const [step, setStep] = useState(0);
-  const [expanded, setExpanded] = useState(false);
+  const hasRealSteps = !!steps && steps.length > 0;
+  const [expanded, setExpanded] = useState(onboarding && hasRealSteps);
 
   useEffect(() => {
     if (!active) return;
     const id = setInterval(() => setStep((s) => (s + 1) % THINKING_STEPS.length), 700);
     return () => clearInterval(id);
   }, [active]);
+
+  // A single render with the timeline auto-expanded is the whole "lesson" --
+  // tell CopilotChat right away so it can flip the browser-local flag and
+  // no other turn (including a reload of this one) auto-expands again.
+  useEffect(() => {
+    if (onboarding && hasRealSteps) onOnboardingShown?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onboarding, hasRealSteps]);
 
   if (active) {
     return (
@@ -205,7 +297,6 @@ export function ReasoningTrace({
   if (!agentUsed) return null;
   const meta = agentMeta(agentUsed);
   const Icon = meta.icon;
-  const hasRealSteps = !!steps && steps.length > 0;
   // The last non-structural step before compose is what actually produced
   // the answer -- if that's a different agent than target_agent (i.e. it
   // got chained, see openstack_expert.py), say so instead of only naming
@@ -213,6 +304,7 @@ export function ReasoningTrace({
   const chainedInto = hasRealSteps
     ? steps!.find((s) => s.node === "openstack_expert" && s.detail?.chained_from)
     : undefined;
+  const parallel = hasRealSteps ? investigatedAgents(steps) : null;
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.2 }}>
@@ -225,7 +317,37 @@ export function ReasoningTrace({
       >
         <Icon className="h-3 w-3 shrink-0" style={{ color: meta.color }} strokeWidth={2} />
         <span>
-          {chainedInto ? (
+          {parallel && chainedInto ? (
+            <>
+              <AgentNameList agents={parallel.agents.map((a) => a.agent)} /> investigated in parallel
+              {parallel.winner && (
+                <>
+                  {" "}
+                  — the{" "}
+                  <span style={{ color: agentMeta(parallel.winner).color, fontWeight: 600 }}>
+                    {shortAgentLabel(parallel.winner).toLowerCase()}
+                  </span>{" "}
+                  agent&apos;s theory was best supported
+                </>
+              )}
+              , so it was handed to the{" "}
+              <span style={{ color: meta.color, fontWeight: 600 }}>{meta.label.toLowerCase()}</span>
+            </>
+          ) : parallel ? (
+            <>
+              <AgentNameList agents={parallel.agents.map((a) => a.agent)} /> investigated in parallel
+              {parallel.winner && (
+                <>
+                  {" "}
+                  — best-supported theory:{" "}
+                  <span style={{ color: agentMeta(parallel.winner).color, fontWeight: 600 }}>
+                    {shortAgentLabel(parallel.winner).toLowerCase()}
+                  </span>{" "}
+                  agent
+                </>
+              )}
+            </>
+          ) : chainedInto ? (
             <>
               <span style={{ color: agentMeta(chainedInto.detail.chained_from).color, fontWeight: 600 }}>
                 {agentMeta(chainedInto.detail.chained_from).label}
@@ -250,6 +372,14 @@ export function ReasoningTrace({
       </button>
       {hasRealSteps && expanded && (
         <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} transition={{ duration: 0.15 }}>
+          {onboarding && (
+            <div
+              className="mb-1.5 mt-1 text-[11px] leading-relaxed"
+              style={{ color: "var(--text-muted)" }}
+            >
+              This is the real step-by-step trace of how Cockpit investigated your question — every turn has one; click the line above to open or close it.
+            </div>
+          )}
           <AgentTraceTimeline steps={steps} />
         </motion.div>
       )}
@@ -324,12 +454,22 @@ function TraceStepDetail({ step }: { step: AgentTraceStep }) {
     );
   }
 
+  const parallel = detail.parallelism as ParallelismSummary | null | undefined;
+
   return (
     <div className="flex flex-col gap-1">
       {detail.chained_from && (
         <span className="italic" style={{ color: "var(--text-muted)" }}>
           Triggered by the {agentMeta(detail.chained_from).label.toLowerCase()}
         &apos;s finding, one step up.
+        </span>
+      )}
+      {parallel && (
+        <span className="italic" style={{ color: "var(--text-muted)" }}>
+          {parallel.branch_count} agent branches on {parallel.threads} thread{parallel.threads === 1 ? "" : "s"} · peak
+          concurrency {parallel.peak_concurrency} · {formatMs(parallel.wall_ms)} wall-clock vs{" "}
+          {formatMs(parallel.sequential_ms)} sequential
+          {typeof detail.winner === "string" ? ` · best-supported theory: ${detail.winner} agent` : ""}
         </span>
       )}
       {detail.summary && <span>{detail.summary}</span>}
@@ -344,6 +484,7 @@ function TraceStepDetail({ step }: { step: AgentTraceStep }) {
 export function AgentTraceTimeline({ steps }: { steps?: AgentTraceStep[] }) {
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   if (!steps || steps.length === 0) return null;
+  const parallelInfo = investigatedAgents(steps);
 
   return (
     <div className="agent-trace-timeline">
@@ -386,6 +527,38 @@ export function AgentTraceTimeline({ steps }: { steps?: AgentTraceStep[] }) {
                 />
               )}
             </button>
+            {step.node === "anomaly" && parallelInfo && (
+              <div className="agent-trace-timeline__branches" aria-label="Agents that investigated in parallel">
+                {parallelInfo.agents.map((a) => {
+                  const m = agentMeta(a.agent);
+                  const BranchIcon = a.verdict === "winner" ? Crown : m.icon;
+                  const v = a.verdict ? VERDICT_STYLE[a.verdict] : undefined;
+                  return (
+                    <div key={a.agent} className="agent-trace-timeline__branch">
+                      <span className="agent-trace-timeline__icon" style={{ background: m.soft, width: 16, height: 16 }}>
+                        <BranchIcon className="h-[11px] w-[11px]" style={{ color: m.color }} strokeWidth={2} />
+                      </span>
+                      <span className="agent-trace-timeline__label" style={{ color: m.color }}>
+                        {m.label}
+                      </span>
+                      {v && (
+                        <span className="agent-pill" style={{ color: v.color, background: v.soft }}>
+                          {v.label}
+                        </span>
+                      )}
+                      {typeof a.durationMs === "number" && (
+                        <span className="agent-trace-timeline__duration">{formatMs(a.durationMs)}</span>
+                      )}
+                    </div>
+                  );
+                })}
+                {typeof parallelInfo.peak === "number" && (
+                  <div className="agent-trace-timeline__branch-note">
+                    <Zap className="h-3 w-3" strokeWidth={2} /> ran in parallel · peak concurrency {parallelInfo.peak}
+                  </div>
+                )}
+              </div>
+            )}
             {isOpen && hasDetail && (
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
@@ -414,6 +587,46 @@ function withCiteLinks(text: string) {
   return text.replace(/\[([a-zA-Z0-9_.\-/]+\.md)\]/g, `[$1](${CITE_SCHEME}$1)`);
 }
 
+/** Older stored answers carry the compose-step notes as a plain italic
+ * paragraph (`_Note: ..._`). Rewrites them into the same `> [!WARNING]`
+ * callout new answers ship with, so history looks the same as fresh turns. */
+function withCallouts(text: string) {
+  const brief = (t: string, n = 140) => {
+    const flat = t.replace(/[`|*_>#[\]]+/g, "").replace(/\s+/g, " ").trim();
+    return flat.length <= n ? flat : `${flat.slice(0, n - 1).trimEnd()}…`;
+  };
+  return text
+    .replace(
+      /^_Note: this answer contains at least one claim \("([\s\S]*?)"\) that could not be verified[\s\S]*?extra caution\._/gm,
+      (_m, claim: string) =>
+        `> [!WARNING]\n> **Unverified claim** — this answer contains a claim that could not be verified against the evidence gathered for it. Treat with extra caution.\n> First flagged: \u201c${brief(claim)}\u201d`,
+    )
+    .replace(/^_Note: ([^\n]+?)_$/gm, (_m, body: string) => `> [!WARNING]\n> ${body}`);
+}
+
+type MdNode = { type: string; value?: string; children?: MdNode[]; data?: Record<string, unknown> };
+const CALLOUT_RE = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i;
+
+/** Minimal remark plugin (no extra dependency): a blockquote whose first
+ * line is `[!KIND]` becomes `<div class="md-callout md-callout--kind">`. */
+function remarkCallouts() {
+  const visit = (node: MdNode) => {
+    const para = node.type === "blockquote" ? node.children?.[0] : undefined;
+    const first = para?.type === "paragraph" ? para.children?.[0] : undefined;
+    if (node.type === "blockquote" && first?.type === "text" && first.value) {
+      const m = first.value.match(CALLOUT_RE);
+      if (m) {
+        const kind = m[1].toLowerCase() === "caution" || m[1].toLowerCase() === "important" ? "warning" : m[1].toLowerCase();
+        first.value = first.value.slice(m[0].length);
+        if (!first.value) para!.children!.shift();
+        node.data = { hName: "div", hProperties: { className: ["md-callout", `md-callout--${kind}`] } };
+      }
+    }
+    node.children?.forEach(visit);
+  };
+  return (tree: MdNode) => visit(tree);
+}
+
 function CiteChip({ file }: { file: string }) {
   return (
     <span
@@ -426,11 +639,52 @@ function CiteChip({ file }: { file: string }) {
   );
 }
 
+function nodeText(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join("");
+  if (isValidElement(node)) return nodeText((node.props as { children?: ReactNode }).children);
+  return "";
+}
+
+function CodeBlock({ lang, code }: { lang?: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard unavailable -- the block stays selectable by hand.
+    }
+  }
+  const label = !lang || lang === "bash" || lang === "sh" || lang === "shell" ? "shell" : lang;
+  return (
+    <div className="md-codeblock">
+      <div className="md-codeblock__bar">
+        <span className="inline-flex items-center gap-1.5">
+          <Terminal className="h-3 w-3" strokeWidth={2} />
+          {label}
+        </span>
+        <button type="button" onClick={copy} aria-label="Copy" title="Copy" className="md-codeblock__copy">
+          {copied ? <Check className="h-3 w-3" style={{ color: "var(--ok)" }} /> : <Copy className="h-3 w-3" />}
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre>
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
+const CALLOUT_ICON = { note: Info, tip: Lightbulb, warning: AlertTriangle } as const;
+
 export function Markdown({ text }: { text: string }) {
   return (
     <div className="md-content">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkCallouts]}
         components={{
           a({ href, children }) {
             if (href?.startsWith(CITE_SCHEME)) {
@@ -442,9 +696,33 @@ export function Markdown({ text }: { text: string }) {
               </a>
             );
           },
+          table({ children }) {
+            return (
+              <div className="md-table-wrap">
+                <table>{children}</table>
+              </div>
+            );
+          },
+          pre({ children }) {
+            const child = Array.isArray(children) ? children[0] : children;
+            const props = (isValidElement(child) ? child.props : {}) as { className?: string; children?: ReactNode };
+            const lang = /language-([\w-]+)/.exec(props.className ?? "")?.[1];
+            return <CodeBlock lang={lang} code={nodeText(props.children).replace(/\n$/, "")} />;
+          },
+          div({ className, children }) {
+            const kind = /md-callout--(\w+)/.exec(className ?? "")?.[1] as keyof typeof CALLOUT_ICON | undefined;
+            if (!kind) return <div className={className}>{children}</div>;
+            const Icon = CALLOUT_ICON[kind] ?? Info;
+            return (
+              <div className={className} role={kind === "warning" ? "alert" : "note"}>
+                <Icon className="md-callout__icon" strokeWidth={2} />
+                <div className="md-callout__body">{children}</div>
+              </div>
+            );
+          },
         }}
       >
-        {withCiteLinks(text)}
+        {withCallouts(withCiteLinks(text))}
       </ReactMarkdown>
     </div>
   );
@@ -486,6 +764,174 @@ function MiniStat({ label, value }: { label: string; value: ReactNode }) {
     <div className="agent-mini-stat">
       <div className="agent-mini-stat__label">{label}</div>
       <div className="agent-mini-stat__value">{value}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-node (fleet) panels -- monitoring/prediction answers about several
+// nodes at once (raw_data.scope === "multi"). The answer text already carries
+// the comparison table; these add the at-a-glance version: one row per node,
+// worst first (the backend sorts), with severity-colored bars.
+// ---------------------------------------------------------------------------
+
+function isFleet(data: unknown): boolean {
+  return !!data && typeof data === "object" && (data as { scope?: string }).scope === "multi";
+}
+
+function MiniBar({ label, value }: { label: string; value: number }) {
+  const tone = pctTone(value);
+  return (
+    <div className="min-w-0">
+      <div className="flex items-baseline justify-between text-[10.5px] text-text-muted">
+        <span>{label}</span>
+        <span className="font-mono font-semibold" style={{ color: tone }}>
+          {value}%
+        </span>
+      </div>
+      <div className="mt-0.5 h-1 overflow-hidden rounded-full" style={{ background: "var(--border-soft)" }}>
+        <div className="h-full rounded-full" style={{ width: `${Math.min(100, Math.max(0, value))}%`, background: tone }} />
+      </div>
+    </div>
+  );
+}
+
+function FleetSummaryPill({ color, soft, children }: { color: string; soft: string; children: ReactNode }) {
+  return (
+    <span className="agent-pill" style={{ color, background: soft }}>
+      {children}
+    </span>
+  );
+}
+
+function MonitoringFleetPanel({ data }: { data: AgentMonitoringFleetData }) {
+  const { counts } = data;
+  const attention = counts.down + counts.warning + counts.critical;
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--ok) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <Activity className="h-3.5 w-3.5" style={{ color: "var(--ok)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">Fleet · {counts.total} nodes</span>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <FleetSummaryPill color="var(--ok)" soft="var(--ok-soft)">
+            <CheckCircle2 className="h-3 w-3" strokeWidth={2} />
+            {counts.up} up
+          </FleetSummaryPill>
+          {counts.down > 0 && (
+            <FleetSummaryPill color="var(--crit)" soft="var(--crit-soft)">
+              <XCircle className="h-3 w-3" strokeWidth={2} />
+              {counts.down} down
+            </FleetSummaryPill>
+          )}
+          {attention > 0 && (
+            <FleetSummaryPill color="var(--warn)" soft="var(--warn-soft)">
+              <AlertTriangle className="h-3 w-3" strokeWidth={2} />
+              {data.concerning.length} need attention
+            </FleetSummaryPill>
+          )}
+        </div>
+      </div>
+
+      <ul className="flex flex-col gap-1.5">
+        {data.nodes.map((n) => {
+          const up = n.status === "up";
+          const tone = !up || n.health === "critical" ? "var(--crit)" : n.health === "warning" ? "var(--warn)" : "var(--ok)";
+          return (
+            <li
+              key={n.node}
+              className="grid grid-cols-1 items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-2 sm:grid-cols-[minmax(0,1.3fr)_repeat(3,minmax(0,1fr))]"
+              style={{ background: "var(--canvas)", borderLeft: `3px solid ${tone}` }}
+            >
+              <div className="min-w-0">
+                <div className="truncate text-[12.5px] font-semibold text-color-text">{n.node}</div>
+                <div className="text-[11px] text-text-muted">
+                  {n.role} · {up ? n.health : "down"} · up {n.uptime}
+                </div>
+              </div>
+              <MiniBar label="CPU" value={n.cpu_percent} />
+              <MiniBar label="RAM" value={n.memory_percent} />
+              <MiniBar label="Disk" value={n.disk_percent} />
+            </li>
+          );
+        })}
+      </ul>
+
+      {data.missing.length > 0 && (
+        <div className="flex items-start gap-2 text-[11.5px] text-text-muted">
+          <AlertTriangle className="mt-[1px] h-3 w-3 shrink-0" style={{ color: "var(--warn)" }} strokeWidth={2} />
+          No live data yet for {data.missing.join(", ")}.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PredictionFleetPanel({ data }: { data: AgentPredictionFleetData }) {
+  const isPercent = data.metric.endsWith("_percent");
+  const unit = isPercent ? "%" : "";
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--medium) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <TrendingUp className="h-3.5 w-3.5" style={{ color: "var(--medium)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">
+            {humanizeMetric(data.metric)} · {data.counts.total} nodes
+          </span>
+        </div>
+        <FleetSummaryPill
+          color={data.at_risk.length ? "var(--crit)" : "var(--medium)"}
+          soft={data.at_risk.length ? "var(--crit-soft)" : "var(--medium-soft)"}
+        >
+          {data.at_risk.length > 0 && <AlertTriangle className="h-3 w-3" strokeWidth={2} />}
+          {data.at_risk.length ? `${data.at_risk.length} at risk` : data.horizon_days ? `${data.horizon_days}d forecast` : "forecast"}
+        </FleetSummaryPill>
+      </div>
+
+      <ul className="flex flex-col gap-1.5">
+        {data.nodes.map((n) => {
+          const tone = n.will_breach ? "var(--crit)" : n.may_breach ? "var(--warn)" : "var(--ok)";
+          const TrendIcon = n.delta > 0.5 ? TrendingUp : n.delta < -0.5 ? TrendingDown : Minus;
+          return (
+            <li
+              key={n.hostname}
+              className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.6fr)_auto] items-center gap-3 rounded-[var(--radius-control)] px-2.5 py-2"
+              style={{ background: "var(--canvas)", borderLeft: `3px solid ${tone}` }}
+            >
+              <div className="min-w-0">
+                <div className="truncate text-[12.5px] font-semibold text-color-text">{n.hostname}</div>
+                <div className="text-[11px] text-text-muted">{n.role}</div>
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 font-mono text-[11.5px] text-text-dim">
+                  {n.start}
+                  {unit} → <span style={{ color: tone, fontWeight: 600 }}>{n.end}{unit}</span>
+                  <TrendIcon className="h-3 w-3" style={{ color: "var(--text-muted)" }} strokeWidth={2} />
+                </div>
+                {isPercent && (
+                  <div className="mt-1 h-1 overflow-hidden rounded-full" style={{ background: "var(--border-soft)" }}>
+                    <div
+                      className="h-full rounded-full"
+                      style={{ width: `${Math.min(100, Math.max(0, n.end))}%`, background: tone }}
+                    />
+                  </div>
+                )}
+              </div>
+              <span className="agent-pill shrink-0" style={{ color: tone, background: "var(--canvas)", border: `1px solid ${tone}` }}>
+                {n.will_breach ? "will cross" : n.may_breach ? "may cross" : "ok"}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+
+      {data.missing.length > 0 && (
+        <div className="flex items-start gap-2 text-[11.5px] text-text-muted">
+          <AlertTriangle className="mt-[1px] h-3 w-3 shrink-0" style={{ color: "var(--warn)" }} strokeWidth={2} />
+          Not enough data to forecast {data.missing.join(", ")}.
+        </div>
+      )}
     </div>
   );
 }
@@ -1225,8 +1671,189 @@ function CommandSection({ title, commands }: { title: string; commands: AgentExp
   );
 }
 
+function hostOf(url: string) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** Sources card for the two non-catalog tiers (official docs / community
+ * search). Official docs get the accent tone; community results get the
+ * warning tone because they're unreviewed. */
+function ExpertSourcesPanel({ data }: { data: AgentExpertData }) {
+  const official = data.source === "official_docs";
+  const items = official
+    ? (data.doc_results ?? []).map((d) => ({
+        title: d.heading && d.heading !== d.title ? `${d.title} — ${d.heading}` : d.title,
+        url: d.url,
+        meta: typeof d.score === "number" ? `${Math.round(d.score * 100)}% match` : undefined,
+      }))
+    : (data.web_results ?? []).map((w) => ({ title: w.title, url: w.url, meta: hostOf(w.url) }));
+  if (items.length === 0) return null;
+
+  const tone = official
+    ? { color: "var(--accent)", soft: "var(--accent-soft)", label: "Official OpenStack docs" }
+    : { color: "var(--warn)", soft: "var(--warn-soft)", label: "Community sources · unverified" };
+  const Icon = official ? BookOpen : AlertTriangle;
+
+  return (
+    <div className="agent-panel" style={{ borderColor: `color-mix(in srgb, ${tone.color} 25%, var(--border))` }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <Icon className="h-3.5 w-3.5" style={{ color: tone.color }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">Sources</span>
+        </div>
+        <span className="agent-pill" style={{ color: tone.color, background: tone.soft }}>
+          {tone.label}
+        </span>
+      </div>
+      <ul className="flex flex-col gap-1.5">
+        {items.map((item, i) => (
+          <li key={`${item.url}-${i}`}>
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-1.5 text-[12px] no-underline"
+              style={{ background: "var(--canvas)", color: "var(--text)" }}
+            >
+              <ExternalLink className="h-3 w-3 shrink-0" style={{ color: tone.color }} strokeWidth={2} />
+              <span className="min-w-0 flex-1 truncate">{item.title}</span>
+              {item.meta && <span className="shrink-0 text-[11px] text-text-muted">{item.meta}</span>}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Parallel incident investigation (v1.2) -- what the anomaly/network/security
+// agents each found *at the same time*, and which theory arbitration picked.
+// The timeline is drawn from measured per-branch start offsets/durations
+// (incident_fanout.py), so overlapping bars are overlap that really happened,
+// not an illustration.
+// ---------------------------------------------------------------------------
+
+const VERDICT_STYLE: Record<string, { label: string; color: string; soft: string }> = {
+  winner: { label: "Best-supported", color: "var(--ok)", soft: "var(--ok-soft)" },
+  also_flagged: { label: "Also flagged", color: "var(--warn)", soft: "var(--warn-soft)" },
+  no_signal: { label: "No signal", color: "var(--text-muted)", soft: "var(--canvas)" },
+  failed: { label: "Did not complete", color: "var(--crit)", soft: "var(--crit-soft)" },
+};
+
+function formatMs(ms: number) {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+function ArbitrationPanel({ arbitration }: { arbitration: IncidentArbitration }) {
+  const par = arbitration.parallelism;
+  const span = par ? Math.max(par.wall_ms, 1) : 1;
+
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--accent) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <Layers className="h-3.5 w-3.5" style={{ color: "var(--accent)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">Parallel investigation</span>
+          <span className="text-[11px] text-text-muted">{arbitration.host}</span>
+        </div>
+        {par && (
+          <span
+            className="agent-pill"
+            style={{
+              color: par.concurrent ? "var(--ok)" : "var(--warn)",
+              background: par.concurrent ? "var(--ok-soft)" : "var(--warn-soft)",
+            }}
+            title={`${par.branch_count} branches on ${par.threads} threads`}
+          >
+            <Zap className="h-3 w-3" strokeWidth={2} />
+            {par.concurrent
+              ? `${par.peak_concurrency} at once${par.speedup ? ` · ${par.speedup}× faster` : ""}`
+              : "ran sequentially"}
+          </span>
+        )}
+      </div>
+
+      {par && (
+        <div className="flex flex-col gap-1">
+          {par.branches
+            .filter((b) => b.hostname === arbitration.host)
+            .map((b) => {
+              const meta = agentMeta(b.agent);
+              const left = (b.offset_ms / span) * 100;
+              const width = Math.max(2, (b.duration_ms / span) * 100);
+              return (
+                <div key={`${b.agent}-${b.hostname}`} className="grid grid-cols-[72px_minmax(0,1fr)_44px] items-center gap-2">
+                  <span className="text-[11px] font-medium" style={{ color: meta.color }}>
+                    {b.agent}
+                  </span>
+                  <div className="relative h-2 rounded-full" style={{ background: "var(--border-soft)" }} title={b.thread}>
+                    <div
+                      className="absolute top-0 h-full rounded-full"
+                      style={{ left: `${left}%`, width: `${Math.min(width, 100 - left)}%`, background: meta.color }}
+                    />
+                  </div>
+                  <span className="text-right font-mono text-[10.5px] text-text-muted">{formatMs(b.duration_ms)}</span>
+                </div>
+              );
+            })}
+          <div className="text-[10.5px] text-text-muted">
+            wall-clock {formatMs(par.wall_ms)} vs {formatMs(par.sequential_ms)} one after another
+          </div>
+        </div>
+      )}
+
+      <ul className="flex flex-col gap-1.5">
+        {arbitration.theories.map((t) => {
+          const v = VERDICT_STYLE[t.verdict] ?? VERDICT_STYLE.no_signal;
+          const meta = agentMeta(t.agent);
+          const Icon = t.verdict === "winner" ? Crown : meta.icon;
+          return (
+            <li
+              key={t.agent}
+              className="flex items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-1.5"
+              style={{ background: "var(--canvas)", borderLeft: `3px solid ${v.color}` }}
+            >
+              <Icon className="h-3.5 w-3.5 shrink-0" style={{ color: v.color }} strokeWidth={2} />
+              <span className="text-[12.5px] font-semibold text-color-text">{t.agent}</span>
+              <span className="agent-pill" style={{ color: v.color, background: v.soft }}>
+                {v.label}
+              </span>
+              <span className="ml-auto flex items-center gap-2 font-mono text-[11px] text-text-muted">
+                {t.restricted ? (
+                  <span>restricted</span>
+                ) : (
+                  <>
+                    {!!t.corroboration_bonus && t.corroboration_bonus > 0 && <span>+{t.corroboration_bonus}</span>}
+                    <span>{t.confidence_pct}%</span>
+                  </>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+
+      <div className="text-[11.5px] leading-relaxed text-text-dim">{arbitration.why}</div>
+    </div>
+  );
+}
+
 function ExpertPanel({ data }: { data: AgentExpertData }) {
-  if (!data.matched_symptom_id) return null;
+  return (
+    <>
+      {data.arbitration && <ArbitrationPanel arbitration={data.arbitration} />}
+      <ExpertRunbookPanel data={data} />
+    </>
+  );
+}
+
+function ExpertRunbookPanel({ data }: { data: AgentExpertData }) {
+  if (!data.matched_symptom_id) return <ExpertSourcesPanel data={data} />;
 
   return (
     <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--accent) 22%, var(--border))" }}>
@@ -1283,16 +1910,16 @@ function confidenceTone(confidence: number) {
 }
 
 function AnomalyMetricCard({ signal }: { signal: AgentAnomalyData["metric_signal"] }) {
-  const data = signal.data;
+  const data = signal?.data;
 
-  if (!signal.has_signal || !data) {
+  if (!signal?.has_signal || !data) {
     return (
       <div className="agent-anomaly-subcard">
         <div className="agent-anomaly-subcard__head" style={{ color: "var(--ok)" }}>
           <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2} />
           Metric check
         </div>
-        <p className="text-[12px] leading-relaxed text-text-muted">{signal.detail}</p>
+        <p className="text-[12px] leading-relaxed text-text-muted">{signal?.detail ?? "No metric signal was returned."}</p>
       </div>
     );
   }
@@ -1404,6 +2031,15 @@ function AnomalyLogCard({ signal, hostname }: { signal: AgentAnomalyData["log_si
 }
 
 function AnomalyPanel({ data, confidence }: { data: AgentAnomalyData; confidence?: number | null }) {
+  return (
+    <>
+      {data.arbitration && <ArbitrationPanel arbitration={data.arbitration} />}
+      <AnomalyFindingPanel data={data} confidence={confidence} />
+    </>
+  );
+}
+
+function AnomalyFindingPanel({ data, confidence }: { data: AgentAnomalyData; confidence?: number | null }) {
   const tone = confidenceTone(confidence ?? 0);
 
   return (
@@ -1658,6 +2294,22 @@ function AgentPanelSkeleton({ agentUsed }: { agentUsed?: string }) {
 // Dispatcher -- answer text (always) plus whichever panel matches agent_used.
 // ---------------------------------------------------------------------------
 
+function MonitoringSwitch({ data }: { data: AgentRawData }) {
+  return isFleet(data) ? (
+    <MonitoringFleetPanel data={data as AgentMonitoringFleetData} />
+  ) : (
+    <MonitoringPanel data={data as AgentMonitoringData} />
+  );
+}
+
+function PredictionSwitch({ data }: { data: AgentRawData }) {
+  return isFleet(data) ? (
+    <PredictionFleetPanel data={data as AgentPredictionFleetData} />
+  ) : (
+    <PredictionPanel data={data as AgentPredictionData} />
+  );
+}
+
 /** Static render -- full answer + panel, no animation. Used for messages
  * loaded from history (they've already "arrived"). */
 export function AgentAnswerPanel({
@@ -1674,10 +2326,10 @@ export function AgentAnswerPanel({
   return (
     <div className="min-w-0">
       <Markdown text={answer} />
-      {agentUsed === "monitoring" && rawData && <MonitoringPanel data={rawData as AgentMonitoringData} />}
+      {agentUsed === "monitoring" && rawData && <MonitoringSwitch data={rawData} />}
       {agentUsed === "network" && rawData && <NetworkPanel data={rawData as AgentNetworkData} />}
       {agentUsed === "security" && rawData && <SecurityPanel data={rawData as AgentSecurityData} />}
-      {agentUsed === "prediction" && rawData && <PredictionPanel data={rawData as AgentPredictionData} />}
+      {agentUsed === "prediction" && rawData && <PredictionSwitch data={rawData} />}
       {agentUsed === "rag" && rawData && <RagPanel data={rawData as AgentRagData} />}
       {agentUsed === "anomaly" && rawData && (
         <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />
@@ -1707,7 +2359,16 @@ export function AnimatedAgentAnswer({
   onSettled?: () => void;
   confidence?: number | null;
 }) {
-  const { visible, finished } = useTypewriter(answer, animate, onSettled);
+  // Word-by-word typing shreds tables, fenced blocks and callouts (half a
+  // table is just pipes), so structured answers are shown whole.
+  const rich = /^```|^\|.*\|\s*$|^> \[!/m.test(answer);
+  const typing = animate && !rich;
+  const { visible, finished } = useTypewriter(answer, typing, onSettled);
+
+  useEffect(() => {
+    if (animate && rich) onSettled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!animate) {
     return <AgentAnswerPanel agentUsed={agentUsed} rawData={rawData} answer={answer} confidence={confidence} />;
@@ -1720,10 +2381,10 @@ export function AnimatedAgentAnswer({
       {!showPanel && rawData && <AgentPanelSkeleton agentUsed={agentUsed} />}
       {showPanel && (
         <motion.div initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
-          {agentUsed === "monitoring" && <MonitoringPanel data={rawData as AgentMonitoringData} />}
+          {agentUsed === "monitoring" && <MonitoringSwitch data={rawData} />}
           {agentUsed === "network" && <NetworkPanel data={rawData as AgentNetworkData} />}
           {agentUsed === "security" && <SecurityPanel data={rawData as AgentSecurityData} />}
-          {agentUsed === "prediction" && <PredictionPanel data={rawData as AgentPredictionData} />}
+          {agentUsed === "prediction" && <PredictionSwitch data={rawData} />}
           {agentUsed === "rag" && <RagPanel data={rawData as AgentRagData} />}
           {agentUsed === "anomaly" && <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />}
           {agentUsed === "openstack_expert" && <ExpertPanel data={rawData as AgentExpertData} />}

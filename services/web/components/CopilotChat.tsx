@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ArrowUp,
@@ -36,6 +36,31 @@ interface DisplayMessage extends StoredMessage {
   // Not persisted to conversation history yet (only trace_id is durable,
   // via GET /api/v1/agents/trace/{trace_id}), so a reloaded past turn shows
   // the plain collapsed line rather than a replayable timeline.
+}
+
+// task 3.7 (onboarding mode): this browser's flag for "has the reasoning
+// trace already been auto-expanded once to show a new user it exists".
+// Deliberately client-side/localStorage only (same pattern as
+// ThemeToggle's "cortex-theme") -- which turn happens to be someone's
+// first is a per-browser fact, not something worth a DB column or a
+// per-user setting to manage.
+const COPILOT_TRACE_ONBOARDED_KEY = "cortex-copilot-trace-onboarded";
+
+function hasSeenReasoningTraceOnboarding(): boolean {
+  if (typeof window === "undefined") return true; // SSR: never the client that shows it
+  try {
+    return window.localStorage.getItem(COPILOT_TRACE_ONBOARDED_KEY) === "1";
+  } catch {
+    return true; // storage unavailable (private mode, etc.) -- default to "already seen" rather than risk erroring on every render
+  }
+}
+
+function markReasoningTraceOnboarded() {
+  try {
+    window.localStorage.setItem(COPILOT_TRACE_ONBOARDED_KEY, "1");
+  } catch {
+    // best-effort; worst case the callout shows again next session
+  }
 }
 
 // One example per specialist agent (see services/api/app/agents/) so first-
@@ -168,6 +193,10 @@ export default function CopilotChat() {
   const [input, setInput] = useState("");
   const [category, setCategory] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // task 3.7: starts optimistic (true = "already onboarded") during SSR/
+  // first paint so nothing flashes expanded then collapses; the real
+  // localStorage read happens client-side in the effect below.
+  const [traceOnboarded, setTraceOnboarded] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const launchedInvestigation = useRef(false);
@@ -198,6 +227,27 @@ export default function CopilotChat() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
+
+  // task 3.7: read the real flag once we're on the client.
+  useEffect(() => {
+    setTraceOnboarded(hasSeenReasoningTraceOnboarding());
+  }, []);
+
+  // Which message (if any) gets the onboarding treatment this render: the
+  // first steps-backed assistant answer in the currently-open conversation,
+  // and only while this browser hasn't been onboarded yet. Recomputed from
+  // `messages` rather than tracked as its own piece of state, so switching
+  // conversations or loading history never leaves a stale index pointing at
+  // the wrong turn.
+  const onboardingMessageIndex = useMemo(() => {
+    if (traceOnboarded) return -1;
+    return messages.findIndex((m) => m.role === "assistant" && !m.pending && !!m.steps && m.steps.length > 0);
+  }, [messages, traceOnboarded]);
+
+  const markOnboardingShown = useCallback(() => {
+    markReasoningTraceOnboarded();
+    setTraceOnboarded(true);
+  }, []);
 
   function upsertSummary(next: ConversationSummary) {
     setConversations((prev) => {
@@ -496,7 +546,14 @@ export default function CopilotChat() {
                         )}
                       </div>
                       <div className="min-w-0 flex-1">
-                        <ReasoningTrace active={!!m.pending} agentUsed={m.agent_used} elapsedMs={m.elapsedMs} steps={m.steps} />
+                        <ReasoningTrace
+                          active={!!m.pending}
+                          agentUsed={m.agent_used}
+                          elapsedMs={m.elapsedMs}
+                          steps={m.steps}
+                          onboarding={i === onboardingMessageIndex}
+                          onOnboardingShown={i === onboardingMessageIndex ? markOnboardingShown : undefined}
+                        />
                         {m.content ? (
                           m.errored ? (
                             <div className="text-[13.5px] leading-relaxed" style={{ color: "var(--crit)" }}>
