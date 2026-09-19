@@ -88,6 +88,7 @@ as explicit follow-ups (adr-0008 §OS.4-OS.6):
   as-is here, not widened, since a good specific diagnosis still beats a
   generic-but-sourced layer stacked on top of it.
 """
+import copy
 import logging
 import re
 
@@ -375,16 +376,30 @@ def _evidence_from_network(raw_data: dict) -> dict:
 
 
 def should_trigger_after_anomaly(state: CortexState) -> bool:
-    """Whether anomaly_agent's result has anything for this agent to
-    explain -- called from graph.py's conditional edge, and mirrors what
-    this module's own chained path checks internally (see
-    _evidence_from_anomaly / the "no positive match" fallback in
-    _run_chained) so a "yes, chain" decision here is never followed by
-    "actually, nothing to say" once inside the node.
+    """Whether the incident investigation's *winning theory* has anything for
+    this agent to explain -- called from graph.py's conditional edge, and
+    mirrors what this module's own chained path checks internally (see
+    _evidence_for_winner / the "no positive match" fallback in _run_chained)
+    so a "yes, chain" decision here is never followed by "actually, nothing
+    to say" once inside the node.
+
+    v1.2: the anomaly join node (anomaly_arbitrate) now hands over whichever
+    agent's theory won (`raw_data["investigating_agent"]`), and the check
+    follows the winner's own evidence shape -- before, it only ever read the
+    anomaly agent's metric/log signals, so a network-won incident chained on
+    the wrong fields (or not at all) and a security-won one was silently
+    read as if it were an anomaly finding. A security winner still doesn't
+    chain: there are no security runbook entries to walk through yet (the
+    same deliberate deferral graph.py's v0.9 note describes).
     """
     if state.get("error") or not state.get("agent_result"):
         return False
     raw_data = state["agent_result"]["raw_data"]
+    winner = raw_data.get("investigating_agent") or "anomaly"
+    if winner == "security":
+        return False
+    if winner == "network":
+        return _network_raw_has_signal(raw_data)
     metric_signal = raw_data.get("metric_signal") or {}
     log_signal = raw_data.get("log_signal") or {}
     return bool(metric_signal.get("has_signal") or log_signal.get("has_signal") or log_signal.get("degraded"))
@@ -408,6 +423,22 @@ def should_trigger_after_monitoring(state: CortexState) -> bool:
     return metrics.get("status") != "up" or metrics.get("health") != "healthy"
 
 
+def _network_raw_has_signal(raw_data: dict) -> bool:
+    scope = raw_data.get("scope", "node")
+
+    if scope != "node":
+        entity_signal = raw_data.get("entity_signal") or {}
+        return bool(entity_signal.get("has_signal") or entity_signal.get("degraded"))
+
+    metric_signal = raw_data.get("metric_signal") or {}
+    neutron_signal = raw_data.get("neutron_signal") or {}
+    return bool(
+        metric_signal.get("has_signal")
+        or neutron_signal.get("has_signal")
+        or neutron_signal.get("degraded")
+    )
+
+
 def should_trigger_after_network(state: CortexState) -> bool:
     """Whether network_agent's finding has anything for this agent to
     explain -- same shape as should_trigger_after_anomaly: fires whenever
@@ -424,20 +455,7 @@ def should_trigger_after_network(state: CortexState) -> bool:
     """
     if state.get("error") or not state.get("agent_result"):
         return False
-    raw_data = state["agent_result"]["raw_data"]
-    scope = raw_data.get("scope", "node")
-
-    if scope != "node":
-        entity_signal = raw_data.get("entity_signal") or {}
-        return bool(entity_signal.get("has_signal") or entity_signal.get("degraded"))
-
-    metric_signal = raw_data.get("metric_signal") or {}
-    neutron_signal = raw_data.get("neutron_signal") or {}
-    return bool(
-        metric_signal.get("has_signal")
-        or neutron_signal.get("has_signal")
-        or neutron_signal.get("degraded")
-    )
+    return _network_raw_has_signal(state["agent_result"]["raw_data"])
 
 
 # --------------------------------------------------------------------
@@ -686,24 +704,146 @@ def _standalone_fallback(query: str) -> dict:
 # The two entry paths
 # --------------------------------------------------------------------
 
+def _merge_corroboration(evidence: dict, raw_data: dict) -> list[dict]:
+    """Folds the *other* operational agents' evidence (anomaly / network) that
+    also flagged the winning host into `evidence` (mutated in place): a metric
+    name the winner lacked, extra service binaries, extra log lines, and a
+    "corroborated by" sentence for the answer. Returns the agents that
+    contributed (`{"agent", "evidence_line"}` each -- kept on the answer's raw_data so the critic can ground the
+    "corroborated by" sentence). The caller decides how much weight that merged view gets --
+    see _run_chained: the winner's own evidence is matched first, so a
+    corroborating signal can fill a gap but never overrule the winner."""
+    contributed: list[dict] = []
+    for support in raw_data.get("supporting_evidence") or []:
+        agent = support.get("agent")
+        support_raw = support.get("raw_data") or {}
+        if agent == "anomaly":
+            extra = _evidence_from_anomaly(support_raw)
+        elif agent == "network":
+            extra = _evidence_from_network(support_raw)
+        else:
+            continue
+        contributed.append({"agent": agent, "evidence_line": extra["evidence_line"]})
+        evidence["metric_name"] = evidence["metric_name"] or extra["metric_name"]
+        for binary in extra["service_binaries"]:
+            if binary not in evidence["service_binaries"]:
+                evidence["service_binaries"].append(binary)
+        evidence["log_lines"] = list(evidence["log_lines"]) + list(extra["log_lines"])
+        if extra["evidence_line"]:
+            evidence["evidence_line"] = (
+                f"{_as_sentence(evidence['evidence_line'])} "
+                f"Corroborated by the {agent} agent: {_as_sentence(extra['evidence_line'])}"
+            ).strip()
+    return contributed
+
+
+def _as_sentence(text: str) -> str:
+    text = (text or "").strip()
+    return text if not text or text[-1] in ".!?" else f"{text}."
+
+
+_DECISION_LABEL = {
+    "winner": "Best-supported theory",
+    "also_flagged": "Also flagged",
+    "no_signal": "No signal",
+    "failed": "Did not complete",
+}
+
+
+def _public_arbitration(arbitration: dict) -> dict:
+    """The arbitration block minus the security agent's numbers -- this copy
+    rides on an answer a non-admin may see (the chained expert answer is not
+    replaced by the RBAC notice), so it keeps only what security_rbac.py says
+    survives redaction for that agent: that it ran and whether it flagged."""
+    public = dict(arbitration)
+    public["theories"] = [
+        {"agent": t["agent"], "has_signal": t["has_signal"], "verdict": t["verdict"], "restricted": True}
+        if t["agent"] == "security" else t
+        for t in arbitration.get("theories") or []
+    ]
+    return public
+
+
+def _render_incident_analysis(arbitration: dict) -> str:
+    """The "what did the agents find and why this theory" section shown
+    ahead of the runbook when the expert was reached through the parallel
+    incident investigation. Deterministic on purpose (no LLM): agent names,
+    booleans and numbers from the arbitration block only."""
+    host = arbitration["host"]
+    theories = arbitration.get("theories") or []
+    parallelism = arbitration.get("parallelism")
+
+    lead = f"{len(theories)} agents investigated **{host}** in parallel."
+    if parallelism and parallelism.get("concurrent"):
+        lead = (
+            f"{len(theories)} agents investigated **{host}** in parallel — peak concurrency "
+            f"{parallelism['peak_concurrency']}, {parallelism['wall_s']} s wall-clock versus "
+            f"{parallelism['sequential_s']} s had they run one after another."
+        )
+
+    rows = ["| Agent | Signal | Confidence | Decision |", "| --- | --- | --- | --- |"]
+    for t in theories:
+        secured = t["agent"] == "security"
+        confidence = "—" if secured else f"{t['confidence_pct']}%"
+        decision = _DECISION_LABEL.get(t["verdict"], t["verdict"])
+        if t["verdict"] == "also_flagged" and not secured and t.get("corroboration_bonus"):
+            decision += f" (+{t['corroboration_bonus']} corroboration)"
+        rows.append(f"| {t['agent']} | {'yes' if t['has_signal'] else 'no'} | {confidence} | {decision} |")
+
+    parts = [f"### Incident analysis — {host}", lead, "\n".join(rows)]
+    winner_summary = arbitration.get("winner_summary")
+    if winner_summary:
+        parts.append(f"**Leading theory ({arbitration['winner']} agent):** {winner_summary}")
+    if arbitration.get("hosts") and len(arbitration["hosts"]) > 1:
+        others = ", ".join(
+            f"{h['hostname']} ({h['agent']}, score {h['score']})"
+            for h in arbitration["hosts"] if h["hostname"] != host
+        )
+        parts.append(f"Also investigated: {others}.")
+    return "\n\n".join(parts)
+
+
 def _run_chained(state: CortexState, upstream: str, catalog: list[SymptomEntry]) -> CortexState:
     upstream_result = state["agent_result"]
     raw_data = upstream_result["raw_data"]
 
-    if upstream == "anomaly":
+    # v1.2: after the parallel incident investigation, `upstream` is still
+    # "anomaly" (that's the router's target and the arbitrate node's trace
+    # name), but the evidence has the shape of whichever agent's theory won
+    # -- read it accordingly, then fold in what the other operational agents
+    # that also flagged this host found.
+    arbitration = raw_data.get("arbitration")
+    winner = (raw_data.get("investigating_agent") or upstream) if upstream == "anomaly" else upstream
+
+    if winner == "anomaly":
         evidence = _evidence_from_anomaly(raw_data)
-    elif upstream == "network":
+    elif winner == "network":
         evidence = _evidence_from_network(raw_data)
     else:
         evidence = _evidence_from_monitoring(raw_data)
 
-    matches = _match_symptoms(
-        metric_name=evidence["metric_name"],
-        service_binaries=evidence["service_binaries"],
-        query=state["user_query"],
-        log_lines=evidence["log_lines"],
-        catalog=catalog,
-    )
+    # The winner's own evidence decides which runbook is walked through. The
+    # other agents that also flagged the host only (a) fill a gap when the
+    # winner's evidence matches nothing and (b) add a "corroborated by" line to
+    # the answer -- a corroborating CPU anomaly must not talk the expert out of
+    # the down-Neutron-agent runbook that the winning theory is actually about.
+    def _match(ev: dict):
+        return _match_symptoms(
+            metric_name=ev["metric_name"],
+            service_binaries=ev["service_binaries"],
+            query=state["user_query"],
+            log_lines=ev["log_lines"],
+            catalog=catalog,
+        )
+
+    corroboration: list[dict] = []
+    matches = _match(evidence)
+    if arbitration:
+        merged = copy.deepcopy(evidence)
+        corroboration = _merge_corroboration(merged, raw_data)
+        if not matches and corroboration:
+            matches = _match(merged)
+        evidence = {**evidence, "evidence_line": merged["evidence_line"]}
 
     if not matches:
         # should_trigger_after_* already confirmed there's *something*
@@ -712,17 +852,26 @@ def _run_chained(state: CortexState, upstream: str, catalog: list[SymptomEntry])
         # than forcing a generic, unhelpful "teaching" layer on top of it.
         logger.info(
             "openstack_expert: chained from %s but no catalog entry matched, "
-            "leaving upstream diagnosis as the final answer", upstream,
+            "leaving upstream diagnosis as the final answer", winner,
         )
         return state
 
     entry, _score = matches[0]
-    result = _build_result(
-        entry,
-        evidence["evidence_line"],
-        evidence["hostname"],
-        extra_raw={"diagnosed_by": upstream, "upstream_summary": upstream_result["summary"]},
-    )
+    extra_raw = {"diagnosed_by": winner, "upstream_summary": upstream_result["summary"]}
+    if arbitration:
+        extra_raw.update(
+            arbitrated=True,
+            investigating_agent=winner,
+            corroborated_by=[c["agent"] for c in corroboration],
+            corroboration=corroboration,
+            arbitration=_public_arbitration(arbitration),
+            # The winner's own summary, not the cross-agent narrative -- that
+            # one may quote a Security finding (see _public_arbitration).
+            upstream_summary=arbitration.get("winner_summary") or upstream_result["summary"],
+        )
+    result = _build_result(entry, evidence["evidence_line"], evidence["hostname"], extra_raw=extra_raw)
+    if arbitration:
+        result["summary"] = f"{_render_incident_analysis(arbitration)}\n\n---\n\n{result['summary']}"
     state["agent_result"] = result
     state["target_agent"] = "openstack_expert"
     return state

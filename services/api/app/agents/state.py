@@ -60,7 +60,7 @@ choice, not something that flows through the graph. The other two do:
   current `known_nodes` plus whichever of them currently have an open
   AnomalyFlag) rather than any fixed/hardcoded list.
 """
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, NotRequired, Optional, TypedDict
 
 from .resilience import FailureRecord
 from .trace import TraceEvent
@@ -159,6 +159,11 @@ class IncidentFinding(TypedDict):
     # copies these into state["failures"] for compose.py to read, same as
     # every other agent already does.
     failures: list[FailureRecord]
+    # v1.2: when/where this branch ran (incident_fanout.timed_branch) --
+    # monotonic start/end plus the worker thread name, so the join node can
+    # measure how much the parallel branches actually overlapped. Absent on a
+    # hand-built finding (a unit-test fixture).
+    timing: NotRequired[dict]
 
 
 class CortexState(TypedDict):

@@ -98,6 +98,20 @@ def _safe_detail(state: dict, node: str) -> dict:
             findings = state.get("agent_results") or []
             if findings:
                 detail["contributing_agents"] = sorted({f.get("agent", "anomaly") for f in findings})
+            # v1.2: the parallel-investigation evidence, numbers and agent
+            # names only (see incident_fanout.py) -- safe for every role.
+            arbitration = ((result or {}).get("raw_data") or {}).get("arbitration")
+            if arbitration:
+                detail["winner"] = arbitration.get("winner")
+                detail["parallelism"] = arbitration.get("parallelism")
+                # Every agent that investigated, best-supported first, with
+                # its verdict -- no confidence/score (a Security number must
+                # not ride on a step a non-admin can read; see
+                # services/security_rbac.py).
+                detail["investigated"] = [
+                    {"agent": t.get("agent"), "verdict": t.get("verdict"), "has_signal": t.get("has_signal")}
+                    for t in arbitration.get("theories") or []
+                ]
     if state.get("error"):
         detail["error"] = state["error"]
     return detail

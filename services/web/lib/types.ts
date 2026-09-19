@@ -613,7 +613,58 @@ export interface CrossAgentFinding {
   restricted?: boolean;
 }
 
+// v1.2 -- parallel incident investigation (services/api/app/agents/
+// incident_fanout.py). `arbitration` explains one host's decision; `parallelism`
+// is the measured overlap of the concurrent agent branches. Agent names,
+// booleans and numbers only -- no finding text.
+export type ArbitrationVerdict = "winner" | "also_flagged" | "no_signal" | "failed";
+
+export interface ArbitrationTheory {
+  agent: AgentName | string;
+  has_signal: boolean;
+  verdict: ArbitrationVerdict;
+  // Absent for the security agent on a non-admin's answer (`restricted`).
+  confidence?: number;
+  confidence_pct?: number;
+  corroboration_bonus?: number;
+  score?: number;
+  restricted?: boolean;
+}
+
+export interface ParallelBranch {
+  agent: AgentName | string;
+  hostname: string;
+  offset_ms: number;
+  duration_ms: number;
+  thread: string;
+}
+
+export interface ParallelismSummary {
+  branch_count: number;
+  peak_concurrency: number;
+  concurrent: boolean;
+  threads: number;
+  wall_ms: number;
+  sequential_ms: number;
+  wall_s: number;
+  sequential_s: number;
+  speedup: number | null;
+  branches: ParallelBranch[];
+}
+
+export interface IncidentArbitration {
+  host: string;
+  winner: AgentName | string;
+  method: string;
+  why: string;
+  theories: ArbitrationTheory[];
+  winner_summary?: string | null;
+  parallelism?: ParallelismSummary;
+  hosts?: { hostname: string; agent: string; score: number }[];
+}
+
 export interface CrossAgentArbitrationFields {
+  arbitration?: IncidentArbitration;
   // Which agent's finding this raw_data shape actually belongs to --
   // present whenever this turn went through arbitration at all (i.e. a
   // broad incident question, not a single agent answering directly).
@@ -662,6 +713,13 @@ export type AgentExpertCategory =
   | "host";
 
 export interface AgentExpertData {
+  // v1.2: set when the expert was reached through the parallel incident
+  // investigation -- the winning theory it walks through, and who else
+  // flagged the same host.
+  arbitrated?: boolean;
+  investigating_agent?: AgentName | string;
+  corroborated_by?: string[];
+  arbitration?: IncidentArbitration;
   matched_symptom_id: string | null;
   matched_symptom_title?: string;
   category?: AgentExpertCategory;

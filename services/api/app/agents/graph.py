@@ -101,6 +101,21 @@ are runbook-catalog entries worth walking through for a security symptom,
 deliberately left out here rather than bolted on against catalog entries
 that don't exist yet.
 
+v1.2 (parallel incident investigation) changes no edges -- the fan-out
+above already runs Anomaly, Network and Security concurrently per node and
+joins them in anomaly_arbitrate. What v1.2 adds is proof and explanation:
+each Send target is wrapped in incident_fanout.timed_branch (START/DONE log
+lines with the worker thread, plus a timing stamp), and the join records
+`raw_data["arbitration"]` -- the measured parallelism (peak concurrency,
+wall-clock vs sequential) and a per-agent ledger of why the winning theory
+won. The expert chain that follows the join now reads the *winner's* evidence
+(should_trigger_after_anomaly / _run_chained dispatch on
+raw_data["investigating_agent"]), lets the other operational agents that also
+flagged the host corroborate it, and puts an "Incident analysis" section ahead
+of the runbook. Flow for "what is wrong with X": router -> anomaly_dispatch ->
+{anomaly, network, security}_investigate in parallel -> anomaly_arbitrate
+(best-supported theory) -> openstack_expert -> critic -> compose.
+
 v0.8 (efficiency & scale prep) replaces the single "anomaly" node with
 three: "anomaly_dispatch" (resolves which node(s) this turn investigates,
 scoped by the Living Model rather than any fixed list -- see nodes/

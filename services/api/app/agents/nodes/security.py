@@ -104,6 +104,7 @@ from ...db import SessionLocal
 from ...services import cve_feed, ebpf_signal, exposed_ports, loki_client, security_audit
 from ...services.llm_client import LLMConfigError, get_chat_model
 from ..node_resolver import resolve_node
+from ..incident_fanout import timed_branch
 from ..resilience import get_breaker, guarded_send
 from ..state import AgentResult, CortexState, IncidentFinding, KnownNode
 
@@ -635,4 +636,6 @@ def _security_investigate_one_impl(payload: dict) -> dict:
     return {"agent_results": [finding]}
 
 
-security_investigate_one = guarded_send("security.investigate", timeout_seconds=60.0)(_security_investigate_one_impl)
+security_investigate_one = timed_branch("security")(
+    guarded_send("security.investigate", timeout_seconds=60.0)(_security_investigate_one_impl)
+)
