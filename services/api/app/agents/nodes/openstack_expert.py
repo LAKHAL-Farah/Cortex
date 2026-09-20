@@ -415,10 +415,18 @@ def should_trigger_after_monitoring(state: CortexState) -> bool:
     if state.get("error") or not state.get("agent_result"):
         return False
     metrics = state["agent_result"]["raw_data"]
-    if metrics.get("scope") == "multi":
-        # A fleet answer has no single host's status/health to walk through
-        # (and _evidence_from_monitoring expects exactly that shape) -- the
-        # per-node table already says which nodes need attention.
+    if metrics.get("scope") in ("multi", "services"):
+        # Neither a fleet answer nor a services answer has the single
+        # "status"/"health" pair this check is built around (and
+        # _evidence_from_monitoring expects exactly that node-scoped
+        # shape) -- both already say which node/service needs attention
+        # right there in their own table, so there's nothing for this
+        # agent to add. Services in particular already reports a running
+        # count of what's down/unreachable itself (see monitoring.py's
+        # _run_services) -- chaining into a symptom-catalog walkthrough on
+        # top of that would just repeat "nova-compute is down" in a
+        # different format, or worse, fire on a clean answer entirely
+        # (`status`/`health` being absent reads as "!= 'up'").
         return False
     return metrics.get("status") != "up" or metrics.get("health") != "healthy"
 

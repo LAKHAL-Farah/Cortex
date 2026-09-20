@@ -511,6 +511,32 @@ export interface AgentMonitoringFleetData {
   insights: string[];
 }
 
+// v1.4 -- "which OpenStack services are up/down" answers
+// (services/api/app/agents/nodes/monitoring.py's _run_services), fleet-wide,
+// scoped to one node, or scoped to one named binary. Discriminated from the
+// live-metrics shapes above by `scope: "services"` -- this has no
+// cpu_percent/memory_percent/etc. at all, a different question shape
+// (service catalog up/down, not resource usage), so it gets its own panel
+// (MonitoringServicesPanel) rather than being squeezed into MonitoringPanel/
+// MonitoringFleetPanel's stat-tile layout.
+export interface AgentServiceRow {
+  binary: string | null;
+  host: string | null;
+  node: string | null;
+  zone: string | null;
+  backend: string | null;
+  source: string | null;
+  status: string | null;
+  state: "up" | "down" | "unreachable" | string | null;
+}
+
+export interface AgentMonitoringServicesData {
+  scope: "services";
+  services: AgentServiceRow[];
+  counts: { total: number; up: number; down: number; unreachable: number; unknown: number };
+  insights: string[];
+}
+
 export interface AgentPredictionFleetData {
   scope: "multi";
   metric: string;
@@ -1095,6 +1121,7 @@ export type AgentRawData =
   | AgentMonitoringData
   | AgentPredictionData
   | AgentMonitoringFleetData
+  | AgentMonitoringServicesData
   | AgentPredictionFleetData
   | AgentRagData
   | AgentAnomalyData
