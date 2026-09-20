@@ -62,6 +62,7 @@ import type {
   ParallelismSummary,
   AgentMonitoringData,
   AgentMonitoringFleetData,
+  AgentMonitoringServicesData,
   AgentPredictionFleetData,
   AgentName,
   AgentNetworkData,
@@ -779,6 +780,15 @@ function isFleet(data: unknown): boolean {
   return !!data && typeof data === "object" && (data as { scope?: string }).scope === "multi";
 }
 
+// v1.4 -- a services answer (monitoring.py's _run_services) has no
+// cpu/mem/disk numbers to plot at all, so it's discriminated the same way
+// isFleet() is (a scope tag), not folded into isFleet's own check --
+// "multi" and "services" are two different answer shapes that both happen
+// to come from the monitoring agent, not two variants of the same one.
+function isServices(data: unknown): boolean {
+  return !!data && typeof data === "object" && (data as { scope?: string }).scope === "services";
+}
+
 function MiniBar({ label, value }: { label: string; value: number }) {
   const tone = pctTone(value);
   return (
@@ -987,6 +997,73 @@ function MonitoringPanel({ data }: { data: AgentMonitoringData }) {
         <MiniStat label="Network" value={`↓ ${data.network_rx} · ↑ ${data.network_tx}`} />
         <MiniStat label="Role" value={data.role} />
       </div>
+    </div>
+  );
+}
+
+// v1.4 -- services answers (monitoring.py's _run_services): one row per
+// OpenStack service instance (binary + node), grouped by state rather than
+// plotted as a percentage -- there's no single number to bar-chart here,
+// just up/down/unreachable/unknown, so this is a status list, not a
+// StatBar grid like MonitoringPanel/MonitoringFleetPanel above.
+const _SERVICE_STATE_TONE: Record<string, string> = {
+  down: "var(--crit)",
+  unreachable: "var(--warn)",
+  up: "var(--ok)",
+};
+
+function MonitoringServicesPanel({ data }: { data: AgentMonitoringServicesData }) {
+  const { counts } = data;
+  const attention = counts.down + counts.unreachable;
+  return (
+    <div className="agent-panel" style={{ borderColor: "color-mix(in srgb, var(--ok) 22%, var(--border))" }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <Layers className="h-3.5 w-3.5" style={{ color: "var(--ok)" }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">
+            Services · {counts.total} known
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <FleetSummaryPill color="var(--ok)" soft="var(--ok-soft)">
+            <CheckCircle2 className="h-3 w-3" strokeWidth={2} />
+            {counts.up} up
+          </FleetSummaryPill>
+          {attention > 0 && (
+            <FleetSummaryPill color="var(--crit)" soft="var(--crit-soft)">
+              <XCircle className="h-3 w-3" strokeWidth={2} />
+              {attention} need attention
+            </FleetSummaryPill>
+          )}
+        </div>
+      </div>
+
+      <ul className="flex flex-col gap-1.5">
+        {data.services.map((s, i) => {
+          const state = s.state ?? "unknown";
+          const tone = _SERVICE_STATE_TONE[state] ?? "var(--text-muted)";
+          return (
+            <li
+              // binary+node is unique per row on the backend, but neither is
+              // guaranteed non-null in the type -- fall back to the index so
+              // a genuinely malformed row still gets a stable key.
+              key={s.binary && s.node ? `${s.binary}@${s.node}` : i}
+              className="grid grid-cols-1 items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-2 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_auto]"
+              style={{ background: "var(--canvas)", borderLeft: `3px solid ${tone}` }}
+            >
+              <div className="min-w-0">
+                <div className="truncate text-[12.5px] font-semibold text-color-text">{s.binary ?? "unknown service"}</div>
+                <div className="truncate text-[11px] text-text-muted">{s.node ?? s.host ?? "unknown host"}</div>
+              </div>
+              <div className="text-[11px] text-text-muted">{s.zone ?? "—"}</div>
+              <span className="agent-pill shrink-0" style={{ color: tone, background: "var(--canvas)", border: `1px solid ${tone}` }}>
+                {state === "up" ? <CheckCircle2 className="h-3 w-3" strokeWidth={2} /> : <XCircle className="h-3 w-3" strokeWidth={2} />}
+                {state}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
@@ -2295,6 +2372,7 @@ function AgentPanelSkeleton({ agentUsed }: { agentUsed?: string }) {
 // ---------------------------------------------------------------------------
 
 function MonitoringSwitch({ data }: { data: AgentRawData }) {
+  if (isServices(data)) return <MonitoringServicesPanel data={data as AgentMonitoringServicesData} />;
   return isFleet(data) ? (
     <MonitoringFleetPanel data={data as AgentMonitoringFleetData} />
   ) : (

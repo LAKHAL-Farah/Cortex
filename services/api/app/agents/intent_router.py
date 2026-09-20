@@ -73,6 +73,18 @@ v0.8 adds two things:
   route to `last_agent` instead. Genuinely low confidence on the *first*
   turn of a conversation (no session memory yet) still clarifies exactly
   as before.
+
+v1.4 widens monitoring's own territory (not the enum -- still one
+"monitoring" agent) to cover "which OpenStack services are up/down"
+questions, the same "leaf, straightforward widening" shape v0.10's
+network-entity widening was -- see nodes/monitoring.py's own v1.4 note
+for what changed inside that agent. This prompt only needs monitoring's
+bullet below to say so explicitly, so the classifier doesn't send a
+"which services are down" question to openstack_expert on the mistaken
+assumption that any service-binary mention belongs there -- the split
+that already existed (a live status read vs. a "how do I check/confirm/
+fix" command-level answer) still decides it, this just states it instead
+of leaving it implicit.
 """
 import logging
 import os
@@ -112,7 +124,11 @@ _SYSTEM_PROMPT = """You route a user's infrastructure question to exactly one sp
 
 - monitoring: current/live status right now -- CPU, RAM, disk, uptime, up/down, health -- for one \
 node OR several ("compare compute-01 and compute-02", "how are all my compute nodes", "status of the \
-whole cluster").
+whole cluster"). Also covers whether specific OpenStack services (nova-compute, nova-scheduler, \
+cinder-volume, neutron-l3-agent, ...) are currently up/down right now, fleet-wide, on one node, or for \
+one named service -- e.g. "which services are down", "is nova-compute running on compute-02", "are all \
+my Neutron agents healthy". Different from openstack_expert: this is a live status read, not \
+"how do I check/confirm/fix" (that's openstack_expert, see its own bullet below).
 - network: network/connectivity health -- for a physical node: router or floating-IP status, \
 whether a Neutron agent (neutron-l3-agent/neutron-dhcp-agent/neutron-openvswitch-agent) is up, or \
 node-level network interface errors/drops/throughput. E.g. "is the network okay on compute-02", \
