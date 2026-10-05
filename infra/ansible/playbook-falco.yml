@@ -1,0 +1,9 @@
+---
+# Kernel-level sensor on every node. Run:
+#   ansible-playbook playbook-falco.yml --limit compute1 -e falco_collector_token=<token>   # one node first
+#   ansible-playbook playbook-falco.yml -e falco_collector_token=<token>                    # then all
+- name: Deploy Falco
+  hosts: all
+  become: true
+  roles:
+    - falco

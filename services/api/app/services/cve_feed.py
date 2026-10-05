@@ -52,6 +52,9 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     version-comparison algorithm (python-apt's own, for a real dpkg
     inventory, would be the correct tool for that edge case)."""
     parts: list[int] = []
+    if ":" in version.split("-", 1)[0]:
+        # dpkg epoch ("1:8.9p1-3ubuntu0.10") -- drop it, it is not part of the upstream number.
+        version = version.split(":", 1)[1]
     for chunk in version.replace("-", ".").replace("~", ".").replace("+", ".").split("."):
         digits = "".join(c for c in chunk if c.isdigit())
         if not digits:
@@ -123,17 +126,53 @@ def get_package_inventory(hostname: str) -> list[dict]:
     return response.json()
 
 
+def _is_distro_patched(version: str) -> bool:
+    """Ubuntu/Debian back-port security fixes without changing the upstream number
+    (sudo 1.9.9-1ubuntu2.4 already carries fixes "fixed upstream in 1.9.12"), so comparing a
+    distro build against an upstream fixed_version produces false positives. Those packages
+    are judged by the distribution's own pending security updates instead (see below)."""
+    return "ubuntu" in version or "deb" in version
+
+
 def match_cves(packages: list[dict]) -> list[dict]:
     """Pure -- no network calls. Returns one entry per (installed package,
-    known CVE) pair where the installed version is older than the CVE's
-    fixed_version, each carrying both the CVE's own fields and the
+    known CVE) pair, each carrying both the CVE's own fields and the
     installed version that's vulnerable, so the caller doesn't have to zip
-    the two lists back together to narrate a finding."""
+    the two lists back together to narrate a finding.
+
+    Two sources:
+    1. `_CVE_DATABASE` -- installed version older than the CVE's upstream
+       fixed_version. Skipped for distro-patched builds (see `_is_distro_patched`).
+    2. `security_update` on a package entry -- the host's own package manager says a
+       *-security update is pending for it (the real collector, infra/collector, sets
+       this from `apt list --upgradable` and adds the CVE ids from the changelog).
+       This is authoritative for Ubuntu/Debian hosts."""
     matches: list[dict] = []
     for pkg in packages:
         name = pkg.get("name")
         version = pkg.get("version")
-        if not name or not version or name not in _CVE_DATABASE:
+        if not name or not version:
+            continue
+
+        update = pkg.get("security_update")
+        if update:
+            known = {e["cve_id"]: e for entries in _CVE_DATABASE.values() for e in entries}
+            cves = update.get("cves") or []
+            fixed = update.get("version") or "a newer version"
+            for cve_id in cves or ["PENDING-SECURITY-UPDATE"]:
+                ref = known.get(cve_id, {})
+                matches.append({
+                    "cve_id": cve_id,
+                    "severity": ref.get("severity", "high"),
+                    "fixed_version": fixed,
+                    "description": ref.get("description")
+                    or f"A security update for {name} is available from the distribution's security pocket.",
+                    "package": name,
+                    "installed_version": version,
+                })
+            continue  # the distribution's answer wins over the upstream table for this package
+
+        if name not in _CVE_DATABASE or _is_distro_patched(version):
             continue
         for entry in _CVE_DATABASE[name]:
             if _version_lt(version, entry["fixed_version"]):

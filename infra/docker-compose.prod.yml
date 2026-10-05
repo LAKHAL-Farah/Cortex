@@ -1,6 +1,10 @@
-
 networks:
   cortex-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.17.0.0/16
+
 
 services:
   postgres:
@@ -134,3 +138,6 @@ services:
 volumes:
   cortex_pgdata:
   cortex_neo4jdata:
+
+
+

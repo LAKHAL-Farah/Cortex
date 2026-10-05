@@ -1,0 +1,38 @@
+# Security collector for the real cloud. Use together with the prod file:
+#   docker compose -f docker-compose.prod.yml -f docker-compose.security.yml --env-file .env.prod up -d --build
+#
+# Replaces the sandbox-only package-inventory / tetragon-bridge / keystone-audit
+# services the Security page expects (see infra/collector/collector.py).
+services:
+  collector:
+    build:
+      context: ./collector
+      network: host
+    restart: unless-stopped
+    environment:
+      COLLECTOR_INVENTORY: /infra/ansible/inventory/hosts.ini
+      COLLECTOR_SSH_KEY_DIR: /root/.ssh
+      COLLECTOR_FALCO_TOKEN: ${COLLECTOR_FALCO_TOKEN:?set COLLECTOR_FALCO_TOKEN in .env.prod}
+      COLLECTOR_KEYSTONE_HOST: ${COLLECTOR_KEYSTONE_HOST:-controller}
+      COLLECTOR_KEYSTONE_LOG_PATH: ${COLLECTOR_KEYSTONE_LOG_PATH:-/var/log/kolla/keystone/keystone-apache-public-access.log}
+      COLLECTOR_KEYSTONE_IGNORE_SOURCE_IPS: ${COLLECTOR_KEYSTONE_IGNORE_SOURCE_IPS:-}
+      COLLECTOR_KEYSTONE_TOKEN_TTL_SECONDS: ${COLLECTOR_KEYSTONE_TOKEN_TTL_SECONDS:-3600}
+      COLLECTOR_ALERT_MIN_PRIORITY: ${COLLECTOR_ALERT_MIN_PRIORITY:-warning}
+    volumes:
+      - ${CORTEX_ANSIBLE_HOST_DIR:-./ansible}:/infra/ansible:ro
+      - ${CORTEX_SSH_KEY_HOST_DIR:-./.sandbox-ssh}:/root/.ssh:ro
+    ports:
+      # Falco on the nodes POSTs here, so it must be reachable on the controller's overlay IP.
+      # Set COLLECTOR_BIND_IP=10.0.1.4 in .env.prod; the default keeps it local-only.
+      - "${COLLECTOR_BIND_IP:-127.0.0.1}:9110:9110"
+    networks:
+      - cortex-net
+
+  api:
+    depends_on:
+      - collector
+    environment:
+      CORTEX_PACKAGE_INVENTORY_URL: http://collector:9110
+      CORTEX_EBPF_ALERTS_URL: http://collector:9110
+      CORTEX_KEYSTONE_TOKEN_LOG_URL: http://collector:9110
+      CORTEX_KEYSTONE_EXPECTED_CIDRS: ${CORTEX_KEYSTONE_EXPECTED_CIDRS:-10.0.1.0/24}

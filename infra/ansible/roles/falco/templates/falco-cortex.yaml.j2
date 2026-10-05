@@ -1,0 +1,8 @@
+# Managed by Ansible (roles/falco). Sends alerts to the Cortex collector.
+json_output: true
+json_include_output_property: true
+http_output:
+  enabled: true
+  url: "http://{{ falco_collector_host }}:{{ falco_collector_port }}/falco?token={{ falco_collector_token }}"
+  user_agent: "falcosecurity/falco"
+  insecure: false

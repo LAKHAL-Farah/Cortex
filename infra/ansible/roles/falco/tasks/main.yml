@@ -1,0 +1,65 @@
+---
+- name: Require the collector token
+  ansible.builtin.assert:
+    that: falco_collector_token | length > 0
+    fail_msg: "Pass -e falco_collector_token=<value of COLLECTOR_FALCO_TOKEN>"
+
+- name: Install prerequisites
+  ansible.builtin.apt:
+    name: [curl, gnupg, ca-certificates]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Add the Falco signing key
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -fsSL https://falco.org/repo/falcosecurity-packages.asc | gpg --dearmor -o /usr/share/keyrings/falco-archive-keyring.gpg
+  args:
+    executable: /bin/bash
+    creates: /usr/share/keyrings/falco-archive-keyring.gpg
+
+- name: Add the Falco apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main"
+    filename: falcosecurity
+    state: present
+
+- name: Install Falco (non-interactive, modern eBPF driver)
+  ansible.builtin.apt:
+    name: falco
+    state: present
+    update_cache: true
+  environment:
+    FALCO_FRONTEND: noninteractive
+    FALCO_DRIVER_CHOICE: modern_ebpf
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Configure JSON output to the Cortex collector (drop-in, main falco.yaml untouched)
+  ansible.builtin.template:
+    src: falco-cortex.yaml.j2
+    dest: /etc/falco/config.d/99-cortex.yaml
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Restart falco
+
+- name: Enable the modern-eBPF unit and disable the other driver units
+  ansible.builtin.systemd:
+    name: "{{ item.name }}"
+    enabled: "{{ item.enabled }}"
+    state: "{{ item.state }}"
+  loop:
+    - { name: falco-modern-bpf, enabled: true, state: started }
+    - { name: falco-kmod, enabled: false, state: stopped }
+    - { name: falco-bpf, enabled: false, state: stopped }
+  failed_when: false
+
+- name: Check the sensor is running
+  ansible.builtin.command: systemctl is-active falco-modern-bpf
+  register: falco_active
+  changed_when: false
+  failed_when: falco_active.stdout.strip() != 'active'
+  retries: 5
+  delay: 5
+  until: falco_active.stdout.strip() == 'active'

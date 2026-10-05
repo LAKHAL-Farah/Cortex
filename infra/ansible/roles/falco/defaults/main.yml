@@ -1,0 +1,7 @@
+---
+# Falco (modern eBPF driver) -> Cortex collector. Kernel-level signals for the Security page.
+falco_collector_host: "{{ hostvars[groups['controllers'][0]].ansible_host }}"
+falco_collector_port: 9110
+# Must equal COLLECTOR_FALCO_TOKEN in .env.prod. Pass it with -e, do not commit it.
+falco_collector_token: ""
+falco_min_priority: warning
