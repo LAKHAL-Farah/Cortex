@@ -288,3 +288,27 @@ def test_match_cves_only_flags_known_packages_below_fixed_version():
     assert matches[0]["package"] == "openssh-server"
     assert matches[0]["installed_version"] == "9.3p1"
     assert matches[0]["cve_id"] == "CVE-2024-6387"
+
+
+def test_version_lt_ignores_dpkg_epoch():
+    assert cve_feed._version_tuple("1:8.9p1-3ubuntu0.10")[:2] == (8, 91)
+    assert cve_feed._version_lt("1:8.9p1-3", "9.8p1") is True
+
+
+def test_match_cves_skips_upstream_table_for_distro_patched_builds():
+    # Ubuntu back-ports the sudoedit fix into 1.9.9-1ubuntu2.x; comparing to upstream 1.9.12p2 would be a false positive.
+    assert cve_feed.match_cves([{"name": "sudo", "version": "1.9.9-1ubuntu2.4"}]) == []
+
+
+def test_match_cves_uses_pending_security_updates():
+    packages = [
+        {"name": "sudo", "version": "1.9.9-1ubuntu2.4",
+         "security_update": {"version": "1.9.9-1ubuntu2.5", "cves": ["CVE-2025-1111", "CVE-2023-22809"]}},
+        {"name": "openssl", "version": "3.0.2-0ubuntu1.18", "security_update": {"version": "3.0.2-0ubuntu1.19", "cves": []}},
+        {"name": "curl", "version": "7.81.0-1ubuntu1.18"},
+    ]
+    matches = cve_feed.match_cves(packages)
+    assert {m["cve_id"] for m in matches} == {"CVE-2025-1111", "CVE-2023-22809", "PENDING-SECURITY-UPDATE"}
+    known = next(m for m in matches if m["cve_id"] == "CVE-2023-22809")
+    assert known["severity"] == "high" and known["fixed_version"] == "1.9.9-1ubuntu2.5"
+    assert all(m["package"] != "curl" for m in matches)

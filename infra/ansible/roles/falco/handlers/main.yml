@@ -1,0 +1,5 @@
+---
+- name: Restart falco
+  ansible.builtin.systemd:
+    name: falco-modern-bpf
+    state: restarted
