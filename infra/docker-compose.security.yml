@@ -18,9 +18,16 @@ services:
       COLLECTOR_KEYSTONE_IGNORE_SOURCE_IPS: ${COLLECTOR_KEYSTONE_IGNORE_SOURCE_IPS:-}
       COLLECTOR_KEYSTONE_TOKEN_TTL_SECONDS: ${COLLECTOR_KEYSTONE_TOKEN_TTL_SECONDS:-3600}
       COLLECTOR_ALERT_MIN_PRIORITY: ${COLLECTOR_ALERT_MIN_PRIORITY:-warning}
+      # Regex matched against "<rule> <output>"; matching alerts are dropped. Empty = keep everything.
+      COLLECTOR_ALERT_IGNORE_REGEX: ${COLLECTOR_ALERT_IGNORE_REGEX:-}
+      COLLECTOR_ALERT_TTL_SECONDS: ${COLLECTOR_ALERT_TTL_SECONDS:-86400}
+      # Every host is re-read in the background this often; API requests never wait for SSH.
+      COLLECTOR_REFRESH_SECONDS: ${COLLECTOR_REFRESH_SECONDS:-900}
+      COLLECTOR_DATA_DIR: /data
     volumes:
       - ${CORTEX_ANSIBLE_HOST_DIR:-./ansible}:/infra/ansible:ro
       - ${CORTEX_SSH_KEY_HOST_DIR:-./.sandbox-ssh}:/root/.ssh:ro
+      - collector-data:/data      # keeps Falco alerts across rebuilds
     ports:
       # Falco on the nodes POSTs here, so it must be reachable on the controller's overlay IP.
       # Set COLLECTOR_BIND_IP=10.0.1.4 in .env.prod; the default keeps it local-only.
@@ -31,8 +38,18 @@ services:
   api:
     depends_on:
       - collector
+    # Docker on this host (Kolla-managed) hands containers a 1024 open-files limit; the API's
+    # background loops exhausted it ("Too many open files").
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment:
+      CORTEX_EBPF_MAX_ALERTS: ${CORTEX_EBPF_MAX_ALERTS:-50}
       CORTEX_PACKAGE_INVENTORY_URL: http://collector:9110
       CORTEX_EBPF_ALERTS_URL: http://collector:9110
       CORTEX_KEYSTONE_TOKEN_LOG_URL: http://collector:9110
       CORTEX_KEYSTONE_EXPECTED_CIDRS: ${CORTEX_KEYSTONE_EXPECTED_CIDRS:-10.0.1.0/24}
+
+volumes:
+  collector-data:

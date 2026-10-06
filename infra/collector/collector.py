@@ -17,14 +17,16 @@ Node data is read over SSH (same key and inventory the Ansible runner uses).
 A source that cannot be read answers 503, which the API turns into a degraded
 sub-check ("unknown") rather than a false "all clear".
 """
+import contextlib
 import hmac
-import io
+import json
 import logging
 import os
 import re
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -38,9 +40,15 @@ INVENTORY_PATH = os.environ.get("COLLECTOR_INVENTORY", "/infra/ansible/inventory
 SSH_KEY_DIR = os.environ.get("COLLECTOR_SSH_KEY_DIR", "/root/.ssh")
 SSH_USER_DEFAULT = os.environ.get("COLLECTOR_SSH_USER", "root")
 SSH_TIMEOUT = float(os.environ.get("COLLECTOR_SSH_TIMEOUT", "15"))
-CACHE_TTL = float(os.environ.get("COLLECTOR_CACHE_TTL_SECONDS", "300"))
-PACKAGES_TTL = float(os.environ.get("COLLECTOR_PACKAGES_TTL_SECONDS", "1800"))
-MAX_CHANGELOG_PACKAGES = int(os.environ.get("COLLECTOR_MAX_CHANGELOG_PACKAGES", "25"))
+COMMAND_TIMEOUT = float(os.environ.get("COLLECTOR_COMMAND_TIMEOUT", "180"))
+# How often every host is re-read in the background. Requests never wait for SSH.
+REFRESH_SECONDS = float(os.environ.get("COLLECTOR_REFRESH_SECONDS", "900"))
+# Data older than this is treated as missing (503) so a dead refresh cannot look healthy.
+MAX_STALE_SECONDS = float(os.environ.get("COLLECTOR_MAX_STALE_SECONDS", "21600"))
+DATA_DIR = os.environ.get("COLLECTOR_DATA_DIR", "/data")
+ALERT_IGNORE_REGEX = os.environ.get("COLLECTOR_ALERT_IGNORE_REGEX", "")
+BACKGROUND = os.environ.get("COLLECTOR_DISABLE_BACKGROUND", "") == ""
+MAX_CHANGELOG_PACKAGES = int(os.environ.get("COLLECTOR_MAX_CHANGELOG_PACKAGES", "40"))
 FALCO_TOKEN = os.environ.get("COLLECTOR_FALCO_TOKEN", "")
 FALCO_UNIT = os.environ.get("COLLECTOR_FALCO_UNIT", "falco-modern-bpf")
 ALERT_MIN_PRIORITY = os.environ.get("COLLECTOR_ALERT_MIN_PRIORITY", "warning").lower()
@@ -59,7 +67,64 @@ KEYSTONE_IGNORE_IPS = {
 PRIORITY_RANK = {"emergency": 5, "alert": 5, "critical": 4, "error": 3, "warning": 2, "notice": 1,
                  "informational": 0, "info": 0, "debug": 0}
 
-app = FastAPI(title="Cortex security collector")
+
+
+# --------------------------------------------------------------------------
+# Background refresh
+# --------------------------------------------------------------------------
+def refresh_host(host: str) -> dict:
+    """Re-reads one host. Each source is independent: one failing keeps the other's data."""
+    done = {}
+    for name, fn in (("packages", lambda: store_put(("packages", host), _collect_packages(host))),
+                     ("ports", lambda: _store_ports(host))):
+        try:
+            fn()
+            done[name] = "ok"
+        except HTTPException as exc:
+            done[name] = f"failed: {exc.detail}"
+            logger.warning("refresh %s/%s: %s", host, name, exc.detail)
+        except Exception as exc:  # never let the loop die
+            done[name] = f"failed: {type(exc).__name__}: {exc}"
+            logger.exception("refresh %s/%s crashed", host, name)
+    return done
+
+
+def _store_ports(host: str) -> None:
+    ports, sensor_active = _collect_ports_and_sensor(host)
+    store_put(("ports", host), ports)
+    store_put(("sensor", host), sensor_active)
+
+
+def refresh_all() -> None:
+    if not _refresh_lock.acquire(blocking=False):
+        return  # a refresh is already running
+    try:
+        hosts = sorted(load_inventory())
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=max(1, min(4, len(hosts)))) as pool:
+            list(pool.map(refresh_host, hosts))
+        logger.info("refreshed %d hosts in %.0fs", len(hosts), time.monotonic() - started)
+    except HTTPException as exc:
+        logger.warning("refresh skipped: %s", exc.detail)
+    finally:
+        _refresh_lock.release()
+
+
+def _refresh_loop() -> None:
+    while True:
+        refresh_all()
+        time.sleep(REFRESH_SECONDS)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(_app):
+    _load_alerts()
+    if BACKGROUND:
+        threading.Thread(target=_refresh_loop, name="collector-refresh", daemon=True).start()
+    yield
+
+
+app = FastAPI(title="Cortex security collector", lifespan=lifespan)
 
 
 # --------------------------------------------------------------------------
@@ -109,7 +174,7 @@ def ssh_run(host: str, command: str, timeout: float | None = None) -> tuple[int,
         client.connect(target["ip"], username=target["user"], key_filename=keys, timeout=SSH_TIMEOUT,
                        banner_timeout=SSH_TIMEOUT, auth_timeout=SSH_TIMEOUT,
                        look_for_keys=False, allow_agent=False)
-        _, stdout, _ = client.exec_command(command, timeout=timeout or SSH_TIMEOUT * 2)
+        _, stdout, _ = client.exec_command(command, timeout=timeout or COMMAND_TIMEOUT)
         out = stdout.read().decode("utf-8", "replace")
         return stdout.channel.recv_exit_status(), out
     except Exception as exc:  # network, auth, timeout
@@ -121,19 +186,40 @@ def ssh_run(host: str, command: str, timeout: float | None = None) -> tuple[int,
 # Tests replace this.
 RUNNER: Callable[[str, str], tuple[int, str]] = ssh_run
 
-_cache: dict[tuple, tuple[float, object]] = {}
-_cache_lock = threading.Lock()
+# Per-host data is refreshed by a background thread and *read* by the endpoints, so an API
+# request never waits for SSH / apt (the API times out after 8 s and its circuit breaker opens).
+_store: dict[tuple, tuple[float, object]] = {}
+_store_lock = threading.Lock()
+_refresh_lock = threading.Lock()
+
+
+def store_put(key: tuple, value: object) -> None:
+    with _store_lock:
+        _store[key] = (time.monotonic(), value)
+
+
+def store_get(key: tuple):
+    """Fresh-or-stale value, or 503 when it was never collected / is older than MAX_STALE_SECONDS."""
+    with _store_lock:
+        hit = _store.get(key)
+    if hit is None:
+        raise HTTPException(503, f"{key[0]} for {key[1] if len(key) > 1 else ''} not collected yet "
+                                 f"(background refresh running; retry in a minute)")
+    age = time.monotonic() - hit[0]
+    if age > MAX_STALE_SECONDS:
+        raise HTTPException(503, f"{key[0]} data is {int(age)}s old (refresh keeps failing); check collector logs")
+    return hit[1]
 
 
 def cached(key: tuple, ttl: float, producer: Callable[[], object]):
+    """Small synchronous TTL cache, only for cheap reads (Keystone log)."""
     now = time.monotonic()
-    with _cache_lock:
-        hit = _cache.get(key)
-        if hit and now - hit[0] < ttl:
-            return hit[1]
+    with _store_lock:
+        hit = _store.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
     value = producer()
-    with _cache_lock:
-        _cache[key] = (time.monotonic(), value)
+    store_put(key, value)
     return value
 
 
@@ -183,36 +269,52 @@ def parse_changelog_cves(changelog: str, installed_version: str) -> list[str]:
 
 
 def _collect_packages(host: str) -> list[dict]:
-    status, out = RUNNER(host, "dpkg-query -W -f='${Package}\\t${Version}\\n'")
-    if status != 0 or not out.strip():
-        raise HTTPException(503, f"dpkg-query on {host} returned status {status}")
-    packages = parse_dpkg(out)
-
-    # Pending security updates (needs fresh apt metadata on the node, see the guide).
-    _, upg = RUNNER(host, "LC_ALL=C apt list --upgradable 2>/dev/null")
-    security = parse_security_upgradable(upg)
+    status, out = RUNNER(host, "dpkg-query -W -f='${Package}\\t${Version}\\n'; echo '@@UPGRADABLE@@'; "
+                               "LC_ALL=C apt list --upgradable 2>/dev/null")
+    dpkg_out, _, upg_out = out.partition("@@UPGRADABLE@@")
+    packages = parse_dpkg(dpkg_out)
+    if not packages:
+        raise HTTPException(503, f"dpkg-query on {host} returned no packages (status {status})")
     by_name = {p["name"]: p for p in packages}
+    security = {n: i for n, i in parse_security_upgradable(upg_out).items() if n in by_name}
 
-    for name in sorted(security)[:MAX_CHANGELOG_PACKAGES]:
-        info = security[name]
-        if name not in by_name:
-            continue
-        cves: list[str] = []
+    names = sorted(security)
+    with_cves = names[:MAX_CHANGELOG_PACKAGES]
+    changelogs: dict[str, str] = {}
+    if with_cves:
+        # One SSH session for all changelogs (each is a small HTTP fetch on the node).
+        script = "; ".join(f"echo '@@CHANGELOG {n}@@'; apt-get changelog {n} 2>/dev/null | head -n 400"
+                           for n in with_cves)
         try:
-            _, chlog = RUNNER(host, f"apt-get changelog {name} 2>/dev/null | head -n 400")
-            cves = parse_changelog_cves(chlog, info["installed"])
+            _, chlog_out = RUNNER(host, script)
+            changelogs = split_changelogs(chlog_out)
         except HTTPException:
-            logger.warning("changelog fetch failed for %s on %s", name, host)
-        by_name[name]["security_update"] = {"version": info["version"], "cves": cves}
-    for name in sorted(security)[MAX_CHANGELOG_PACKAGES:]:
-        if name in by_name:
-            by_name[name]["security_update"] = {"version": security[name]["version"], "cves": []}
+            logger.warning("changelog fetch failed on %s; reporting updates without CVE ids", host)
+
+    for name in names:
+        cves = parse_changelog_cves(changelogs.get(name, ""), security[name]["installed"]) if name in changelogs else []
+        by_name[name]["security_update"] = {"version": security[name]["version"], "cves": cves}
     return packages
+
+
+def split_changelogs(output: str) -> dict[str, str]:
+    """Splits the combined `@@CHANGELOG <name>@@` script output back into per-package text."""
+    result: dict[str, str] = {}
+    current = None
+    for line in output.splitlines():
+        m = re.match(r"^@@CHANGELOG (\S+)@@$", line)
+        if m:
+            current = m.group(1)
+            result[current] = ""
+        elif current is not None:
+            result[current] += line + "\n"
+    return result
 
 
 @app.get("/packages")
 def packages(host: str):
-    return cached(("packages", host), PACKAGES_TTL, lambda: _collect_packages(host))
+    _resolve(host)  # 404 for an unknown host
+    return store_get(("packages", host))
 
 
 # --------------------------------------------------------------------------
@@ -241,14 +343,19 @@ def parse_ss(output: str) -> list[dict]:
     return sorted(seen.values(), key=lambda p: (p["port"], p["protocol"]))
 
 
+def _collect_ports_and_sensor(host: str) -> tuple[list[dict], bool]:
+    status, out = RUNNER(host, f"ss -H -tulnp; echo '@@SENSOR@@'; systemctl is-active {FALCO_UNIT}")
+    ports_out, _, sensor_out = out.partition("@@SENSOR@@")
+    ports = parse_ss(ports_out)
+    if not ports:
+        raise HTTPException(503, f"ss on {host} returned no listening sockets (status {status})")
+    return ports, sensor_out.strip() == "active"
+
+
 @app.get("/listening-ports")
 def listening_ports(host: str):
-    def produce():
-        status, out = RUNNER(host, "ss -H -tulnp")
-        if status != 0:
-            raise HTTPException(503, f"ss on {host} returned status {status}")
-        return parse_ss(out)
-    return cached(("ports", host), CACHE_TTL, produce)
+    _resolve(host)
+    return store_get(("ports", host))
 
 
 # --------------------------------------------------------------------------
@@ -256,6 +363,33 @@ def listening_ports(host: str):
 # --------------------------------------------------------------------------
 _alerts: deque = deque(maxlen=5000)
 _alerts_lock = threading.Lock()
+_ALERTS_FILE = os.path.join(DATA_DIR, "alerts.json")
+
+
+def _save_alerts() -> None:
+    """Keeps alerts across collector restarts (a rebuild would otherwise wipe the evidence)."""
+    with _alerts_lock:
+        snapshot = list(_alerts)
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = _ALERTS_FILE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(snapshot, fh)
+        os.replace(tmp, _ALERTS_FILE)
+    except OSError as exc:
+        logger.warning("could not persist alerts to %s: %s", _ALERTS_FILE, exc)
+
+
+def _load_alerts() -> None:
+    try:
+        with open(_ALERTS_FILE) as fh:
+            rows = json.load(fh)
+    except (OSError, ValueError):
+        return
+    with _alerts_lock:
+        for ts, alert in rows:
+            _alerts.append((ts, alert))
+    logger.info("restored %d alerts from %s", len(rows), _ALERTS_FILE)
 
 
 def _normalise_alert(payload: dict) -> dict | None:
@@ -264,6 +398,8 @@ def _normalise_alert(payload: dict) -> dict | None:
         return None
     host = payload.get("hostname") or (payload.get("output_fields") or {}).get("hostname") or payload.get("host")
     if not host or not payload.get("rule"):
+        return None
+    if ALERT_IGNORE_REGEX and re.search(ALERT_IGNORE_REGEX, f"{payload['rule']} {payload.get('output', '')}"):
         return None
     return {"host": host, "rule": payload["rule"], "priority": priority,
             "output": payload.get("output", ""), "time": payload.get("time") or datetime.now(timezone.utc).isoformat()}
@@ -282,12 +418,9 @@ async def falco_ingest(request: Request, token: str = ""):
             with _alerts_lock:
                 _alerts.append((time.time(), alert))
             stored += 1
+    if stored:
+        _save_alerts()
     return {"received": len(events), "stored": stored}
-
-
-def _sensor_active(host: str) -> bool:
-    status, out = RUNNER(host, f"systemctl is-active {FALCO_UNIT}")
-    return status == 0 and out.strip() == "active"
 
 
 @app.get("/alerts")
@@ -297,7 +430,8 @@ def alerts(host: str | None = None):
         current = [a for ts, a in _alerts if ts >= cutoff]
     if host is not None:
         # Absent sensor must read as "unknown", not "no alerts".
-        if not cached(("sensor", host), 60, lambda: _sensor_active(host)):
+        _resolve(host)
+        if not store_get(("sensor", host)):
             raise HTTPException(503, f"kernel sensor ({FALCO_UNIT}) is not active on {host}")
         current = [a for a in current if a["host"] == host]
     return sorted(current, key=lambda a: PRIORITY_RANK.get(a["priority"], 0), reverse=True)
