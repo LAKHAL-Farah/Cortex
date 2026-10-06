@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 os.environ["COLLECTOR_FALCO_TOKEN"] = "s3cret"
 os.environ["COLLECTOR_KEYSTONE_IGNORE_SOURCE_IPS"] = "10.0.1.4"
+os.environ["COLLECTOR_DISABLE_BACKGROUND"] = "1"
 
 import collector  # noqa: E402
 
@@ -45,8 +46,10 @@ ACCESS = (
 
 @pytest.fixture(autouse=True)
 def _reset(tmp_path, monkeypatch):
-    collector._cache.clear()
+    collector._store.clear()
     collector._alerts.clear()
+    monkeypatch.setattr(collector, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(collector, "_ALERTS_FILE", str(tmp_path / "alerts.json"))
     inv = tmp_path / "hosts.ini"
     inv.write_text("[controllers]\ncontroller ansible_host=10.0.1.4 ansible_user=root node_role=controller\n"
                    "[computes]\ncompute1 ansible_host=10.0.1.6 ansible_user=root node_role=compute\n")
@@ -81,28 +84,72 @@ def test_parsers():
     assert all(p["port"] != 3306 for p in ports)  # loopback-only dropped
 
 
+COMBINED_PKGS = DPKG + "@@UPGRADABLE@@" + UPGRADABLE
+COMBINED_CHLOG = "@@CHANGELOG sudo@@\n" + CHANGELOG
+COMBINED_PORTS = SS + "@@SENSOR@@active\n"
+
+
+def full_runner():
+    return make_runner({"dpkg-query": (0, COMBINED_PKGS), "apt-get changelog": (0, COMBINED_CHLOG),
+                        "ss -H": (0, COMBINED_PORTS)})
+
+
 def test_packages_endpoint_flags_security_updates(monkeypatch):
-    monkeypatch.setattr(collector, "RUNNER", make_runner({
-        "dpkg-query": (0, DPKG), "apt list --upgradable": (0, UPGRADABLE), "apt-get changelog sudo": (0, CHANGELOG)}))
+    monkeypatch.setattr(collector, "RUNNER", full_runner())
+    collector.refresh_host("compute1")
     data = client.get("/packages", params={"host": "compute1"}).json()
     sudo = next(p for p in data if p["name"] == "sudo")
     assert sudo["security_update"] == {"version": "1.9.9-1ubuntu2.5", "cves": ["CVE-2025-1111", "CVE-2025-2222"]}
     assert "security_update" not in next(p for p in data if p["name"] == "curl")
 
 
+def test_requests_never_touch_ssh_and_cold_start_is_503(monkeypatch):
+    runner = full_runner()
+    monkeypatch.setattr(collector, "RUNNER", runner)
+    assert client.get("/packages", params={"host": "compute1"}).status_code == 503  # not collected yet
+    assert runner.calls == []  # the request itself did no SSH
+    collector.refresh_host("compute1")
+    n = len(runner.calls)
+    for _ in range(5):
+        assert client.get("/packages", params={"host": "compute1"}).status_code == 200
+        assert client.get("/listening-ports", params={"host": "compute1"}).status_code == 200
+    assert len(runner.calls) == n  # served from the store, instantly
+
+
+def test_failed_refresh_keeps_serving_old_data_until_max_stale(monkeypatch):
+    monkeypatch.setattr(collector, "RUNNER", full_runner())
+    collector.refresh_host("compute1")
+    monkeypatch.setattr(collector, "RUNNER", make_runner({"dpkg-query": HTTPException(503, "ssh down"),
+                                                         "ss -H": HTTPException(503, "ssh down")}))
+    result = collector.refresh_host("compute1")
+    assert result["packages"].startswith("failed") and result["ports"].startswith("failed")
+    assert client.get("/packages", params={"host": "compute1"}).status_code == 200  # stale but present
+    monkeypatch.setattr(collector, "MAX_STALE_SECONDS", -1)
+    assert client.get("/packages", params={"host": "compute1"}).status_code == 503  # too old to trust
+
+
+def test_split_changelogs():
+    parts = collector.split_changelogs("@@CHANGELOG a@@\nx\n@@CHANGELOG b@@\ny\n")
+    assert parts == {"a": "x\n", "b": "y\n"}
+
+
 def test_unknown_host_is_404_and_ssh_failure_is_503(monkeypatch):
     assert client.get("/packages", params={"host": "nope"}).status_code == 404
     monkeypatch.setattr(collector, "RUNNER", make_runner({"ss -H": HTTPException(503, "ssh down")}))
+    assert collector.refresh_host("compute1")["ports"].startswith("failed")
     assert client.get("/listening-ports", params={"host": "compute1"}).status_code == 503
 
 
 def test_ports_endpoint(monkeypatch):
-    monkeypatch.setattr(collector, "RUNNER", make_runner({"ss -H": (0, SS)}))
+    monkeypatch.setattr(collector, "RUNNER", full_runner())
+    collector.refresh_host("compute1")
     assert len(client.get("/listening-ports", params={"host": "compute1"}).json()) == 4
 
 
 def test_falco_ingest_auth_filter_and_alerts(monkeypatch):
-    monkeypatch.setattr(collector, "RUNNER", make_runner({"systemctl is-active": (0, "active\n")}))
+    monkeypatch.setattr(collector, "RUNNER", full_runner())
+    collector.refresh_host("compute1")
+    collector.store_put(("sensor", "controller"), True)
     ev = {"hostname": "compute1", "rule": "Terminal shell in container", "priority": "Warning",
           "output": "shell spawned", "time": "2026-10-05T19:00:00Z"}
     low = {"hostname": "compute1", "rule": "Noise", "priority": "Notice", "output": "x"}
@@ -116,12 +163,13 @@ def test_falco_ingest_auth_filter_and_alerts(monkeypatch):
 
 
 def test_alerts_503_when_sensor_not_running(monkeypatch):
-    monkeypatch.setattr(collector, "RUNNER", make_runner({"systemctl is-active": (3, "inactive\n")}))
+    monkeypatch.setattr(collector, "RUNNER", make_runner({"ss -H": (0, SS + "@@SENSOR@@inactive\n")}))
+    collector.refresh_host("compute1")
     assert client.get("/alerts", params={"host": "compute1"}).status_code == 503
 
 
 def test_alert_ttl(monkeypatch):
-    monkeypatch.setattr(collector, "RUNNER", make_runner({"systemctl is-active": (0, "active\n")}))
+    collector.store_put(("sensor", "compute1"), True)
     collector._alerts.append((time.time() - 99999, {"host": "compute1", "rule": "old", "priority": "critical",
                                                     "output": "", "time": ""}))
     assert client.get("/alerts", params={"host": "compute1"}).json() == []
@@ -133,7 +181,7 @@ def test_keystone_log_parsing_and_endpoint(monkeypatch):
     assert events[0]["issued_at"] == "2026-10-05T19:31:01Z" and events[0]["expires_at"] == "2026-10-05T20:31:01Z"
     monkeypatch.setattr(collector, "RUNNER", make_runner({"docker exec keystone tail": (0, ACCESS)}))
     assert len(client.get("/_sandbox/keystone/token-log").json()) == 3
-    collector._cache.clear()
+    collector._store.clear()
     monkeypatch.setattr(collector, "RUNNER", make_runner({"docker exec keystone tail": (1, "")}))
     assert client.get("/_sandbox/keystone/token-log").status_code == 503
 
@@ -147,3 +195,17 @@ def test_output_feeds_the_unmodified_api_keystone_rule():
     events = collector.parse_keystone_access_log(ACCESS, ignore_ips={"10.0.1.4"})
     result = keystone_audit.find_abusive_token_patterns(events, now=datetime(2026, 10, 5, 19, 32, tzinfo=timezone.utc))
     assert result["rapid_reissue"] and result["rapid_reissue"][0]["count"] == 3
+
+
+def test_ignore_regex_and_alert_persistence(monkeypatch, tmp_path):
+    monkeypatch.setattr(collector, "ALERT_IGNORE_REGEX", r"file=/etc/pam\.d/")
+    collector.store_put(("sensor", "compute1"), True)
+    pam = {"hostname": "compute1", "rule": "Read sensitive file untrusted", "priority": "Warning",
+           "output": "x file=/etc/pam.d/common-auth process=sshd"}
+    shadow = {"hostname": "compute1", "rule": "Read sensitive file untrusted", "priority": "Warning",
+              "output": "x file=/etc/shadow process=cat"}
+    assert client.post("/falco?token=s3cret", json=[pam, shadow]).json()["stored"] == 1
+    assert (tmp_path / "alerts.json").exists()
+    collector._alerts.clear()
+    collector._load_alerts()  # what a restart does
+    assert [a["output"] for a in client.get("/alerts", params={"host": "compute1"}).json()] == [shadow["output"]]

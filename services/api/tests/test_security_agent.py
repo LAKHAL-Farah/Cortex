@@ -312,3 +312,18 @@ def test_match_cves_uses_pending_security_updates():
     known = next(m for m in matches if m["cve_id"] == "CVE-2023-22809")
     assert known["severity"] == "high" and known["fixed_version"] == "1.9.9-1ubuntu2.5"
     assert all(m["package"] != "curl" for m in matches)
+
+
+def test_ebpf_finding_keeps_every_alert_up_to_the_configured_cap(monkeypatch):
+    """Regression: a hardcoded [:5] hid 7 of 12 real alerts from the Kernel signals page."""
+    _clean(monkeypatch)
+    twelve = [_ebpf_alert(priority="warning", output=f"file=/etc/f{i}") for i in range(12)]
+    monkeypatch.setattr(ebpf_signal, "get_node_ebpf_alerts", lambda hostname: twelve)
+
+    raw = security.security_agent({"user_query": "anything suspicious on compute-02", "known_nodes": KNOWN_NODES})["agent_result"]["raw_data"]
+    assert len(raw["ebpf_signal"]["alerts"]) == 12
+    assert "12 active kernel-level alert(s)" in raw["ebpf_signal"]["detail"]
+
+    monkeypatch.setattr(security, "_MAX_EBPF_ALERTS", 5)
+    raw = security.security_agent({"user_query": "anything suspicious on compute-02", "known_nodes": KNOWN_NODES})["agent_result"]["raw_data"]
+    assert len(raw["ebpf_signal"]["alerts"]) == 5

@@ -95,6 +95,7 @@ place get_current_user's role claim is already available and every other
 per-role gate in this codebase already lives (see auth.py's require_admin).
 """
 import logging
+import os
 import time
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -115,6 +116,10 @@ logger = logging.getLogger(__name__)
 # security question is rarely "around this specific spike"), so this is
 # just a fixed recent lookback.
 _AUTH_LOG_WINDOW_MINUTES = 60
+
+# How many individual kernel alerts a finding keeps (the *count* in `detail` is always the full
+# total). Was a hardcoded 5, which hid most events from the Kernel signals page.
+_MAX_EBPF_ALERTS = int(os.environ.get("CORTEX_EBPF_MAX_ALERTS", "50"))
 _AUTH_LOG_SIGNAL_PATTERN = (
     "(?i)failed password|authentication failure|invalid user|permission denied|"
     "too many authentication failures|pam_unix.*auth.*fail"
@@ -461,7 +466,7 @@ def _check_ebpf_signal(node: KnownNode) -> dict:
         f"{len(alerts)} active kernel-level alert(s) for {node['hostname']}, most severe: "
         f"[{top.get('priority')}] {top.get('rule')} -- {top.get('output')}"
     )
-    return {"has_signal": True, "degraded": False, "detail": detail, "alerts": alerts[:5]}
+    return {"has_signal": True, "degraded": False, "detail": detail, "alerts": alerts[:_MAX_EBPF_ALERTS]}
 
 
 # --------------------------------------------------------------------
