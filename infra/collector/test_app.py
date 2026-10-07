@@ -209,3 +209,93 @@ def test_ignore_regex_and_alert_persistence(monkeypatch, tmp_path):
     collector._alerts.clear()
     collector._load_alerts()  # what a restart does
     assert [a["output"] for a in client.get("/alerts", params={"host": "compute1"}).json()] == [shadow["output"]]
+
+
+# ------------------------------------------------------------------ Trivy
+import base64  # noqa: E402
+import json  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+import trivy_aggregate  # noqa: E402
+
+
+def _v(cve, pkg, sev, installed="1.0", fixed=None):
+    out = {"VulnerabilityID": cve, "PkgName": pkg, "InstalledVersion": installed, "Severity": sev}
+    if fixed:
+        out["FixedVersion"] = fixed
+    return out
+
+
+SCAN = {"Results": [{"Vulnerabilities": [
+    # old kernel, fixed in newer kernels: counted once per CVE even though 3 packages carry it
+    _v("CVE-K1", "linux-headers-6.8.0-40-generic", "CRITICAL", "6.8.0-40.40~22.04.3", "6.8.0-50"),
+    _v("CVE-K1", "linux-modules-6.8.0-40-generic", "CRITICAL", "6.8.0-40.40~22.04.3", "6.8.0-50"),
+    _v("CVE-K1", "linux-hwe-6.8-tools-6.8.0-40", "CRITICAL", "6.8.0-40.40~22.04.3", "6.8.0-50"),
+    _v("CVE-K2", "linux-headers-6.8.0-40-generic", "HIGH", "6.8.0-40.40~22.04.3", "6.8.0-100"),
+    # running kernel: unfixed CVEs are ignored, a fixed one is kept
+    _v("CVE-K3", "linux-image-6.8.0-138-generic", "HIGH", "6.8.0-138.138~22.04.1"),
+    _v("CVE-K4", "linux-image-6.8.0-138-generic", "MEDIUM", "6.8.0-138.138~22.04.1", "6.8.0-150"),
+    # user-space packages, unfixed kept
+    _v("CVE-F1", "libavcodec58", "MEDIUM", "7:4.4.2"), _v("CVE-F2", "libavcodec58", "MEDIUM", "7:4.4.2"),
+    _v("CVE-F3", "libavcodec58", "LOW", "7:4.4.2"),  # below the MEDIUM floor
+    _v("CVE-G1", "libgstreamer-plugins-bad1.0-0", "HIGH", "1.20", "1.20.3"),
+]}]}
+
+
+def test_aggregate_collapses_kernel_noise_and_keeps_userspace_rows():
+    out = trivy_aggregate.aggregate(SCAN, "6.8.0-138-generic", "MEDIUM")
+    assert out["total_findings"] == 10 and out["running_kernel"] == "6.8.0-138"
+    names = [p["name"] for p in out["packages"]]
+    assert names == ["libgstreamer-plugins-bad1.0-0", "libavcodec58"]  # worst severity first
+    ff = out["packages"][1]
+    assert ff["count"] == 2 and ff["fixable"] == 0 and ff["by_severity"] == {"MEDIUM": 2}  # LOW dropped
+    kernels = {k["release"]: k for k in out["kernels"]}
+    assert kernels["6.8.0-40"]["count"] == 2 and kernels["6.8.0-40"]["running"] is False  # K1 once, K2
+    assert kernels["6.8.0-138"]["count"] == 1 and kernels["6.8.0-138"]["running"] is True  # only K4 (K3 unfixed)
+    assert out["kernels"][0]["running"] is True  # running kernel listed first
+
+
+def test_aggregate_script_runs_standalone_like_it_does_on_the_node(tmp_path):
+    scan = tmp_path / "scan.json"
+    scan.write_text(json.dumps(SCAN))
+    done = subprocess.run([sys.executable, trivy_aggregate.__file__, str(scan), "MEDIUM", "6.8.0-138-generic"],
+                          capture_output=True, text=True, check=True)
+    assert json.loads(done.stdout.strip().splitlines()[-1])["packages"][0]["name"] == "libgstreamer-plugins-bad1.0-0"
+
+
+def test_trivy_command_uses_host_network_and_ships_the_aggregator():
+    cmd = collector._trivy_command("MEDIUM")
+    assert "--network host" in cmd and "--severity CRITICAL,HIGH,MEDIUM" in cmd and "--cpus 1" in cmd
+    payload = cmd.split("echo ")[1].split(" | base64 -d")[0]
+    assert base64.b64decode(payload).decode() == open(trivy_aggregate.__file__).read()
+
+
+def test_trivy_refresh_merge_status_and_failure_keeps_old(monkeypatch):
+    aggregated = json.dumps(trivy_aggregate.aggregate(SCAN, "6.8.0-138-generic", "MEDIUM"))
+    monkeypatch.setattr(collector, "LONG_RUNNER", make_runner({"docker run": (0, "warning noise\n" + aggregated + "\n")}))
+    monkeypatch.setattr(collector, "RUNNER", full_runner())
+    collector.refresh_host("compute1")
+    assert "package rows" in collector.refresh_trivy_host("compute1")
+
+    data = client.get("/packages", params={"host": "compute1"}).json()
+    by_name = {p["name"]: p for p in data}
+    assert "vulnerabilities" not in by_name["curl"]                      # untouched
+    assert "linux-kernel-6.8.0-40" in by_name and by_name["linux-kernel-6.8.0-40"]["vulnerabilities"]["kernel"] is True
+    assert by_name["linux-kernel-6.8.0-40"]["vulnerabilities"]["running"] is False
+    status = client.get("/trivy/status").json()
+    assert status["compute1"]["raw_findings"] == 10 and status["controller"] == "never scanned"
+
+    monkeypatch.setattr(collector, "LONG_RUNNER", make_runner({"docker run": (1, "boom")}))
+    with pytest.raises(HTTPException):
+        collector.refresh_trivy_host("compute1")
+    assert "linux-kernel-6.8.0-40" in {p["name"] for p in client.get("/packages", params={"host": "compute1"}).json()}
+
+
+def test_trivy_result_survives_a_restart(monkeypatch):
+    aggregated = json.dumps(trivy_aggregate.aggregate(SCAN, "6.8.0-138-generic", "MEDIUM"))
+    monkeypatch.setattr(collector, "LONG_RUNNER", make_runner({"docker run": (0, aggregated)}))
+    collector.refresh_trivy_host("storage")
+    collector._store.clear()
+    collector._load_trivy()
+    assert collector.store_get(("trivy", "storage"))["result"]["total_findings"] == 10

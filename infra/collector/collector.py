@@ -17,7 +17,9 @@ Node data is read over SSH (same key and inventory the Ansible runner uses).
 A source that cannot be read answers 503, which the API turns into a degraded
 sub-check ("unknown") rather than a false "all clear".
 """
+import base64
 import contextlib
+import copy
 import hmac
 import json
 import logging
@@ -31,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import paramiko
+import trivy_aggregate
 from fastapi import FastAPI, HTTPException, Request
 
 logger = logging.getLogger("collector")
@@ -48,6 +51,17 @@ MAX_STALE_SECONDS = float(os.environ.get("COLLECTOR_MAX_STALE_SECONDS", "21600")
 DATA_DIR = os.environ.get("COLLECTOR_DATA_DIR", "/data")
 ALERT_IGNORE_REGEX = os.environ.get("COLLECTOR_ALERT_IGNORE_REGEX", "")
 BACKGROUND = os.environ.get("COLLECTOR_DISABLE_BACKGROUND", "") == ""
+
+# Independent vulnerability scan (Trivy, run on each node through docker). Finds the CVEs apt cannot
+# show: ones with no fix yet, and old kernels left installed.
+TRIVY_ENABLED = os.environ.get("COLLECTOR_TRIVY_ENABLED", "true").lower() in ("1", "true", "yes")
+TRIVY_IMAGE = os.environ.get("COLLECTOR_TRIVY_IMAGE", "aquasec/trivy:latest")
+TRIVY_MIN_SEVERITY = os.environ.get("COLLECTOR_TRIVY_MIN_SEVERITY", "MEDIUM").upper()
+TRIVY_REFRESH_SECONDS = float(os.environ.get("COLLECTOR_TRIVY_REFRESH_SECONDS", "21600"))
+TRIVY_INITIAL_DELAY = float(os.environ.get("COLLECTOR_TRIVY_INITIAL_DELAY_SECONDS", "120"))
+TRIVY_TIMEOUT = float(os.environ.get("COLLECTOR_TRIVY_TIMEOUT_SECONDS", "1500"))
+TRIVY_HOSTS = [h.strip() for h in os.environ.get("COLLECTOR_TRIVY_HOSTS", "").split(",") if h.strip()]
+_AGGREGATOR_PATH = trivy_aggregate.__file__
 MAX_CHANGELOG_PACKAGES = int(os.environ.get("COLLECTOR_MAX_CHANGELOG_PACKAGES", "40"))
 FALCO_TOKEN = os.environ.get("COLLECTOR_FALCO_TOKEN", "")
 FALCO_UNIT = os.environ.get("COLLECTOR_FALCO_UNIT", "falco-modern-bpf")
@@ -119,8 +133,11 @@ def _refresh_loop() -> None:
 @contextlib.asynccontextmanager
 async def lifespan(_app):
     _load_alerts()
+    _load_trivy()
     if BACKGROUND:
         threading.Thread(target=_refresh_loop, name="collector-refresh", daemon=True).start()
+        if TRIVY_ENABLED:
+            threading.Thread(target=_trivy_loop, name="collector-trivy", daemon=True).start()
     yield
 
 
@@ -183,8 +200,9 @@ def ssh_run(host: str, command: str, timeout: float | None = None) -> tuple[int,
         client.close()
 
 
-# Tests replace this.
+# Tests replace these.
 RUNNER: Callable[[str, str], tuple[int, str]] = ssh_run
+LONG_RUNNER: Callable[[str, str], tuple[int, str]] = lambda host, cmd: ssh_run(host, cmd, timeout=TRIVY_TIMEOUT)
 
 # Per-host data is refreshed by a background thread and *read* by the endpoints, so an API
 # request never waits for SSH / apt (the API times out after 8 s and its circuit breaker opens).
@@ -314,7 +332,130 @@ def split_changelogs(output: str) -> dict[str, str]:
 @app.get("/packages")
 def packages(host: str):
     _resolve(host)  # 404 for an unknown host
-    return store_get(("packages", host))
+    packages = store_get(("packages", host))
+    try:
+        scan = store_get(("trivy", host))
+    except HTTPException:
+        scan = None  # no scan yet: apt-based data only
+    return merge_trivy(packages, scan)
+
+
+# --------------------------------------------------------------------------
+# Trivy scan (per node, in the background)
+# --------------------------------------------------------------------------
+_trivy_lock = threading.Lock()
+
+
+def _trivy_command(min_severity: str) -> str:
+    floor = trivy_aggregate.SEVERITIES.index(min_severity) if min_severity in trivy_aggregate.SEVERITIES else 2
+    severities = ",".join(trivy_aggregate.SEVERITIES[: floor + 1])
+    with open(_AGGREGATOR_PATH, "rb") as handle:
+        payload = base64.b64encode(handle.read()).decode()
+    return (
+        "set -e; OUT=/var/tmp/cortex-trivy.json; AGG=/var/tmp/cortex-trivy-agg.py; "
+        # --network host: Docker here has no default bridge/NAT (Kolla), so a normal container has no network.
+        f"docker run --rm --network host --cpus 1 -v /:/hostfs:ro -v /var/tmp/trivy-cache:/root/.cache/trivy {TRIVY_IMAGE} "
+        f"rootfs --quiet --format json --scanners vuln --pkg-types os --severity {severities} "
+        "--skip-dirs /var/lib/docker --skip-dirs /hostfs/var/lib/docker --skip-dirs /proc --skip-dirs /sys "
+        "--skip-dirs /hostfs/proc --skip-dirs /hostfs/sys --skip-dirs /hostfs/dev --skip-dirs /hostfs/run /hostfs > $OUT; "
+        f"echo {payload} | base64 -d > $AGG; "
+        f'python3 $AGG $OUT {min_severity} "$(uname -r)"; rm -f $OUT $AGG'
+    )
+
+
+def _trivy_file(host: str) -> str:
+    return os.path.join(DATA_DIR, f"trivy-{host}.json")
+
+
+def refresh_trivy_host(host: str) -> str:
+    """One scan of one node. A failed scan keeps the previous result."""
+    status, out = LONG_RUNNER(host, _trivy_command(TRIVY_MIN_SEVERITY))
+    lines = out.strip().splitlines()
+    if status != 0 or not lines or not lines[-1].startswith("{"):
+        raise HTTPException(503, f"trivy scan on {host} failed (exit {status}): {out.strip()[-200:]}")
+    result = json.loads(lines[-1])
+    store_put(("trivy", host), {"at": time.time(), "result": result})
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(_trivy_file(host), "w") as handle:
+            json.dump({"at": time.time(), "result": result}, handle)
+    except OSError as exc:
+        logger.warning("could not persist trivy result for %s: %s", host, exc)
+    return f"{result['total_findings']} raw findings -> {len(result['packages'])} package rows, {len(result['kernels'])} kernel rows"
+
+
+def _load_trivy() -> None:
+    try:
+        names = os.listdir(DATA_DIR)
+    except OSError:
+        return
+    for name in names:
+        if name.startswith("trivy-") and name.endswith(".json"):
+            try:
+                with open(os.path.join(DATA_DIR, name)) as handle:
+                    saved = json.load(handle)
+                store_put(("trivy", name[len("trivy-"):-len(".json")]), saved)
+            except (OSError, ValueError):
+                continue
+
+
+def refresh_trivy_all() -> None:
+    if not _trivy_lock.acquire(blocking=False):
+        return
+    try:
+        hosts = TRIVY_HOSTS or sorted(load_inventory())
+        for host in hosts:  # one node at a time: a scan is a CPU/RAM burst
+            try:
+                logger.info("trivy %s: %s", host, refresh_trivy_host(host))
+            except HTTPException as exc:
+                logger.warning("trivy %s: %s", host, exc.detail)
+            except Exception:  # never let the loop die
+                logger.exception("trivy %s crashed", host)
+    except HTTPException as exc:
+        logger.warning("trivy skipped: %s", exc.detail)
+    finally:
+        _trivy_lock.release()
+
+
+def _trivy_loop() -> None:
+    time.sleep(TRIVY_INITIAL_DELAY)
+    while True:
+        refresh_trivy_all()
+        time.sleep(TRIVY_REFRESH_SECONDS)
+
+
+def merge_trivy(packages: list[dict], scan: dict | None) -> list[dict]:
+    """Adds `vulnerabilities` to the matching packages, plus one synthetic entry per kernel release."""
+    if not scan:
+        return packages
+    result = scan["result"]
+    rows = {row["name"]: row for row in result.get("packages", [])}
+    merged = []
+    for package in packages:
+        row = rows.get(package["name"])
+        if row:
+            package = dict(package, vulnerabilities={k: v for k, v in row.items() if k not in ("name", "version")})
+        merged.append(package)
+    for kernel in result.get("kernels", []):
+        merged.append({"name": f"linux-kernel-{kernel['release']}", "version": kernel["release"],
+                       "vulnerabilities": dict(kernel, kernel=True)})
+    return merged
+
+
+@app.get("/trivy/status")
+def trivy_status():
+    out = {}
+    for host in sorted(load_inventory()):
+        try:
+            scan = store_get(("trivy", host))
+        except HTTPException:
+            out[host] = "never scanned"
+            continue
+        result = scan["result"]
+        out[host] = {"age_seconds": int(time.time() - scan["at"]), "raw_findings": result["total_findings"],
+                     "package_rows": len(result["packages"]), "kernel_rows": [
+                         {"release": k["release"], "running": k["running"], "cves_with_fix": k["count"]} for k in result["kernels"]]}
+    return out
 
 
 # --------------------------------------------------------------------------

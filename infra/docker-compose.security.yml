@@ -24,6 +24,13 @@ services:
       # Every host is re-read in the background this often; API requests never wait for SSH.
       COLLECTOR_REFRESH_SECONDS: ${COLLECTOR_REFRESH_SECONDS:-900}
       COLLECTOR_DATA_DIR: /data
+      # Independent CVE scan (Trivy via docker on each node, one node at a time). Shows what apt cannot:
+      # unfixed CVEs and old kernels left installed. Set COLLECTOR_TRIVY_ENABLED=false to turn it off, or
+      # COLLECTOR_TRIVY_HOSTS=controller,storage to leave a node out (e.g. compute1, which runs your VMs).
+      COLLECTOR_TRIVY_ENABLED: ${COLLECTOR_TRIVY_ENABLED:-true}
+      COLLECTOR_TRIVY_MIN_SEVERITY: ${COLLECTOR_TRIVY_MIN_SEVERITY:-MEDIUM}
+      COLLECTOR_TRIVY_REFRESH_SECONDS: ${COLLECTOR_TRIVY_REFRESH_SECONDS:-21600}
+      COLLECTOR_TRIVY_HOSTS: ${COLLECTOR_TRIVY_HOSTS:-}
     volumes:
       - ${CORTEX_ANSIBLE_HOST_DIR:-./ansible}:/infra/ansible:ro
       - ${CORTEX_SSH_KEY_HOST_DIR:-./.sandbox-ssh}:/root/.ssh:ro
