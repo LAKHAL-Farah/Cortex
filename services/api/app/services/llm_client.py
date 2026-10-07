@@ -104,6 +104,9 @@ AGENT_TIERS: dict[str, str] = {
     # Deterministic catalog matching (openstack_expert_catalog.py) -- no
     # LLM call at all, so neither tier applies.
     "openstack_expert": "n/a (no LLM call)",
+    # Deterministic fix proposal built from the same reviewed catalog entry
+    # (nodes/remediation.py) -- no LLM call, so neither tier applies.
+    "remediation": "n/a (no LLM call)",
     # No agent ran -- the router asked the user to disambiguate instead.
     "clarify": "n/a (no agent ran)",
 }

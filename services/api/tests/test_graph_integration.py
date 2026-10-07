@@ -103,7 +103,7 @@ def test_live_incident_produces_full_three_layer_expert_answer(monkeypatch):
 
     result = _invoke("something's wrong with compute-02")
 
-    assert result["target_agent"] == "openstack_expert"
+    assert result["target_agent"] == "remediation"  # expert -> remediation chain (v1.3)
     answer = result["final_answer"]
     assert "What's happening" in answer
     assert "How to confirm it yourself" in answer
@@ -156,7 +156,7 @@ def test_killing_loki_mid_incident_returns_promptly_and_honestly_degraded(monkey
     assert "What's happening" in answer
     assert "How to confirm it yourself" in answer
     assert "What's usually done about it" in answer
-    assert result["target_agent"] == "openstack_expert"
+    assert result["target_agent"] == "remediation"  # expert -> remediation chain (v1.3)
 
 
 # --------------------------------------------------------------------
@@ -179,7 +179,7 @@ def test_concerning_monitoring_reading_chains_into_expert_agent(monkeypatch):
 
     result = _invoke("how is compute-02 doing")
 
-    assert result["target_agent"] == "openstack_expert"
+    assert result["target_agent"] == "remediation"  # expert -> remediation chain (v1.3)
     assert "host-cpu-pressure" == result["agent_result"]["raw_data"]["matched_symptom_id"]
     assert "diagnosed_by" in result["agent_result"]["raw_data"]
     assert result["agent_result"]["raw_data"]["diagnosed_by"] == "monitoring"
@@ -231,7 +231,7 @@ def test_down_neutron_agent_chains_into_expert_agent(monkeypatch):
 
     result = _invoke("is the network okay on compute-02")
 
-    assert result["target_agent"] == "openstack_expert"
+    assert result["target_agent"] == "remediation"  # expert -> remediation chain (v1.3)
     assert result["agent_result"]["raw_data"]["matched_symptom_id"] == "neutron-ovs-agent-down"
     assert result["agent_result"]["raw_data"]["diagnosed_by"] == "network"
     answer = result["final_answer"]

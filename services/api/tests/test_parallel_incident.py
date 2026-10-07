@@ -203,7 +203,7 @@ def test_best_supported_theory_wins_then_the_expert_runs_on_its_evidence(monkeyp
     result = _run(monkeypatch)
 
     raw = result["agent_result"]["raw_data"]
-    assert result["target_agent"] == "openstack_expert"
+    assert result["target_agent"] == "remediation"  # expert -> remediation chain (v1.3)
     assert raw["diagnosed_by"] == "network" and raw["investigating_agent"] == "network"
     assert raw["corroborated_by"] == ["anomaly"]
     assert raw["arbitration"]["winner"] == "network"
@@ -288,6 +288,6 @@ def test_corroborating_evidence_fills_a_gap_when_the_winners_evidence_matches_no
     result = _run(monkeypatch)
 
     raw = result["agent_result"]["raw_data"]
-    assert result["target_agent"] == "openstack_expert"
+    assert result["target_agent"] == "remediation"  # expert -> remediation chain (v1.3)
     assert raw["diagnosed_by"] == "network" and raw["corroborated_by"] == ["anomaly"]
     assert "cpu" in raw["matched_symptom_id"]

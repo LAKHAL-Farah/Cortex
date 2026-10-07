@@ -549,6 +549,12 @@ def _build_result(entry: SymptomEntry, evidence_line: str, hostname: str | None,
             "confirm_commands": _to_command_dicts(entry["confirm_commands"], hostname),
             "remediation_commands": _to_command_dicts(entry["remediation_commands"], hostname),
             "doc_ref": entry["doc_ref"],
+            # v1.3 (remediation, 4.1): the host the commands above were filled
+            # in for and the one-line evidence that triggered this match, so
+            # nodes/remediation.py can build its fix proposal from raw_data
+            # alone instead of re-deriving either from the upstream agent.
+            "hostname": hostname,
+            "evidence_line": evidence_line,
             # v1.0: same "source" label the fallback tiers use (see
             # _build_docs_fallback_result / _build_web_fallback_result /
             # _standalone_fallback's final tier) so a frontend can render

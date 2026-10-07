@@ -58,6 +58,8 @@ import type {
   AgentAnomalyData,
   AgentExpertCommand,
   AgentExpertData,
+  AgentFixProposal,
+  FixRisk,
   IncidentArbitration,
   ParallelismSummary,
   AgentMonitoringData,
@@ -123,6 +125,13 @@ export const AGENT_META: Record<
     icon: Wrench,
     color: "var(--accent)",
     soft: "var(--accent-soft)",
+  },
+  remediation: {
+    label: "Remediation agent",
+    short: "Proposed fix (needs approval)",
+    icon: ShieldCheck,
+    color: "var(--warn)",
+    soft: "var(--warn-soft)",
   },
   network: {
     label: "Network agent",
@@ -1925,7 +1934,78 @@ function ExpertPanel({ data }: { data: AgentExpertData }) {
     <>
       {data.arbitration && <ArbitrationPanel arbitration={data.arbitration} />}
       <ExpertRunbookPanel data={data} />
+      {data.fix_proposal && <FixProposalPanel proposal={data.fix_proposal} />}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Remediation panel (v1.3, roadmap 4.1) -- the one recommended fix as a card:
+// plain-language why, the exact command (copyable), what you still have to
+// fill in, where to run it, the undo, and the alternatives. Proposal-only: the
+// pill says so, and nothing here executes anything -- a human copies and runs.
+// ---------------------------------------------------------------------------
+
+const FIX_RISK_TONE: Record<FixRisk, { color: string; soft: string; label: string }> = {
+  low: { color: "var(--ok)", soft: "var(--ok-soft)", label: "Low risk" },
+  medium: { color: "var(--warn)", soft: "var(--warn-soft)", label: "Medium risk" },
+  high: { color: "var(--crit)", soft: "var(--crit-soft)", label: "High risk" },
+};
+
+function FixProposalPanel({ proposal }: { proposal: AgentFixProposal }) {
+  const { primary } = proposal;
+  const tone = FIX_RISK_TONE[primary.risk];
+  return (
+    <div className="agent-panel" style={{ borderColor: `color-mix(in srgb, ${tone.color} 28%, var(--border))` }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-3.5 w-3.5" style={{ color: tone.color }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">Proposed fix</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="agent-pill" style={{ color: tone.color, background: tone.soft }}>
+            {tone.label}
+          </span>
+          <span className="agent-pill" style={{ color: "var(--text-muted)", background: "var(--canvas)" }}>
+            Proposal only · needs your approval
+          </span>
+        </div>
+      </div>
+
+      <p className="text-[12px] leading-relaxed text-text-muted">{proposal.plain_language}</p>
+
+      <CommandRow cmd={{ command: primary.command, description: primary.description, read_only: false }} />
+
+      <div className="flex flex-col gap-1 text-[12px] leading-relaxed text-text-muted">
+        {primary.note && <span>Heads-up: {primary.note}</span>}
+        {proposal.inputs_needed.length > 0 && <span>Fill in before running: {proposal.inputs_needed.join(", ")}</span>}
+        <span>
+          {primary.run_where === "on-host"
+            ? `Run it on the host itself${proposal.host ? ` (${proposal.host})` : ""}, for example over SSH.`
+            : "Run it from any machine where the openstack CLI is set up for this cloud."}
+        </span>
+        {!primary.undo && primary.undo_note && <span>{primary.undo_note}</span>}
+      </div>
+
+      {primary.undo && (
+        <CommandRow cmd={{ command: primary.undo, description: "Undo it with", read_only: false }} />
+      )}
+
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <CommandSection
+          title="Check it yourself, before and after"
+          commands={proposal.verify_commands.map((v) => ({ ...v, read_only: true }))}
+        />
+        <CommandSection
+          title="If that is not the right move"
+          commands={proposal.alternatives.map((a) => ({
+            command: a.command,
+            description: `${a.description} (${a.risk} risk)`,
+            read_only: false,
+          }))}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -2338,7 +2418,7 @@ function AgentPanelSkeleton({ agentUsed }: { agentUsed?: string }) {
       </div>
     );
   }
-  if (agentUsed === "openstack_expert") {
+  if (agentUsed === "openstack_expert" || agentUsed === "remediation") {
     return (
       <div
         className="agent-panel"
@@ -2412,7 +2492,9 @@ export function AgentAnswerPanel({
       {agentUsed === "anomaly" && rawData && (
         <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />
       )}
-      {agentUsed === "openstack_expert" && rawData && <ExpertPanel data={rawData as AgentExpertData} />}
+      {(agentUsed === "openstack_expert" || agentUsed === "remediation") && rawData && (
+        <ExpertPanel data={rawData as AgentExpertData} />
+      )}
     </div>
   );
 }
@@ -2465,7 +2547,9 @@ export function AnimatedAgentAnswer({
           {agentUsed === "prediction" && <PredictionSwitch data={rawData} />}
           {agentUsed === "rag" && <RagPanel data={rawData as AgentRagData} />}
           {agentUsed === "anomaly" && <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />}
-          {agentUsed === "openstack_expert" && <ExpertPanel data={rawData as AgentExpertData} />}
+          {(agentUsed === "openstack_expert" || agentUsed === "remediation") && (
+            <ExpertPanel data={rawData as AgentExpertData} />
+          )}
         </motion.div>
       )}
     </div>

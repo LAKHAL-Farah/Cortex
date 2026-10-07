@@ -456,7 +456,15 @@ export interface ChatSource {
 // actually return, used by components/CopilotAgentPanels.tsx to pick a
 // renderer.
 
-export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly" | "openstack_expert" | "network" | "security";
+export type AgentName =
+  | "monitoring"
+  | "prediction"
+  | "rag"
+  | "anomaly"
+  | "openstack_expert"
+  | "network"
+  | "security"
+  | "remediation";
 
 // Same live-status shape as LiveMetrics above, just named for clarity at
 // the copilot call site.
@@ -738,7 +746,47 @@ export type AgentExpertCategory =
   | "hypervisor"
   | "host";
 
+// Remediation agent (v1.3, roadmap 4.1, services/api/app/agents/nodes/
+// remediation.py) -- one recommended fix, proposal-only: `executed` is always
+// false and `requires_approval` always true until the later Remediation
+// Copilot items (simulation, approval UI, execution, audit) advance `status`.
+export type FixRisk = "low" | "medium" | "high";
+
+export interface AgentFixStep {
+  command: string;
+  description: string;
+  risk: FixRisk;
+  read_only: boolean;
+  placeholders: string[];
+  undo: string | null;
+  undo_note?: string;
+  note: string | null;
+  run_where: "openstack-cli" | "on-host";
+}
+
+export interface AgentFixProposal {
+  proposal_id: string;
+  status: string;
+  executed: boolean;
+  requires_approval: boolean;
+  symptom_id: string;
+  symptom_title: string;
+  host: string | null;
+  evidence: string;
+  plain_language: string;
+  primary: AgentFixStep;
+  alternatives: AgentFixStep[];
+  verify_commands: { command: string; description: string; note: string | null }[];
+  inputs_needed: string[];
+  doc_ref: string;
+}
+
 export interface AgentExpertData {
+  // v1.3: present when the Remediation agent proposed a fix on top of this
+  // runbook match; `hostname`/`evidence_line` are what it was built from.
+  fix_proposal?: AgentFixProposal;
+  hostname?: string | null;
+  evidence_line?: string;
   // v1.2: set when the expert was reached through the parallel incident
   // investigation -- the winning theory it walks through, and who else
   // flagged the same host.

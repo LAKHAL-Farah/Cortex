@@ -94,6 +94,20 @@ def _safe_detail(state: dict, node: str) -> dict:
             detail["summary"] = result.get("summary")
         if node == "openstack_expert":
             detail["chained_from"] = _last_agent_node(state.get("trace_events") or [], before=node)
+        if node == "remediation":
+            # Same "what triggered this" line openstack_expert reports, plus
+            # the at-a-glance facts of the proposal itself (never the full
+            # command text -- that is in `summary` and the response raw_data).
+            detail["chained_from"] = _last_agent_node(state.get("trace_events") or [], before=node)
+            proposal = ((result or {}).get("raw_data") or {}).get("fix_proposal")
+            if proposal:
+                detail["proposal"] = {
+                    "proposal_id": proposal.get("proposal_id"),
+                    "symptom_id": proposal.get("symptom_id"),
+                    "risk": (proposal.get("primary") or {}).get("risk"),
+                    "status": proposal.get("status"),
+                    "requires_approval": proposal.get("requires_approval"),
+                }
         if node == "anomaly":
             findings = state.get("agent_results") or []
             if findings:
