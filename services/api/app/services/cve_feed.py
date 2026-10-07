@@ -134,6 +134,40 @@ def _is_distro_patched(version: str) -> bool:
     return "ubuntu" in version or "deb" in version
 
 
+def _scan_match(name: str, version: str, scan: dict) -> dict:
+    """One match for a package (or one kernel release) from the collector's Trivy scan. The collector has
+    already collapsed thousands of per-CVE findings into this row (infra/collector/trivy_aggregate.py)."""
+    worst = scan.get("worst") or {}
+    severity = str(worst.get("severity", "medium")).lower()
+    if severity not in ("critical", "high", "medium", "low"):
+        severity = "low"
+    by_severity = scan.get("by_severity") or {}
+    breakdown = ", ".join(f"{n} {sev.lower()}" for sev, n in sorted(
+        by_severity.items(), key=lambda kv: ["CRITICAL", "HIGH", "MEDIUM", "LOW"].index(kv[0]) if kv[0] in
+        ("CRITICAL", "HIGH", "MEDIUM", "LOW") else 9))
+    count = scan.get("count", 0)
+    examples = ", ".join(scan.get("examples") or [])
+    if scan.get("kernel"):
+        if scan.get("running"):
+            text = (f"The running kernel ({version}) has {count} known CVE(s) that a newer kernel already fixes "
+                    f"({breakdown}). Install the newer kernel and reboot.")
+        else:
+            text = (f"Kernel {version} is installed but NOT running, and has {count} known CVE(s) fixed in newer "
+                    f"kernels ({breakdown}). Remove it: apt purge the linux-*-{version}-* packages, then apt autoremove --purge.")
+    else:
+        text = (f"{count} known CVE(s) in {name} ({breakdown}); {scan.get('fixable', 0)} have a fix available. "
+                f"Examples: {examples}.")
+    return {
+        "cve_id": worst.get("id") or "UNKNOWN",
+        "severity": severity,
+        "fixed_version": worst.get("fixed") or "no fix available yet",
+        "description": text,
+        "package": name,
+        "installed_version": version,
+        "cve_count": count,
+    }
+
+
 def match_cves(packages: list[dict]) -> list[dict]:
     """Pure -- no network calls. Returns one entry per (installed package,
     known CVE) pair, each carrying both the CVE's own fields and the
@@ -153,6 +187,10 @@ def match_cves(packages: list[dict]) -> list[dict]:
         version = pkg.get("version")
         if not name or not version:
             continue
+
+        scan = pkg.get("vulnerabilities")
+        if scan:
+            matches.append(_scan_match(name, version, scan))
 
         update = pkg.get("security_update")
         if update:

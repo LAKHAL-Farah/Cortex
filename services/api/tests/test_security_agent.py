@@ -327,3 +327,22 @@ def test_ebpf_finding_keeps_every_alert_up_to_the_configured_cap(monkeypatch):
     monkeypatch.setattr(security, "_MAX_EBPF_ALERTS", 5)
     raw = security.security_agent({"user_query": "anything suspicious on compute-02", "known_nodes": KNOWN_NODES})["agent_result"]["raw_data"]
     assert len(raw["ebpf_signal"]["alerts"]) == 5
+
+
+def test_match_cves_turns_scanner_rows_into_one_match_per_package_and_kernel():
+    packages = [
+        {"name": "libavcodec58", "version": "7:4.4.2-0ubuntu0.22.04.1", "vulnerabilities": {
+            "count": 63, "fixable": 0, "by_severity": {"MEDIUM": 60, "LOW": 3},
+            "worst": {"id": "CVE-2024-35365", "severity": "MEDIUM", "fixed": ""}, "examples": ["CVE-2024-35365", "CVE-2024-35366"]}},
+        {"name": "linux-kernel-6.8.0-40", "version": "6.8.0-40", "vulnerabilities": {
+            "kernel": True, "running": False, "count": 9000, "fixable": 9000, "by_severity": {"CRITICAL": 200, "HIGH": 5000},
+            "worst": {"id": "CVE-2024-46717", "severity": "CRITICAL", "fixed": "6.8.0-50.51"}, "examples": []}},
+        {"name": "curl", "version": "7.81.0-1ubuntu1.18"},
+    ]
+    matches = cve_feed.match_cves(packages)
+    assert [m["package"] for m in matches] == ["libavcodec58", "linux-kernel-6.8.0-40"]
+    ff = matches[0]
+    assert ff["severity"] == "medium" and ff["fixed_version"] == "no fix available yet" and ff["cve_count"] == 63
+    assert "60 medium, 3 low" in ff["description"]
+    kernel = matches[1]
+    assert kernel["severity"] == "critical" and "NOT running" in kernel["description"] and "apt purge" in kernel["description"]
