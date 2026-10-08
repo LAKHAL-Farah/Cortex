@@ -11,6 +11,7 @@ const RELATIONSHIP_LABEL: Record<TopologyEdgeType, string> = {
   SERVES: "serves",
   CONNECTS: "connects to",
   HAS_PORT: "has port",
+  RUNS_IN: "runs in",
 };
 
 export function relationshipLabel(relationship: TopologyEdgeType): string {

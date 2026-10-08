@@ -32,6 +32,15 @@ deterministically:
 - reuses the expert's read-only confirm commands as the "check before and
   after" block.
 
+**Simulated before it is shown (roadmap 4.2).** Every proposal is run through
+services/impact_simulator.py, which reads the Living Model and reports what the
+command would actually touch -- instances on the host, networks and routers its
+agents serve, compute capacity left, containers that would restart -- as an
+"Expected impact" section beside the fix, with an `effective_risk` that can only
+be raised (never lowered) by what the graph shows. If the graph cannot be read
+the proposal is still shown, marked as unsimulated; a simulator bug costs the
+proposal its impact section, never the proposal.
+
 Where it sits in the graph (see graph.py):
 
 - **Chained**, after openstack_expert: any diagnosis the expert matched to a
@@ -54,6 +63,7 @@ import logging
 import re
 from typing import Literal, NotRequired, Optional, TypedDict
 
+from ...services.impact_simulator import simulate_proposal
 from ..state import CortexState
 from .openstack_expert import openstack_expert_agent
 
@@ -256,6 +266,10 @@ def _heads_up(note: str) -> str:
     return _as_sentence(text[:1].upper() + text[1:])
 
 
+def _risk_sentence(risk: str) -> str:
+    return f"It is {_RISK_PHRASE[risk]}."
+
+
 def _as_sentence(text: str) -> str:
     text = text.strip()
     return text if not text or text[-1] in ".!?" else text + "."
@@ -320,7 +334,7 @@ def build_fix_proposal(raw_data: dict) -> Optional[FixProposal]:
         )
     else:
         plain_parts.append("The safest step Cortex can already spell out in full is the one below.")
-    plain_parts.append(f"It is {_RISK_PHRASE[primary['risk']]}.")
+    plain_parts.append(_risk_sentence(primary["risk"]))
 
     return {
         "proposal_id": _proposal_id(raw_data["matched_symptom_id"], host, primary["command"]),
@@ -355,7 +369,7 @@ def _code(command: str, indent: str = "") -> str:
 
 
 def _render_primary(step: FixStep, host: Optional[str]) -> str:
-    label = f"state-changing, {step['risk']} risk"
+    label = f"state-changing, {step.get('effective_risk', step['risk'])} risk"
     lines = [f"- **{step['description']}** _({label})_", _code(step["command"], "  ")]
     if step.get("note"):
         lines.append(f"  Heads-up: {_heads_up(step['note'])}")
@@ -371,6 +385,52 @@ def _render_primary(step: FixStep, host: Optional[str]) -> str:
     if step["undo"]:
         lines.append(_code(step["undo"], "  "))
     return "\n".join(lines)
+
+
+_VERDICT_LABEL = {
+    "safe": "No workload impact",
+    "caution": "Workloads keep running, but check the effects below",
+    "disruptive": "Disrupts running workloads",
+}
+
+
+def _verdict_tag(step: dict) -> str:
+    sim = step.get("simulation") or {}
+    return f", {sim['verdict']} when simulated" if sim.get("status") == "simulated" else ""
+
+
+def render_impact(proposal: dict) -> Optional[str]:
+    """The "Expected impact" section, or None when the proposal was never
+    run through the simulator (e.g. a unit test of the 4.1 builder alone)."""
+    sim = proposal.get("simulation")
+    if not sim:
+        return None
+    title = "#### Expected impact (simulated on the Living Model)"
+    if sim["status"] != "simulated":
+        return f"{title}\n{_callout('NOTE', '**Not simulated.** ' + sim['headline'])}"
+
+    verdict = sim["verdict"]
+    head = f"**{_VERDICT_LABEL[verdict]}.** {sim['headline']}"
+    lines = [title, _callout("WARNING" if verdict == "disruptive" else "NOTE", head)]
+    for e in sim["effects"]:
+        detail = f" -- {e['detail']}" if e.get("detail") else ""
+        lines.append(f"- **{e['name']}**: {e['effect']}{detail}")
+    if sim["effects_total"] > len(sim["effects"]):
+        lines.append("- ...and more; the headline above covers them.")
+    facts = [f"Lasts: {sim['duration']}."] if sim.get("duration") else []
+    facts.append("Reversible." if sim.get("reversible") else "Not reversible with one command.")
+    primary = proposal["primary"]
+    if primary.get("effective_risk") and primary["effective_risk"] != primary["risk"]:
+        facts.append(f"Rated {primary['effective_risk']} risk after simulation (the command alone looked {primary['risk']}).")
+    lines.append(" ".join(facts))
+    for w in sim.get("warnings") or []:
+        lines.append(f"Warning: {w}")
+    if sim.get("assumptions"):
+        lines.append("Assumptions: " + " ".join(sim["assumptions"]))
+    safer = proposal.get("safer_alternative")
+    if safer:
+        lines.append(f"A gentler option by simulation ({safer['verdict']}): **{safer['description']}**\n{_code(safer['command'])}")
+    return "\n\n".join([lines[0], lines[1], "\n".join(lines[2:])]) if len(lines) > 2 else "\n\n".join(lines)
 
 
 def render_fix_proposal(proposal: FixProposal) -> str:
@@ -390,11 +450,14 @@ def render_fix_proposal(proposal: FixProposal) -> str:
         f"#### In plain terms\n{proposal['plain_language']}",
         f"#### The fix\n{_render_primary(proposal['primary'], proposal['host'])}",
     ]
+    impact = render_impact(proposal)
+    if impact:
+        parts.append(impact)
     if verify:
         parts.append(f"#### Check it yourself, before and after\n{verify}")
     if proposal["alternatives"]:
         alts = "\n".join(
-            f"- **{a['description']}** _({a['risk']} risk)_\n{_code(a['command'], '  ')}"
+            f"- **{a['description']}** _({a.get('effective_risk', a['risk'])} risk{_verdict_tag(a)})_\n{_code(a['command'], '  ')}"
             + (f"\n  Heads-up: {_heads_up(a['note'])}" if a.get("note") else "")
             for a in proposal["alternatives"]
         )
@@ -454,6 +517,23 @@ _NO_STEP_NOTE = _callout(
 )
 
 
+def _with_simulation(proposal: FixProposal) -> FixProposal:
+    """Run the proposal through the impact simulator (4.2). A simulator bug
+    must cost the proposal its impact section, never the proposal itself --
+    simulate_proposal already turns an unreadable graph into an `unavailable`
+    record; this catches anything it did not anticipate."""
+    try:
+        simulated = simulate_proposal(proposal)
+    except Exception:  # noqa: BLE001
+        logger.exception("remediation: impact simulation failed, proposing without an impact section")
+        return proposal
+    # Keep the plain-language risk sentence in step with the simulated risk.
+    before, after = proposal["primary"]["risk"], simulated["primary"].get("effective_risk", proposal["primary"]["risk"])
+    if after != before:
+        simulated["plain_language"] = simulated["plain_language"].replace(_risk_sentence(before), _risk_sentence(after))
+    return simulated
+
+
 def remediation_agent(state: CortexState) -> CortexState:
     # Reached straight from the router: nothing has matched a symptom yet, so
     # run the expert's catalog matching first (same call the graph's own
@@ -473,6 +553,8 @@ def remediation_agent(state: CortexState) -> CortexState:
     raw_data = result.get("raw_data") or {}
     try:
         proposal = build_fix_proposal(raw_data)
+        if proposal is not None:
+            proposal = _with_simulation(proposal)
         rendered = render_fix_proposal(proposal) if proposal else None
     except Exception:  # noqa: BLE001 -- a proposal is an add-on; never cost the turn its diagnosis
         logger.exception("remediation: building a fix proposal failed, keeping the upstream answer as-is")

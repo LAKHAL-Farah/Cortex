@@ -4,6 +4,7 @@
   become: true
   roles:
     - node_exporter
+    - container_metrics
 
 - name: Deploy Prometheus server on the controller
   hosts: prometheus_server

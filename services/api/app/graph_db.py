@@ -38,6 +38,8 @@ SCHEMA_CONSTRAINTS = [
     # Phase 6 (topology_sync.py's instance/port sync) additions.
     "CREATE CONSTRAINT instance_id IF NOT EXISTS FOR (i:Instance) REQUIRE i.id IS UNIQUE",
     "CREATE CONSTRAINT port_id IF NOT EXISTS FOR (p:Port) REQUIRE p.id IS UNIQUE",
+    # Phase 4b (container_health.py): Docker containers (Kolla services).
+    "CREATE CONSTRAINT container_id IF NOT EXISTS FOR (k:Container) REQUIRE k.id IS UNIQUE",
 ]
 
 
@@ -176,6 +178,144 @@ def fetch_services() -> list[dict]:
             {**_serialize(record["service"]), "node_id": record["node_id"]}
             for record in records
         ]
+
+
+def fetch_containers() -> list[dict]:
+    """Every :Container vertex (Phase 4b, container_health.py) plus the id of
+    the :Service it implements, if any -- None for the containers that are
+    not an OpenStack API service (rabbitmq, mariadb, keystone, ...)."""
+    with driver.session() as session:
+        records = session.run(
+            """
+            MATCH (k:Container)
+            RETURN properties(k) AS container,
+                   [(s:Service)-[:RUNS_IN]->(k) | s.id][0] AS service_id
+            ORDER BY k.host, k.name
+            """
+        )
+        return [
+            {**_serialize(record["container"]), "service_id": record["service_id"]}
+            for record in records
+        ]
+
+
+def fetch_impact_context(node_id: str) -> dict | None:
+    """Everything the impact simulator (services/impact_simulator.py, roadmap
+    4.2) needs to answer "what would this change touch?" for an action on one
+    node -- read-only, one session, no writes. None if the node isn't in the
+    graph (the simulator reports that honestly rather than guessing).
+
+    Shape: the node's own properties; its :Service vertices (with what each
+    SERVES); its :Container vertices; the :Instance vertices that RUN_ON it;
+    for every Network a service on it SERVES, the instances with a port on
+    that network; for every Router it SERVES, how many floating IPs hang off
+    it; the whole fleet's nova-compute services (capacity left if this host
+    is taken out of scheduling); and control-plane service totals.
+    """
+    with driver.session() as session:
+        node = session.run(
+            "MATCH (n:Node {id: $id}) RETURN properties(n) AS node", id=node_id
+        ).single()
+        if node is None:
+            return None
+
+        services = [
+            {
+                "id": r["id"], "binary": r["binary"], "state": r["state"], "status": r["status"],
+                "serves": [dict(t) for t in r["serves"]],
+            }
+            for r in session.run(
+                """
+                MATCH (s:Service)-[:RUNS_ON]->(:Node {id: $id})
+                RETURN s.id AS id, s.binary AS binary, s.state AS state, s.status AS status,
+                       [(s)-[:SERVES]->(t) | {id: t.id, label: labels(t)[0], name: t.name}] AS serves
+                ORDER BY s.id
+                """,
+                id=node_id,
+            )
+        ]
+        containers = [
+            {"name": r["name"], "state": r["state"], "service_id": r["service_id"]}
+            for r in session.run(
+                """
+                MATCH (k:Container)-[:RUNS_ON]->(:Node {id: $id})
+                RETURN k.name AS name, k.state AS state,
+                       [(s:Service)-[:RUNS_IN]->(k) | s.id][0] AS service_id
+                ORDER BY k.name
+                """,
+                id=node_id,
+            )
+        ]
+        instances = [
+            {
+                "id": r["id"], "name": r["name"], "status": r["status"],
+                "vcpus": r["vcpus"], "ram_mb": r["ram_mb"],
+            }
+            for r in session.run(
+                """
+                MATCH (i:Instance)-[:RUNS_ON]->(:Node {id: $id})
+                RETURN i.id AS id, i.name AS name, i.status AS status,
+                       i.flavor_vcpus AS vcpus, i.flavor_ram_mb AS ram_mb
+                ORDER BY i.name
+                """,
+                id=node_id,
+            )
+        ]
+
+        served = [t for svc in services for t in svc["serves"]]
+        network_ids = sorted({t["id"] for t in served if t["label"] == "Network"})
+        router_ids = sorted({t["id"] for t in served if t["label"] == "Router"})
+
+        network_instances: dict[str, list[dict]] = {}
+        if network_ids:
+            for r in session.run(
+                """
+                MATCH (i:Instance)-[:HAS_PORT]->(:Port)-[:CONNECTS]->(:Subnet)-[:CONNECTS]->(n:Network)
+                WHERE n.id IN $ids
+                RETURN DISTINCT n.id AS network_id, i.id AS id, i.name AS name
+                """,
+                ids=network_ids,
+            ):
+                network_instances.setdefault(r["network_id"], []).append({"id": r["id"], "name": r["name"]})
+
+        router_floating_ips: dict[str, int] = {}
+        if router_ids:
+            for r in session.run(
+                """
+                MATCH (f:FloatingIP)-[:CONNECTS]->(r:Router)
+                WHERE r.id IN $ids
+                RETURN r.id AS router_id, count(f) AS floating_ips
+                """,
+                ids=router_ids,
+            ):
+                router_floating_ips[r["router_id"]] = r["floating_ips"]
+
+        compute_fleet = [
+            {"id": r["id"], "state": r["state"], "status": r["status"], "node_id": r["node_id"]}
+            for r in session.run(
+                """
+                MATCH (s:Service {binary: 'nova-compute'})
+                RETURN s.id AS id, s.state AS state, s.status AS status,
+                       [(s)-[:RUNS_ON]->(n:Node) | n.id][0] AS node_id
+                ORDER BY s.id
+                """
+            )
+        ]
+        totals = session.run(
+            "MATCH (s:Service) RETURN count(s) AS total, "
+            "sum(CASE WHEN s.state = 'up' THEN 1 ELSE 0 END) AS up"
+        ).single()
+
+    return {
+        "node": _serialize(node["node"]),
+        "services": services,
+        "containers": containers,
+        "instances": instances,
+        "network_instances": network_instances,
+        "router_floating_ips": router_floating_ips,
+        "compute_fleet": compute_fleet,
+        "control_plane": {"total": totals["total"] or 0, "up": totals["up"] or 0},
+    }
 
 
 def fetch_network_topology(network_id: str) -> dict | None:

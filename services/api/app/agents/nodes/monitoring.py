@@ -340,6 +340,11 @@ def _service_row(service: dict) -> dict:
         "source": service.get("source"),
         "status": service.get("status"),
         "state": service.get("state") or service.get("openstack_state"),
+        # Phase 4b: the state of the Docker container this service runs in
+        # (container_health.py) -- why a service shows "down" earlier than
+        # OpenStack's own heartbeat would say so. None until a container
+        # pass has run for the node.
+        "container_state": service.get("container_state"),
     }
 
 
@@ -388,6 +393,33 @@ def _narrate_services(query: str, rows: list[dict], insights: list[str], counts:
     except Exception:
         logger.exception("monitoring_agent: services narration failed, using computed lead")
         return fallback
+
+
+# Container states that mean "not doing its job" -- mirrors
+# services/container_health.PROBLEM_STATES (kept as a literal so this module
+# keeps its no-new-imports shape; test_container_health pins the two together).
+_CONTAINER_PROBLEM_STATES = {"unhealthy", "restarting", "down", "missing"}
+
+
+def _problem_containers(node, binaries: list[str]) -> list[dict]:
+    """Containers in a problem state that no :Service row already covers.
+    Best-effort: a graph failure here must never cost the services answer."""
+    try:
+        containers = graph_db.fetch_containers()
+    except Exception:
+        logger.exception("monitoring_agent: graph_db.fetch_containers() failed")
+        return []
+    rows = [
+        {"name": c.get("name"), "host": c.get("host"), "state": c.get("state")}
+        for c in containers
+        if c.get("state") in _CONTAINER_PROBLEM_STATES and not c.get("service_id")
+    ]
+    if node is not None:
+        rows = [r for r in rows if r["host"] == node["hostname"]]
+    if binaries:
+        # A question about specific services is not about unrelated containers.
+        rows = [r for r in rows if (r["name"] or "").replace("_", "-") in binaries]
+    return rows
 
 
 def _run_services(state: CortexState, known_nodes: list, node, binaries: list[str]) -> CortexState:
@@ -441,6 +473,17 @@ def _run_services(state: CortexState, known_nodes: list, node, binaries: list[st
     if not down and not unreachable and not unknown:
         insights.append("Nothing reporting down or unreachable.")
 
+    # Phase 4b: containers that are NOT an OpenStack API service (rabbitmq,
+    # mariadb, keystone, ...) have no row above, so one going down would be
+    # invisible here -- list the ones in a problem state, scoped like the rows.
+    problem_containers = _problem_containers(node, binaries)
+    if problem_containers:
+        insights.append(
+            "Containers not healthy: "
+            + ", ".join(f"{c['name']} on {c['host']} ({c['state']})" for c in problem_containers)
+            + "."
+        )
+
     scope_label = f" on {node['hostname']}" if node else " fleet-wide"
     narration = _narrate_services(state["user_query"], rows, insights, counts, scope_label)
     bullets = "\n".join(f"- {i}" for i in insights)
@@ -459,6 +502,7 @@ def _run_services(state: CortexState, known_nodes: list, node, binaries: list[st
             "services": rows,
             "counts": counts,
             "insights": insights,
+            "problem_containers": problem_containers,
         },
     }
     state["error"] = None

@@ -104,7 +104,10 @@ def _safe_detail(state: dict, node: str) -> dict:
                 detail["proposal"] = {
                     "proposal_id": proposal.get("proposal_id"),
                     "symptom_id": proposal.get("symptom_id"),
-                    "risk": (proposal.get("primary") or {}).get("risk"),
+                    "risk": (proposal.get("primary") or {}).get("effective_risk")
+                    or (proposal.get("primary") or {}).get("risk"),
+                    "simulation": (proposal.get("simulation") or {}).get("status"),
+                    "verdict": (proposal.get("simulation") or {}).get("verdict"),
                     "status": proposal.get("status"),
                     "requires_approval": proposal.get("requires_approval"),
                 }

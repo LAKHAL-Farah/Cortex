@@ -60,6 +60,17 @@ def list_topology_services():
         raise _graph_unavailable(exc) from exc
 
 
+@router.get("/containers", response_model=list[schemas.TopologyContainerOut])
+def list_topology_containers():
+    """Every :Container vertex (Phase 4b, see container_health.py and
+    adr-0012): Kolla's Docker containers per node with their normalized
+    state, and the :Service each one implements when there is one."""
+    try:
+        return graph_db.fetch_containers()
+    except (Neo4jError, ServiceUnavailable) as exc:
+        raise _graph_unavailable(exc) from exc
+
+
 @router.get("/networks", response_model=list[schemas.TopologyNetworkOut])
 def list_topology_networks():
     """Every :Network vertex with its structural neighbors nested inline:

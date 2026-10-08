@@ -229,9 +229,9 @@ export interface RcaSuggestion {
 // a handful of well-known keys (role, state, hostname, ...) off of it, read
 // defensively via lib/topology.ts's helpers.
 
-export type TopologyVertexLabel = "Node" | "Service" | "Network" | "Subnet" | "Router" | "FloatingIP" | "Instance" | "Port";
+export type TopologyVertexLabel = "Node" | "Service" | "Network" | "Subnet" | "Router" | "FloatingIP" | "Instance" | "Port" | "Container";
 
-export type TopologyEdgeType = "RUNS_ON" | "SERVES" | "CONNECTS" | "HAS_PORT";
+export type TopologyEdgeType = "RUNS_ON" | "SERVES" | "CONNECTS" | "HAS_PORT" | "RUNS_IN";
 
 export interface TopologyVertex {
   id: string;
@@ -752,6 +752,35 @@ export type AgentExpertCategory =
 // Copilot items (simulation, approval UI, execution, audit) advance `status`.
 export type FixRisk = "low" | "medium" | "high";
 
+// Roadmap 4.2 (services/api/app/services/impact_simulator.py): what the step
+// would touch, read off the Living Model before anyone approves it.
+// `unmodelled` = no rule for this command; `unavailable` = graph unreadable
+// or host unknown. Neither is ever shown as "safe".
+export type SimulationVerdict = "safe" | "caution" | "disruptive";
+
+export interface AgentSimulationEffect {
+  entity: string;
+  id: string;
+  name: string;
+  effect: string;
+  detail: string;
+}
+
+export interface AgentFixSimulation {
+  status: "simulated" | "unmodelled" | "unavailable";
+  verdict: SimulationVerdict | null;
+  headline: string;
+  effects: AgentSimulationEffect[];
+  effects_total: number;
+  counts: Record<string, number>;
+  assumptions: string[];
+  warnings: string[];
+  reversible: boolean | null;
+  duration: string | null;
+  action: { kind: string; verb: string | null; host: string | null; target: string | null };
+  model: { node?: string | null; node_health?: string };
+}
+
 export interface AgentFixStep {
   command: string;
   description: string;
@@ -762,6 +791,9 @@ export interface AgentFixStep {
   undo_note?: string;
   note: string | null;
   run_where: "openstack-cli" | "on-host";
+  // Added by the simulator (4.2); absent on a proposal that was never simulated.
+  simulation?: AgentFixSimulation;
+  effective_risk?: FixRisk;
 }
 
 export interface AgentFixProposal {
@@ -779,6 +811,10 @@ export interface AgentFixProposal {
   verify_commands: { command: string; description: string; note: string | null }[];
   inputs_needed: string[];
   doc_ref: string;
+  // Convenience copy of primary.simulation, plus the gentler runnable
+  // alternative when one simulates strictly lower-impact.
+  simulation?: AgentFixSimulation;
+  safer_alternative?: { command: string; description: string; verdict: SimulationVerdict } | null;
 }
 
 export interface AgentExpertData {

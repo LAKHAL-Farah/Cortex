@@ -1,0 +1,24 @@
+---
+- name: Pick this node's simulated containers from its group
+  ansible.builtin.set_fact:
+    sim_node_containers: >-
+      {{ (sim_containers_controllers if 'controllers' in group_names else [])
+         + (sim_containers_computes if 'computes' in group_names else [])
+         + (sim_containers_storages if 'storages' in group_names else []) }}
+    sim_now_epoch: "{{ ansible_date_time.epoch }}"
+
+- name: Ensure the textfile directory exists
+  ansible.builtin.file:
+    path: "{{ sim_textfile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the simulated container metrics (re-run to refresh the timestamp)
+  ansible.builtin.template:
+    src: cortex_containers.prom.j2
+    dest: "{{ sim_textfile_dir }}/cortex_containers.prom"
+    owner: root
+    group: root
+    mode: "0644"

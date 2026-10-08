@@ -1,0 +1,7 @@
+[Unit]
+Description=Cortex: write Docker container state for node_exporter's textfile collector
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cortex-container-metrics.sh /var/lib/node_exporter/textfile

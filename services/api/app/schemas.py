@@ -121,6 +121,20 @@ class TopologyServiceOut(BaseModel):
     node_id: str | None = None
 
 
+class TopologyContainerOut(BaseModel):
+    """A Docker container the Living Model tracks (Phase 4b). `state` is
+    running | unhealthy | restarting | down | missing | unknown; `service_id`
+    is the :Service it implements, None for rabbitmq/mariadb/keystone-style
+    containers that are not an OpenStack API service."""
+
+    model_config = ConfigDict(extra="allow")
+    id: str
+    name: str | None = None
+    host: str | None = None
+    state: str | None = None
+    service_id: str | None = None
+
+
 class TopologyNetworkOut(BaseModel):
     model_config = ConfigDict(extra="allow")
     id: str

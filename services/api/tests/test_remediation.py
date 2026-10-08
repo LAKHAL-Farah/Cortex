@@ -19,6 +19,7 @@ import app.agents.intent_router as intent_router
 import app.agents.nodes.monitoring as monitoring
 import app.agents.nodes.openstack_expert as expert
 import app.agents.nodes.remediation as remediation
+import app.services.impact_simulator as impact_simulator
 from app.agents.graph import app_graph
 from app.agents.nodes.critic import critic_check
 from app.agents.nodes.openstack_expert_catalog import CATALOG
@@ -49,6 +50,8 @@ def _hermetic_expert(monkeypatch):
     monkeypatch.setattr(expert, "load_published_entries", lambda: [])
     monkeypatch.setattr(expert, "search_official_docs", lambda query, top_k=3: [])
     monkeypatch.setattr(expert, "run_web_search", lambda query, max_results=5: [])
+    # 4.2: proposals are simulated against the Living Model (Neo4j) -- none here.
+    monkeypatch.setattr(impact_simulator, "_fetch_context", lambda host: None)
 
 
 def _expert_result(symptom_id, evidence=EVIDENCE, hostname="compute-02", diagnosed_by="monitoring"):

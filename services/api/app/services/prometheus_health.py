@@ -38,7 +38,7 @@ import logging
 from datetime import datetime
 
 from .. import graph_db, models
-from . import alert_email
+from . import alert_email, container_health
 from .prometheus_client import query
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,9 @@ UP_QUERY = 'up{job="node_exporter"}'
 SERVICE_STATE_SEVERITY = {
     "down": "critical",         # OpenStack itself reports the service stopped
     "unreachable": "critical",  # OpenStack says up, but its host is confirmed down
+    # Phase 4b (container_health.py): never a reconciled Service.state, but a
+    # container alert row's state -- running, yet failing its own healthcheck.
+    "unhealthy": "high",
 }
 
 # Mirrors anomaly_detector._SEVERITY_RANK (severity only ratchets up while
@@ -101,7 +104,11 @@ def fetch_node_health() -> dict[str, str]:
     return health
 
 
-def reconcile_service_state(openstack_state: str | None, node_health: str | None) -> str | None:
+def reconcile_service_state(
+    openstack_state: str | None,
+    node_health: str | None,
+    container_state: str | None = None,
+) -> str | None:
     """The cross-check decision itself -- see adr-0003 decision 2 for the
     full table and reasoning. In short: OpenStack's own "down" always
     wins (it's a more specific signal than host-level `up`); OpenStack
@@ -109,11 +116,22 @@ def reconcile_service_state(openstack_state: str | None, node_health: str | None
     rather than trusting either side outright; anything else (including
     "up" against an "unknown" host) passes `openstack_state` through
     unchanged.
+
+    Phase 4b adds the container signal (container_health.py): OpenStack "up"
+    on a reachable host, but the container that runs the service is down,
+    crash-looping or gone -> "down". OpenStack's own heartbeat takes about a
+    minute to notice that, and never notices a container that is merely
+    unhealthy, so this is the earlier (and for rabbitmq-style containers, the
+    only) signal. A host that is itself down still wins ("unreachable"): the
+    container's state is then meaningless. `None`/"running"/"unhealthy"/
+    "unknown" never change the result.
     """
     if openstack_state != "up":
         return openstack_state
     if node_health == "down":
         return "unreachable"
+    if container_state in container_health.SERVICE_DOWN_STATES:
+        return "down"
     return "up"
 
 
@@ -159,10 +177,14 @@ def _sync_service_state_to_graph(session) -> list[dict]:
         """
         MATCH (s:Service)
         OPTIONAL MATCH (s)-[:RUNS_ON]->(n:Node)
-        WITH s, coalesce(n.health, 'unknown') AS node_health
-        SET s.state = CASE
+        OPTIONAL MATCH (s)-[:RUNS_IN]->(k:Container)
+        WITH s, coalesce(n.health, 'unknown') AS node_health,
+             coalesce(k.state, 'unknown') AS container_state
+        SET s.container_state = container_state,
+            s.state = CASE
             WHEN s.openstack_state <> 'up' THEN s.openstack_state
             WHEN node_health = 'down' THEN 'unreachable'
+            WHEN container_state IN ['restarting', 'down', 'missing'] THEN 'down'
             ELSE 'up'
         END
         RETURN s.id AS service_id, s.state AS state
@@ -282,11 +304,19 @@ def sync_prometheus_health(db=None) -> dict:
 
     with graph_db.driver.session() as session:
         _sync_node_health_to_graph(session, health)
+
+    # Phase 4b: container states must be in the graph BEFORE services are
+    # reconciled, so a container that just died is reflected in this same
+    # pass. Never raises (see sync_container_health); a skipped container pass
+    # just leaves the last known container states in place.
+    container_pass = container_health.sync_container_health()
+
+    with graph_db.driver.session() as session:
         service_states = _sync_service_state_to_graph(session)
 
     if db is not None:
         try:
-            _sync_service_state_anomalies(db, service_states)
+            _sync_service_state_anomalies(db, service_states + container_pass["alert_rows"])
         except Exception:
             # Best-effort, same reasoning as crud.record_topology_sync_run's
             # own try/except in main.py: a Postgres hiccup here shouldn't
