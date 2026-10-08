@@ -20,6 +20,7 @@ from .routers import conversations
 from .routers import settings
 from .routers import quotas
 from .routers import agents
+from .routers import remediation
 from .routers import security
 from .routers import openstack_docs
 from .routers import openstack_expert
@@ -426,6 +427,7 @@ app.include_router(knowledge.router, dependencies=_auth_required)
 # poll on a schedule.
 app.include_router(conversations.router, dependencies=_auth_required)
 app.include_router(agents.router, dependencies=_auth_required)
+app.include_router(remediation.router, dependencies=_auth_required)
 # Phase Sec-2: direct, pollable GET endpoints for the Security Agent's
 # findings, the same shape network.router gives the Network agent's data
 # -- see routers/security.py's module docstring for why this doesn't

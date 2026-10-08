@@ -11,7 +11,7 @@ from ..auth import get_current_user
 from ..db import get_db
 from ..agents.graph import app_graph
 from ..agents.trace import new_trace_id
-from ..services import security_rbac
+from ..services import remediation_approval, security_rbac
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -31,6 +31,34 @@ _security_agent_involved = security_rbac.security_agent_involved
 _redact_security_raw_data = security_rbac.redact_security_raw_data
 _filter_security_response_for_role = security_rbac.filter_security_response_for_role
 _filter_security_steps_for_role = security_rbac.filter_security_steps_for_role
+
+
+def _record_fix_proposal(
+    db: Session, *, trace_id: uuid.UUID, agent_result: dict, current_user: models.User
+) -> dict | None:
+    """Roadmap 4.3: when this turn ended with a remediation `fix_proposal`,
+    keep a server-side copy and log that it was proposed, so a later
+    approve / reject / ask-for-more-info refers to something Cortex itself
+    holds. Returns the handle the UI needs (`id`, `status`) or None.
+
+    A failure here costs the turn its approval buttons, never the answer --
+    the same "an add-on must not cost the diagnosis" rule the remediation
+    agent itself follows. With no handle the UI simply offers no decision, so
+    nothing can be approved that was not recorded.
+    """
+    proposal = (agent_result.get("raw_data") or {}).get("fix_proposal")
+    if not proposal:
+        return None
+    try:
+        row = remediation_approval.record_proposal(
+            db, trace_id=trace_id, proposal=proposal, requested_by=current_user
+        )
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("remediation: could not record fix proposal %s; answering without approval controls",
+                         proposal.get("proposal_id"))
+        return None
+    return {"id": str(row.id), "status": row.status}
 
 
 @router.post("/orchestrate", response_model=schemas.AgentOrchestrateResponse)
@@ -131,6 +159,13 @@ def orchestrate(
         security_involved=security_involved,
     )
 
+    # Roadmap 4.3: record the fix proposal (if any) the turn just produced.
+    # Done after the trace row exists (the proposal links to it) and before
+    # the response is built, so the handle can ride along in raw_data.
+    approval_handle = _record_fix_proposal(
+        db, trace_id=uuid.UUID(trace_id), agent_result=agent_result, current_user=current_user
+    )
+
     # v0.9: RBAC output filtering -- applied here, to the *response*, never
     # upstream in the graph or to what gets persisted just above. The
     # persisted models.AgentTrace row always keeps the full, unfiltered
@@ -141,6 +176,14 @@ def orchestrate(
     filtered_answer, filtered_raw_data = _filter_security_response_for_role(
         result["final_answer"], agent_result.get("raw_data"), result["target_agent"], current_user.role
     )
+
+    if approval_handle and isinstance((filtered_raw_data or {}).get("fix_proposal"), dict):
+        # Copies, not an in-place edit: filtered_raw_data may be the very
+        # object the graph produced.
+        filtered_raw_data = {
+            **filtered_raw_data,
+            "fix_proposal": {**filtered_raw_data["fix_proposal"], "approval": approval_handle},
+        }
 
     return schemas.AgentOrchestrateResponse(
         answer=filtered_answer,

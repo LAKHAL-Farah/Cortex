@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Boolean, DateTime, CheckConstraint, ForeignKey, func
+from sqlalchemy import BigInteger, String, Integer, Boolean, DateTime, CheckConstraint, ForeignKey, Identity, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import Column, Float, UniqueConstraint, Text, JSON
@@ -475,6 +475,115 @@ class AgentTrace(Base):
     security_involved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RemediationProposal(Base):
+    """Roadmap 4.3 -- the server-side record of one fix proposal shown to a
+    person, so a decision (approve / reject / ask for more info) refers to
+    something Cortex itself kept rather than to whatever the browser says it
+    was shown.
+
+    One row per (orchestrate turn, `proposal_id`): `proposal_id` is the
+    remediation agent's deterministic hash of (symptom, host, command), so
+    the *same* incident proposed on two different days yields the same
+    `proposal_id` but two rows here -- each with its own simulation snapshot
+    and its own decision history. A decision on yesterday's proposal must
+    never silently count for today's.
+
+    `proposal` is the full `fix_proposal` object exactly as the agent emitted
+    it (command, risk, simulation, undo, ...) and is never rewritten after
+    insert; only `status`/`updated_at` move. That frozen copy is what the
+    audit entries' `proposal_digest` is computed from.
+
+    `status` is a cache of the latest audit entry's `to_status`, kept on this
+    row so "is this still open" is a primary-key read; the audit log is the
+    source of truth.
+    """
+
+    __tablename__ = "remediation_proposals"
+
+    __table_args__ = (
+        UniqueConstraint("trace_id", "proposal_id", name="uq_remediation_proposals_trace_proposal"),
+        CheckConstraint(
+            "status IN ('proposed','approved','rejected','info_requested')",
+            name="ck_remediation_proposals_status_allowed",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # The orchestrate turn that produced it. SET NULL rather than CASCADE: if
+    # old traces are ever purged, the proposal and its audit trail stay.
+    trace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_traces.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    proposal_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="proposed", index=True)
+    proposal: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # Who triggered the turn that produced the proposal (not who decides it).
+    requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class RemediationAuditEntry(Base):
+    """Roadmap 4.3 -- the append-only audit trail of everything that happens
+    to a remediation proposal: it was proposed, then approved / rejected /
+    more information was asked for. One row per event, never updated or
+    deleted (§7.11: "journal d'audit obligatoire et infalsifiable").
+
+    Three things make "never updated" more than a convention:
+
+    - the migration installs a Postgres trigger that rejects UPDATE, DELETE
+      and TRUNCATE on this table, so not even application code can rewrite
+      history by accident;
+    - the actor columns are *snapshots* (`actor_username`, `actor_role`) and
+      `actor_user_id` is deliberately NOT a foreign key -- an FK with
+      ON DELETE SET NULL would itself be an UPDATE of an audit row the
+      moment an account is removed, and that must stay possible without
+      touching the trail;
+    - every row carries `prev_hash` / `entry_hash`, a SHA-256 chain over the
+      whole table in `id` order (services/remediation_approval.py), so a row
+      edited or removed behind the trigger's back (superuser, restored
+      backup) shows up as a break in `verify_chain`.
+
+    `details` carries what was actually decided on: the exact command, host,
+    risk and simulation verdict at that moment, and `proposal_digest`.
+    `created_at` is set by the application (not a server default) because it
+    is part of the hashed content and must be known before the insert.
+    """
+
+    __tablename__ = "remediation_audit_log"
+
+    __table_args__ = (
+        CheckConstraint(
+            "event IN ('proposed','approved','rejected','info_requested')",
+            name="ck_remediation_audit_log_event_allowed",
+        ),
+    )
+
+    # Identity (not UUID): the chain needs a total order that is cheap to read
+    # back, and a database-assigned sequence is exactly that.
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    proposal_row_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("remediation_proposals.id"), nullable=False, index=True
+    )
+    # Denormalised copy of RemediationProposal.proposal_id so a log line is
+    # readable on its own.
+    proposal_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    event: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    from_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    actor_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    actor_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    prev_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    entry_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
 class AgentSessionMemory(Base):

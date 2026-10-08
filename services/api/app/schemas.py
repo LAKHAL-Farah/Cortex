@@ -464,6 +464,78 @@ class SecurityAuditLogResponse(BaseModel):
     entries: list[SecurityAuditLogEntry]
 
 
+# ---------------------------------------------------------------------
+# Roadmap 4.3: approve / reject / ask-for-more-info on a proposed fix.
+# ---------------------------------------------------------------------
+
+RemediationDecisionKind = Literal["approve", "reject", "ask_more_info"]
+RemediationStatus = Literal["proposed", "approved", "rejected", "info_requested"]
+
+
+class RemediationDecisionRequest(BaseModel):
+    """The whole request body -- deliberately no command, risk or proposal
+    here. What is being decided on is the server's own snapshot of the
+    proposal (models.RemediationProposal), never something the caller sends.
+    A comment is optional in the schema because whether one is *required*
+    depends on the decision and the proposal (services/remediation_approval.py).
+    """
+    decision: RemediationDecisionKind
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class RemediationAuditEntryOut(BaseModel):
+    id: int
+    proposal_row_id: uuid.UUID
+    proposal_id: str
+    event: RemediationStatus
+    from_status: RemediationStatus | None
+    to_status: RemediationStatus
+    actor_username: str | None
+    actor_role: str | None
+    comment: str | None
+    details: dict
+    entry_hash: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RemediationProposalOut(BaseModel):
+    id: uuid.UUID
+    proposal_id: str
+    trace_id: uuid.UUID | None
+    status: RemediationStatus
+    # What was proposed, flattened for display; the full snapshot is not
+    # returned (the chat turn that produced it already carries it).
+    command: str | None
+    host: str | None
+    effective_risk: str | None
+    simulation_verdict: str | None
+    inputs_needed: list[str]
+    created_at: datetime
+    updated_at: datetime | None
+    # Whether *this caller* may approve/reject (ask_more_info is always open).
+    can_decide: bool
+    history: list[RemediationAuditEntryOut]
+
+
+class RemediationDecisionResponse(BaseModel):
+    proposal: RemediationProposalOut
+    entry: RemediationAuditEntryOut
+
+
+class RemediationAuditLogResponse(BaseModel):
+    since: str
+    entries: list[RemediationAuditEntryOut]
+
+
+class RemediationChainReport(BaseModel):
+    ok: bool
+    entries_checked: int
+    broken_at: int | None = None
+    reason: str | None = None
+
+
 class AgentStatsResponse(BaseModel):
     since: str
     total_invocations: int

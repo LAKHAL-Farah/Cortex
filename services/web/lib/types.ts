@@ -815,6 +815,47 @@ export interface AgentFixProposal {
   // alternative when one simulates strictly lower-impact.
   simulation?: AgentFixSimulation;
   safer_alternative?: { command: string; description: string; verdict: SimulationVerdict } | null;
+  // Roadmap 4.3: handle to the server-side record of this proposal, added by
+  // POST /agents/orchestrate. Absent when the proposal could not be recorded
+  // -- in which case no decision can be taken on it. `status` here is only
+  // the status at the time of the turn; the live one comes from
+  // GET /api/remediation/proposals/{id}.
+  approval?: { id: string; status: RemediationStatus };
+}
+
+export type RemediationStatus = "proposed" | "approved" | "rejected" | "info_requested";
+export type RemediationDecisionKind = "approve" | "reject" | "ask_more_info";
+
+export interface RemediationAuditEntry {
+  id: number;
+  proposal_id: string;
+  event: RemediationStatus;
+  from_status: RemediationStatus | null;
+  to_status: RemediationStatus;
+  actor_username: string | null;
+  actor_role: string | null;
+  comment: string | null;
+  details: Record<string, unknown>;
+  entry_hash: string;
+  created_at: string;
+}
+
+export interface RemediationProposalRecord {
+  id: string;
+  proposal_id: string;
+  trace_id: string | null;
+  status: RemediationStatus;
+  command: string | null;
+  host: string | null;
+  effective_risk: string | null;
+  simulation_verdict: string | null;
+  inputs_needed: string[];
+  created_at: string;
+  updated_at: string | null;
+  // May *this* user approve/reject right now? (Asking for more info is
+  // always allowed while the proposal is open.)
+  can_decide: boolean;
+  history: RemediationAuditEntry[];
 }
 
 export interface AgentExpertData {

@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import Link from "next/link";
+import { RemediationApproval } from "@/components/RemediationApproval";
 import {
   Activity,
   AlertTriangle,
@@ -2078,6 +2079,14 @@ function FixProposalPanel({ proposal }: { proposal: AgentFixProposal }) {
           }))}
         />
       </div>
+
+      {proposal.approval ? (
+        <RemediationApproval approvalId={proposal.approval.id} />
+      ) : (
+        <p className="text-[12px] leading-relaxed text-text-muted">
+          This proposal was not recorded, so it cannot be approved or rejected here. Ask again to get a fresh one.
+        </p>
+      )}
     </div>
   );
 }
