@@ -56,6 +56,14 @@ class AlertEmailSettingsUpdate(BaseModel):
         return email
 
 
+class WeeklyDigestSettingsUpdate(BaseModel):
+    """Schedule for the weekly digest (roadmap 4.5). UTC, so the schedule
+    means the same thing regardless of where the API host or the reader is."""
+    enabled: bool = True
+    weekday: int = Field(ge=0, le=6, description="0 = Monday ... 6 = Sunday")
+    hour_utc: int = Field(ge=0, le=23)
+
+
 class NodeUpdate(NodeBase):
     pass
 

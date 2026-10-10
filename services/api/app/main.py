@@ -29,6 +29,7 @@ from .auth import get_current_user, hash_password
 from . import models
 from .services.anomaly_detector import detect_anomalies
 from .services.quota_budget_monitor import check_quota_and_budget
+from .services.weekly_digest import DIGEST_CHECK_INTERVAL_SECONDS, send_due_digest
 from .services.baseline_builder import compute_baselines
 from .services.security_snapshot_builder import capture_security_group_snapshots
 from .services.security_scan_cache import run_security_scan
@@ -384,6 +385,12 @@ async def lifespan(app: FastAPI):
                 status_fn=_security_scan_status,
                 record_fn=crud.record_security_scan_run,
             )
+        ),
+        # Roadmap 4.5: weekly digest. Cheap tick -- send_due_digest() is a
+        # single-row read unless a send is actually due, and keeps its own
+        # "already sent this week" state in the database (see its docstring).
+        asyncio.create_task(
+            _run_periodic(send_due_digest, DIGEST_CHECK_INTERVAL_SECONDS, "weekly digest")
         ),
     ]
     try:

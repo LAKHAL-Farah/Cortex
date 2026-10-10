@@ -63,6 +63,9 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      # Roadmap 4.5 weekly digest: base URL for the email's "Open Cortex" button
+      # (button is hidden when unset). Schedule itself is set in Settings > Weekly digest.
+      CORTEX_PUBLIC_URL: ${CORTEX_PUBLIC_URL:-}
       PROMETHEUS_FILE_SD_PATH: /file_sd/nodes.json
       CORTEX_ANSIBLE_DIR: ${CORTEX_ANSIBLE_DIR:-/infra/ansible}
       ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
@@ -106,6 +109,8 @@ services:
       OPENSTACK_DOCS_MIN_SCORE: ${OPENSTACK_DOCS_MIN_SCORE:-0.25}
       OPENSTACK_DOCS_FETCH_TIMEOUT: ${OPENSTACK_DOCS_FETCH_TIMEOUT:-15}
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ../services/api:/app
       - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd

@@ -228,3 +228,9 @@ services:
       - cortex-net           # not strictly needed, but lets you curl it from the api container if useful
       - cortex-sandbox        # to reach controller-sim / compute*-sim
       - cortex-sandbox-storage # to reach storage-sim
+
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "8025:8025"
+      - "1025:1025"

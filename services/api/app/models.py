@@ -173,6 +173,15 @@ class AlertEmailSettings(Base):
     recipient_email = Column(String(320), nullable=False)
     enabled = Column(Boolean, nullable=False, default=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    # Roadmap 4.5 -- weekly digest schedule, kept on this same single-row
+    # table (same recipient, same SMTP) rather than a second settings table.
+    # Day/hour are UTC so the schedule means the same thing on every host;
+    # `digest_last_sent_at` is what makes the scheduler restart-safe (see
+    # services/weekly_digest.py::send_due_digest).
+    digest_enabled = Column(Boolean, nullable=False, default=True, server_default="true")
+    digest_weekday = Column(Integer, nullable=False, default=0, server_default="0")  # 0=Monday .. 6=Sunday
+    digest_hour_utc = Column(Integer, nullable=False, default=8, server_default="8")
+    digest_last_sent_at = Column(DateTime, nullable=True)
 
 
 class EwmaState(Base):
