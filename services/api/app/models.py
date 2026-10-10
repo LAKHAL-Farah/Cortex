@@ -302,6 +302,110 @@ class QuotaAlert(Base):
     )
 
 
+class ProjectFinopsSetting(Base):
+    """Owner-editable FinOps metadata for one OpenStack project: which
+    department it is charged back to, and its monthly budget. Kept in
+    Postgres (not env JSON) so the cloud owner can change it from the
+    Quotas & Budget page; the QUOTA_PROJECT_BUDGETS_EUR /
+    FINOPS_PROJECT_DEPARTMENTS env vars remain as bootstrap defaults for
+    projects with no row here. See services/finops.py.
+    """
+    __tablename__ = "project_finops_settings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(String, nullable=False, unique=True, index=True)
+    department = Column(String, nullable=True)
+    monthly_budget_eur = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by = Column(String, nullable=True)
+
+
+class FinopsProjectSample(Base):
+    """Hourly metering row for one project: what it had reserved, and the
+    monthly run-rate (EUR/month) each cost component was running at, in the
+    hour starting at `sampled_at`.
+
+    Cost is stored as a run-rate at sample time rather than recomputed at
+    report time, so a later change to the cost pool, the allocation ratios
+    or the hardware doesn't silently rewrite last month's chargeback. A
+    sample's actual cost is `run_rate / hours_in_that_month`; a month's
+    bill is the sum of its samples (see services/finops_report.py).
+
+    Written by quota_budget_monitor.check_quota_and_budget(), upserted per
+    (project, hour): the periodic pass runs every few minutes, the last pass
+    inside an hour wins.
+    """
+    __tablename__ = "finops_project_samples"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(String, nullable=False, index=True)
+    project_name = Column(String, nullable=False)
+    department = Column(String, nullable=True)
+    sampled_at = Column(DateTime, nullable=False, index=True)  # naive UTC, truncated to the hour
+
+    instances = Column(Float, nullable=False, default=0.0)
+    vcpus = Column(Float, nullable=False, default=0.0)
+    ram_mb = Column(Float, nullable=False, default=0.0)
+    volumes = Column(Float, nullable=False, default=0.0)
+    gigabytes = Column(Float, nullable=False, default=0.0)
+    floating_ips = Column(Float, nullable=False, default=0.0)
+
+    compute_eur_month = Column(Float, nullable=False, default=0.0)
+    storage_eur_month = Column(Float, nullable=False, default=0.0)
+    network_eur_month = Column(Float, nullable=False, default=0.0)
+    platform_eur_month = Column(Float, nullable=False, default=0.0)
+    idle_eur_month = Column(Float, nullable=False, default=0.0)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "sampled_at", name="uq_finops_project_sample_hour"),
+    )
+
+
+class FinopsCloudSample(Base):
+    """Hourly cloud-level snapshot: physical vs sellable vs reserved vs
+    promised (sum of quotas) capacity, the cost pools, and the derived unit
+    rates. Powers the Overview tab; the latest row is "now".
+    """
+    __tablename__ = "finops_cloud_samples"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    sampled_at = Column(DateTime, nullable=False, unique=True, index=True)
+
+    physical_vcpus = Column(Float, nullable=True)
+    physical_ram_mb = Column(Float, nullable=True)
+    storage_gb = Column(Float, nullable=True)
+    compute_nodes = Column(Integer, nullable=False, default=0)
+    cpu_allocation_ratio = Column(Float, nullable=False, default=1.0)
+    ram_allocation_ratio = Column(Float, nullable=False, default=1.0)
+
+    allocated_vcpus = Column(Float, nullable=False, default=0.0)
+    allocated_ram_mb = Column(Float, nullable=False, default=0.0)
+    allocated_gb = Column(Float, nullable=False, default=0.0)
+    # Sum of project quota ceilings (what the cloud has promised). `unlimited_*`
+    # counts projects with no ceiling, which makes the promise unbounded.
+    committed_vcpus = Column(Float, nullable=False, default=0.0)
+    committed_ram_mb = Column(Float, nullable=False, default=0.0)
+    committed_gb = Column(Float, nullable=False, default=0.0)
+    unlimited_vcpus = Column(Integer, nullable=False, default=0)
+    unlimited_ram = Column(Integer, nullable=False, default=0)
+    unlimited_gb = Column(Integer, nullable=False, default=0)
+
+    monthly_cost_eur = Column(Float, nullable=False, default=0.0)
+    pool_compute_eur = Column(Float, nullable=False, default=0.0)
+    pool_storage_eur = Column(Float, nullable=False, default=0.0)
+    pool_platform_eur = Column(Float, nullable=False, default=0.0)
+    rate_vcpu_eur = Column(Float, nullable=True)
+    rate_ram_gb_eur = Column(Float, nullable=True)
+    rate_storage_gb_eur = Column(Float, nullable=True)
+    rate_floating_ip_eur = Column(Float, nullable=False, default=0.0)
+
+    allocated_eur_month = Column(Float, nullable=False, default=0.0)
+    idle_eur_month = Column(Float, nullable=False, default=0.0)
+    oversold = Column(Boolean, nullable=False, default=False)
+    # JSON: {"capacity_source": {...}, "unpriced": [...], "warnings": [...]}
+    details = Column(JSON, nullable=True)
+
+
 class Conversation(Base):
     """One Copilot chat thread (adr-0005's knowledge chat is stateless per
     request -- this is what turns that into something a user can leave and

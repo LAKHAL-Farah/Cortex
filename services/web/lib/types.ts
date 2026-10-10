@@ -432,6 +432,143 @@ export interface QuotaResyncSummary {
   };
 }
 
+// -- FinOps (private-cloud cost model) -------------------------------------
+//
+// See services/api/app/services/finops.py. A self-hosted cloud has a fixed
+// monthly bill, not a price list: unit rates are derived (pool / sellable
+// capacity), every project is charged for what it has *reserved*, and what
+// nobody reserved is idle capacity.
+
+export interface FinopsCapacityRow {
+  physical: number | null;
+  sellable: number | null; // physical x planned allocation ratio
+  allocated: number; // reserved by projects right now
+  committed: number; // sum of project quota ceilings (what the cloud has promised)
+  unlimited_projects: number; // projects with no ceiling -> promise is unbounded
+  allocated_pct: number | null;
+  committed_pct: number | null;
+}
+
+export interface FinopsCloud {
+  monthly_cost_eur: number;
+  pools: { compute_eur: number; storage_eur: number; platform_eur: number };
+  rates: {
+    vcpu_month_eur: number | null;
+    ram_gb_month_eur: number | null;
+    storage_gb_month_eur: number | null;
+    floating_ip_month_eur: number;
+  };
+  cost: { allocated_eur: number; idle_eur: number; platform_eur: number; utilization_pct: number | null };
+  capacity: { vcpus: FinopsCapacityRow; ram_mb: FinopsCapacityRow; gigabytes: FinopsCapacityRow };
+  allocation_ratios: { cpu: number; ram: number };
+  compute_nodes: number;
+  oversold: boolean;
+  capacity_source: Record<string, string>;
+  unpriced: string[];
+  warnings: string[];
+  physical_utilization: { compute_nodes: number; cpu_percent: number; memory_percent: number } | null;
+}
+
+export interface FinopsUsageRow {
+  used: number;
+  quota: number | null; // null = unlimited
+  quota_ratio: number | null;
+}
+
+export interface FinopsProject {
+  project_id: string;
+  project_name: string;
+  department: string;
+  usage: {
+    instances: FinopsUsageRow;
+    vcpus: FinopsUsageRow;
+    ram_mb: FinopsUsageRow;
+    gigabytes: FinopsUsageRow;
+    volumes: FinopsUsageRow;
+    floating_ips: FinopsUsageRow;
+  };
+  cloud_share: { vcpus_pct: number | null; ram_pct: number | null; storage_pct: number | null };
+  cost: {
+    compute_eur: number;
+    storage_eur: number;
+    network_eur: number;
+    direct_eur: number;
+    platform_eur: number;
+    idle_eur: number;
+    fully_loaded_eur: number;
+    share_pct: number;
+  };
+  budget_eur: number | null;
+  budget_used_ratio: number | null;
+  severity: QuotaSeverity;
+  breaches: number;
+}
+
+export type FinopsOverview =
+  | { available: false; currency: string }
+  | {
+      available: true;
+      currency: string;
+      updated_at: string;
+      cloud: FinopsCloud;
+      projects: FinopsProject[];
+    };
+
+export interface FinopsReportProject {
+  project_id: string;
+  project_name: string;
+  department: string;
+  hours_metered: number;
+  avg_vcpus: number;
+  avg_ram_gb: number;
+  avg_storage_gb: number;
+  compute_eur: number;
+  storage_eur: number;
+  network_eur: number;
+  direct_eur: number;
+  platform_eur: number;
+  idle_eur: number;
+  fully_loaded_eur: number;
+  projected_month_end_eur: number | null;
+  budget_eur: number | null;
+  budget_used_ratio: number | null;
+  share_pct: number;
+}
+
+export interface FinopsReportDepartment {
+  department: string;
+  projects: number;
+  direct_eur: number;
+  platform_eur: number;
+  idle_eur: number;
+  fully_loaded_eur: number;
+  budget_eur: number | null;
+  share_pct: number;
+}
+
+export interface FinopsReport {
+  period: string;
+  generated_at: string;
+  currency: string;
+  is_current_period: boolean;
+  hours_in_month: number;
+  hours_metered: number;
+  coverage_pct: number;
+  totals: {
+    direct_eur: number;
+    platform_eur: number;
+    idle_eur: number;
+    fully_loaded_eur: number;
+    projected_month_end_eur: number | null;
+    cloud_bill_metered_eur: number;
+    unrecovered_eur: number;
+  };
+  departments: FinopsReportDepartment[];
+  projects: FinopsReportProject[];
+  available_periods: string[];
+  method: string[];
+}
+
 // -- Knowledge copilot (adr-0005) ------------------------------------------
 
 export type ChatRole = "user" | "assistant";

@@ -508,35 +508,95 @@ L3_AGENT_ROUTERS = {
     "a1": [ROUTERS[0]],
 }
 
-# ---- quota/budget monitor seed data (services/quota_budget_monitor.py) ----
-# One project (matches the token's scoped project above: id
-# "sandbox-project", name "admin"), with quotas from infra.md's "Quotas
-# par projet" table (100 VMs / 20 vCPUs / 50 GB RAM / 50 floating IPs,
-# unlimited volumes/storage). `totalCoresUsed` is deliberately set to 90%
-# of `maxTotalCores` so a fresh sandbox already has one real capacity_cap
-# warning to look at (GET /api/v1/quotas/alerts) without needing to hand-
-# edit this file first -- everything else is comfortably under its cap.
+# ---- quota/budget + FinOps seed data (services/quota_budget_monitor.py) ----
+# Four projects with deliberately different shapes, so a fresh sandbox has
+# something interesting on every tab of the Quotas & Budget page:
+#
+# - "admin" (id sandbox-project, the token's own scope): 18/20 vCPUs used --
+#   one real capacity_cap warning; unlimited volumes/storage (infra.md's
+#   "illimite"), so it also exercises the "unlimited quota" path.
+# - "stagiaires-ete-2026": a healthy training project, tagged
+#   `department:Formation` (Keystone tag -> department with zero config).
+# - "mern-prod": tightly packed (14/16 vCPUs) -- another capacity_cap
+#   warning, tagged `department:Engineering`.
+# - "rnd-sandbox": tiny, no department tag -> shows up as "Unassigned".
+#
+# Sum of quotas (68 vCPUs) is above the cloud's 64 sellable vCPUs
+# (2 x 8 cores x the default 4:1 ratio): no project is over its own quota,
+# yet the cloud has promised more than it can deliver -- the overview flags it.
 PROJECTS = [
-    {"id": "sandbox-project", "name": "admin", "domain_id": "default", "enabled": True},
+    {"id": "sandbox-project", "name": "admin", "domain_id": "default", "enabled": True, "tags": []},
+    {"id": "proj-stagiaires", "name": "stagiaires-ete-2026", "domain_id": "default", "enabled": True,
+     "tags": ["department:Formation"]},
+    {"id": "proj-mern-prod", "name": "mern-prod", "domain_id": "default", "enabled": True,
+     "tags": ["department:Engineering"]},
+    {"id": "proj-rnd", "name": "rnd-sandbox", "domain_id": "default", "enabled": True, "tags": []},
 ]
 
-NOVA_ABSOLUTE_LIMITS = {
-    "maxTotalInstances": 100,
-    "totalInstancesUsed": 5,
-    "maxTotalCores": 20,
-    "totalCoresUsed": 18,
-    "maxTotalRAMSize": 51200,  # 50 GB, in MB
-    "totalRAMUsed": 24576,  # 24 GB
-    "maxTotalFloatingIps": 50,
-    "totalFloatingIpsUsed": 1,
+_NOVA_BY_PROJECT = {
+    "sandbox-project": {
+        "maxTotalInstances": 100, "totalInstancesUsed": 5,
+        "maxTotalCores": 20, "totalCoresUsed": 18,
+        "maxTotalRAMSize": 51200, "totalRAMUsed": 24576,  # 50 GB quota / 24 GB used
+        "maxTotalFloatingIps": 50, "totalFloatingIpsUsed": 1,
+    },
+    "proj-stagiaires": {
+        "maxTotalInstances": 20, "totalInstancesUsed": 4,
+        "maxTotalCores": 24, "totalCoresUsed": 6,
+        "maxTotalRAMSize": 51200, "totalRAMUsed": 8192,
+        "maxTotalFloatingIps": 6, "totalFloatingIpsUsed": 2,
+    },
+    "proj-mern-prod": {
+        "maxTotalInstances": 10, "totalInstancesUsed": 7,
+        "maxTotalCores": 16, "totalCoresUsed": 14,
+        "maxTotalRAMSize": 32768, "totalRAMUsed": 12288,
+        "maxTotalFloatingIps": 4, "totalFloatingIpsUsed": 2,
+    },
+    "proj-rnd": {
+        "maxTotalInstances": 5, "totalInstancesUsed": 1,
+        "maxTotalCores": 8, "totalCoresUsed": 1,
+        "maxTotalRAMSize": 8192, "totalRAMUsed": 1024,
+        "maxTotalFloatingIps": 2, "totalFloatingIpsUsed": 0,
+    },
 }
 
-CINDER_ABSOLUTE_LIMITS = {
-    "maxTotalVolumes": -1,  # "illimité" per infra.md -- unlimited quota
-    "totalVolumesUsed": 3,
-    "maxTotalVolumeGigabytes": -1,
-    "totalGigabytesUsed": 160,
+_CINDER_BY_PROJECT = {
+    "sandbox-project": {
+        "maxTotalVolumes": -1,  # "illimite" per infra.md -- unlimited quota
+        "totalVolumesUsed": 3,
+        "maxTotalVolumeGigabytes": -1, "totalGigabytesUsed": 160,
+    },
+    "proj-stagiaires": {
+        "maxTotalVolumes": 12, "totalVolumesUsed": 2,
+        "maxTotalVolumeGigabytes": 500, "totalGigabytesUsed": 80,
+    },
+    "proj-mern-prod": {
+        "maxTotalVolumes": 20, "totalVolumesUsed": 5,
+        "maxTotalVolumeGigabytes": 800, "totalGigabytesUsed": 400,
+    },
+    "proj-rnd": {
+        "maxTotalVolumes": 5, "totalVolumesUsed": 1,
+        "maxTotalVolumeGigabytes": 100, "totalGigabytesUsed": 20,
+    },
 }
+
+# Back-compat names (earlier code/tests referenced these for the one seed project).
+NOVA_ABSOLUTE_LIMITS = _NOVA_BY_PROJECT["sandbox-project"]
+CINDER_ABSOLUTE_LIMITS = _CINDER_BY_PROJECT["sandbox-project"]
+
+# Cinder backend pool (admin-only scheduler-stats) -- the physical storage
+# the monthly storage cost is spread over. 1 TB LVM pool on storage-sim.
+CINDER_POOLS = [
+    {
+        "name": "storage-sim@lvm#LVM",
+        "capabilities": {
+            "volume_backend_name": "LVM",
+            "total_capacity_gb": 1000.0,
+            "free_capacity_gb": 340.0,
+            "allocated_capacity_gb": 660,
+        },
+    }
+]
 
 
 def _now_iso():
@@ -716,11 +776,13 @@ def list_servers():
 
 @app.get("/v2.1/limits")
 def get_compute_limits(tenant_id: str | None = None):
-    # `tenant_id` is what openstacksdk's compute.get_limits(project_id=...)
-    # actually sends (Limits._query_mapping maps project_id -> tenant_id,
-    # see openstack.compute.v2.limits.Limits) -- accepted and ignored here,
-    # same one-project simplification as GET /v3/projects above.
-    return {"limits": {"rate": [], "absolute": NOVA_ABSOLUTE_LIMITS}}
+    # Nova's selector for another project is `tenant_id` (admin only) --
+    # openstacksdk's get_limits() passes kwargs through verbatim, so callers
+    # must send `tenant_id=`; a `project_id=` kwarg is not a Nova parameter
+    # and is ignored here, exactly like real Nova ignores it and answers for
+    # the token's own project. Absent -> the token's own project.
+    absolute = _NOVA_BY_PROJECT.get(tenant_id or "sandbox-project", NOVA_ABSOLUTE_LIMITS)
+    return {"limits": {"rate": [], "absolute": absolute}}
 
 
 # -------------------------------------------------------------- cinder --
@@ -745,8 +807,37 @@ def list_cinder_services():
 
 
 @app.get("/volume/v3/limits")
-def get_volume_limits(project_id: str | None = None):
+def get_volume_limits():
+    # Like real Cinder, /limits is bound to the *token's own* project and has
+    # no way to point at another one -- deliberately NOT per-project here, so
+    # a client that wrongly uses it for every project gets visibly identical
+    # numbers instead of the sim quietly doing the right thing.
     return {"limits": {"rate": [], "absolute": CINDER_ABSOLUTE_LIMITS}}
+
+
+@app.get("/volume/v3/os-quota-sets/{project_id}")
+def get_volume_quota_set(project_id: str, usage: str | None = None):
+    # `GET /os-quota-sets/{project}?usage=True` -- the documented admin way
+    # to read any project's Cinder quota *and* usage. With usage, every
+    # resource is {limit, in_use, reserved}; without, plain limits.
+    absolute = _CINDER_BY_PROJECT.get(project_id)
+    if absolute is None:
+        return JSONResponse(status_code=404, content={"itemNotFound": {"message": "project not found"}})
+    limits = {"volumes": absolute["maxTotalVolumes"], "gigabytes": absolute["maxTotalVolumeGigabytes"]}
+    used = {"volumes": absolute["totalVolumesUsed"], "gigabytes": absolute["totalGigabytesUsed"]}
+    if usage and usage.lower() in ("true", "1"):
+        body = {k: {"limit": limits[k], "in_use": used[k], "reserved": 0} for k in limits}
+    else:
+        body = dict(limits)
+    return {"quota_set": {"id": project_id, **body}}
+
+
+@app.get("/volume/v3/scheduler-stats/get_pools")
+def get_volume_pools(detail: str | None = None):
+    # openstacksdk's block_storage.backend_pools() hits
+    # /scheduler-stats/get_pools?detail=True -- backs
+    # quota_budget_monitor._fetch_cloud_capacity()'s storage capacity.
+    return {"pools": CINDER_POOLS}
 
 
 # ---------------------------------------------------------------- neutron --

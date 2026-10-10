@@ -71,6 +71,11 @@ services:
       ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
       OS_CLIENT_CONFIG_FILE: /etc/openstack/clouds.yaml
       OS_CLOUD: ${OS_CLOUD:-cortex-reader}
+      # FinOps cost model (services/api/app/services/finops.py): the fixed monthly
+      # bill and the overcommit ratios the cloud is planned to be sold at.
+      FINOPS_MONTHLY_COST_EUR: ${FINOPS_MONTHLY_COST_EUR:-292}
+      FINOPS_CPU_ALLOCATION_RATIO: ${FINOPS_CPU_ALLOCATION_RATIO:-4.0}
+      FINOPS_RAM_ALLOCATION_RATIO: ${FINOPS_RAM_ALLOCATION_RATIO:-1.0}
       # Roadmap 4.4 (adr-0015): approved fixes may be executed after an explicit
       # click. off | live; unset = live here (dev/sandbox), off in production.
       CORTEX_REMEDIATION_EXECUTION: ${CORTEX_REMEDIATION_EXECUTION:-}

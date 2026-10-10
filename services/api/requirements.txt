@@ -36,3 +36,5 @@ langchain-nvidia-ai-endpoints==1.4.3
 # Pulls a compatible langchain-core transitively (already constrained to
 # <2.0.0,>=1.4.7 by langchain-nvidia-ai-endpoints above).
 langgraph==1.2.11
+# PDF export of the showback/chargeback report (services/finops_report.py)
+reportlab==4.2.5
