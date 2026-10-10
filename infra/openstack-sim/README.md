@@ -489,3 +489,12 @@ npx tsc --noEmit
 npm run build
 ```
 
+
+## Write surface (roadmap 4.4)
+
+The sim is no longer strictly read-only: for the `cortex-operator` identity it
+accepts compute service enable/disable, server reboot (SOFT/HARD) and Neutron
+agent/port admin state, so the Remediation Copilot's approved SDK actions can
+succeed in the sandbox. `cortex-reader` gets a 403. `GET /_sandbox/changes` lists
+every write (applied or refused); `POST /_sandbox/fault/reset` restores the seed
+data and clears the log. See `infra/SANDBOX-REMEDIATION.md`.

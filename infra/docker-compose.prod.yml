@@ -75,6 +75,12 @@ services:
       # Used only to refuse startup if the resolved Ansible dir ever turns
       # out to be infra/ansible-sandbox -- see ansible_runner.py.
       CORTEX_ENV: production
+      # Roadmap 4.4 (adr-0015). Execution is OFF in production until switched on
+      # on purpose: CORTEX_REMEDIATION_EXECUTION=live in the prod .env, together
+      # with a cortex-operator profile in clouds.yaml.
+      CORTEX_REMEDIATION_EXECUTION: ${CORTEX_REMEDIATION_EXECUTION:-off}
+      OS_REMEDIATION_CLOUD: ${OS_REMEDIATION_CLOUD:-cortex-operator}
+      CORTEX_REMEDIATION_APPROVAL_TTL_MINUTES: ${CORTEX_REMEDIATION_APPROVAL_TTL_MINUTES:-60}
       ANSIBLE_CONFIG: /infra/ansible/ansible.cfg
       PROMETHEUS_URL: ${PROMETHEUS_URL}
       PROMETHEUS_RANGE_URL: ${PROMETHEUS_RANGE_URL}

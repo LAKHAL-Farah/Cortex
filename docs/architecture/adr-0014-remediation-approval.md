@@ -60,7 +60,8 @@ for the whole chain diagnosis → proposal → validation → execution.
    approval controls.** The UI then says the proposal was not recorded. Nothing
    can be approved that was not first recorded.
 9. **Approval executes nothing.** `approved` only says a person signed off.
-   The UI says so next to the status.
+   The UI says so next to the status. (Execution, behind a separate explicit
+   click, is adr-0015.)
 
 ## Consequences / limits
 
@@ -68,14 +69,14 @@ for the whole chain diagnosis → proposal → validation → execution.
   is complete: someone with database superuser rights could also truncate the
   tail and rebuild hashes. Shipping entries to external storage is the answer
   to that, and is not done here.
-- Asking for more info logs the question; nothing answers it yet. Answering
-  (by the agent or a colleague) is a follow-up.
+- Asking for more info logs the question. *(Answered by Cortex from the stored
+  proposal since adr-0015; a reply from a colleague is still a follow-up.)*
 - No global audit page in the UI. `GET /api/v1/remediation/audit` (admin-only)
   serves it when one is wanted; the per-proposal history is on the card.
 
 ## Out of scope (later roadmap items)
 
-- Executing an approved fix. When it exists it must read `status = 'approved'`
+- Executing an approved fix *(done in adr-0015)*. When it exists it must read `status = 'approved'`
   from `remediation_proposals`, re-check that the simulation is not stale, and
   refuse while `inputs_needed` is non-empty (approval is allowed with
   placeholders unresolved; the audit entry records them).

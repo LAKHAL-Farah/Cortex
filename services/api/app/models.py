@@ -498,6 +498,12 @@ class RemediationProposal(Base):
     `status` is a cache of the latest audit entry's `to_status`, kept on this
     row so "is this still open" is a primary-key read; the audit log is the
     source of truth.
+
+    Roadmap 4.4 extends the lifecycle past the decision: an `approved`
+    proposal an admin explicitly executes goes `executing` -> `executed` or
+    `execution_failed` (a failed one may be executed again by another explicit
+    click). `proposed`/`info_requested` are open for decisions; everything
+    from `approved` on is not.
     """
 
     __tablename__ = "remediation_proposals"
@@ -505,7 +511,8 @@ class RemediationProposal(Base):
     __table_args__ = (
         UniqueConstraint("trace_id", "proposal_id", name="uq_remediation_proposals_trace_proposal"),
         CheckConstraint(
-            "status IN ('proposed','approved','rejected','info_requested')",
+            "status IN ('proposed','approved','rejected','info_requested',"
+            "'executing','executed','execution_failed')",
             name="ck_remediation_proposals_status_allowed",
         ),
     )
@@ -559,7 +566,8 @@ class RemediationAuditEntry(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "event IN ('proposed','approved','rejected','info_requested')",
+            "event IN ('proposed','approved','rejected','info_requested','info_provided',"
+            "'execution_started','executed','execution_failed')",
             name="ck_remediation_audit_log_event_allowed",
         ),
     )

@@ -3,11 +3,12 @@ into one concrete, plain-language *proposed fix*: the exact command to run,
 why, how risky it is, what you still have to fill in, how to undo it, and how
 to check it worked.
 
-**Proposal only. This agent never executes anything.** Simulation, the
-validation UI, Ansible/OpenStack execution and the audit trail are the later
-Remediation Copilot items; this is the first rung of that ladder -- the
-agent *says* what it would do, a human decides. `fix_proposal` therefore
-always carries `status="proposed"`, `executed=False`, `requires_approval=True`
+**Proposal only. This agent never executes anything.** Simulation (4.2),
+approval and the audit trail (4.3) and execution (4.4) are the later
+Remediation Copilot items and live outside the graph; this is the first rung
+of that ladder -- the agent *says* what it would do, a human decides, and only
+a human's explicit click (services/remediation_execution.py) ever runs it.
+`fix_proposal` therefore always carries `status="proposed"`, `executed=False`, `requires_approval=True`
 so the later items have a stable object to attach simulation/approval/audit to
 without this node's output changing shape.
 
@@ -436,8 +437,9 @@ def render_impact(proposal: dict) -> Optional[str]:
 def render_fix_proposal(proposal: FixProposal) -> str:
     approval = _callout(
         "NOTE",
-        "**Proposal only -- nothing has been run.** Review the exact command, fill in anything "
-        "marked as needed, and run it yourself. Cortex will not change your infrastructure on its own.",
+        "**Proposal only -- nothing has been run.** Review the exact command and fill in anything "
+        "marked as needed. Cortex changes nothing on its own: it runs a fix only after an admin approves "
+        "it and then clicks Execute -- or you can run it yourself.",
     )
     verify = "\n".join(
         f"- **{v['description']}**\n{_code(v['command'], '  ')}"

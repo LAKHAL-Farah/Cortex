@@ -823,13 +823,26 @@ export interface AgentFixProposal {
   approval?: { id: string; status: RemediationStatus };
 }
 
-export type RemediationStatus = "proposed" | "approved" | "rejected" | "info_requested";
+export type RemediationStatus =
+  | "proposed"
+  | "approved"
+  | "rejected"
+  | "info_requested"
+  // Roadmap 4.4: an approved fix an admin explicitly executed.
+  | "executing"
+  | "executed"
+  | "execution_failed";
+// Everything the audit trail records: the statuses, plus the answer to a question.
+export type RemediationEvent =
+  | RemediationStatus
+  | "info_provided"
+  | "execution_started";
 export type RemediationDecisionKind = "approve" | "reject" | "ask_more_info";
 
 export interface RemediationAuditEntry {
   id: number;
   proposal_id: string;
-  event: RemediationStatus;
+  event: RemediationEvent;
   from_status: RemediationStatus | null;
   to_status: RemediationStatus;
   actor_username: string | null;
@@ -855,7 +868,21 @@ export interface RemediationProposalRecord {
   // May *this* user approve/reject right now? (Asking for more info is
   // always allowed while the proposal is open.)
   can_decide: boolean;
+  // Roadmap 4.4. The fingerprint the Execute click must echo back, whether
+  // *this* user may click it now, and what it would do / why it cannot.
+  proposal_digest: string;
+  can_execute: boolean;
+  execution: RemediationExecutionInfo;
+  // A question is waiting for its answer (the card polls until it arrives).
+  answer_pending: boolean;
   history: RemediationAuditEntry[];
+}
+
+export interface RemediationExecutionInfo {
+  available: boolean;
+  summary: string | null;
+  backend: "openstack_sdk" | "ansible" | null;
+  blocked_reason: string | null;
 }
 
 export interface AgentExpertData {

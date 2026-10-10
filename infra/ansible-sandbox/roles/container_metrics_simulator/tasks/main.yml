@@ -5,20 +5,46 @@
       {{ (sim_containers_controllers if 'controllers' in group_names else [])
          + (sim_containers_computes if 'computes' in group_names else [])
          + (sim_containers_storages if 'storages' in group_names else []) }}
-    sim_now_epoch: "{{ ansible_date_time.epoch }}"
 
-- name: Ensure the textfile directory exists
+- name: Ensure the simulator directories exist
   ansible.builtin.file:
-    path: "{{ sim_textfile_dir }}"
+    path: "{{ item }}"
     state: directory
     owner: root
     group: root
     mode: "0755"
+  loop:
+    - "{{ sim_textfile_dir }}"
+    - /etc/cortex-sim
+    - /var/lib/cortex-sim
 
-- name: Write the simulated container metrics (re-run to refresh the timestamp)
-  ansible.builtin.template:
-    src: cortex_containers.prom.j2
-    dest: "{{ sim_textfile_dir }}/cortex_containers.prom"
+# The shim is both the writer of the textfile and the `docker` binary Cortex's
+# approved remediations call (roadmap 4.4): `docker restart nova_compute` flips
+# the simulated container back to healthy and rewrites the metrics. See the
+# script's own docstring.
+- name: Install the docker shim
+  ansible.builtin.copy:
+    src: cortex-docker-sim
+    dest: /usr/local/bin/cortex-docker-sim
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Make it answer to `docker`
+  ansible.builtin.file:
+    src: /usr/local/bin/cortex-docker-sim
+    dest: /usr/local/bin/docker
+    state: link
+    force: true
+
+- name: Write this node's scenario (re-running with different -e lists re-seeds it)
+  ansible.builtin.copy:
+    content: "{{ {'containers': sim_node_containers, 'down': sim_down_containers, 'unhealthy': sim_unhealthy_containers, 'removed': sim_removed_containers} | to_nice_json }}"
+    dest: /etc/cortex-sim/containers.json
     owner: root
     group: root
     mode: "0644"
+
+- name: Seed the simulated container state and write the metrics (re-run to refresh the timestamp)
+  ansible.builtin.command: /usr/local/bin/cortex-docker-sim seed
+  changed_when: true

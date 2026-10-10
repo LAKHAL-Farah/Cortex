@@ -469,7 +469,14 @@ class SecurityAuditLogResponse(BaseModel):
 # ---------------------------------------------------------------------
 
 RemediationDecisionKind = Literal["approve", "reject", "ask_more_info"]
-RemediationStatus = Literal["proposed", "approved", "rejected", "info_requested"]
+RemediationStatus = Literal[
+    "proposed", "approved", "rejected", "info_requested", "executing", "executed", "execution_failed"
+]
+# Everything the audit trail can record: the statuses plus the answer to a question.
+RemediationEvent = Literal[
+    "proposed", "approved", "rejected", "info_requested", "info_provided",
+    "execution_started", "executed", "execution_failed",
+]
 
 
 class RemediationDecisionRequest(BaseModel):
@@ -487,7 +494,7 @@ class RemediationAuditEntryOut(BaseModel):
     id: int
     proposal_row_id: uuid.UUID
     proposal_id: str
-    event: RemediationStatus
+    event: RemediationEvent
     from_status: RemediationStatus | None
     to_status: RemediationStatus
     actor_username: str | None
@@ -498,6 +505,25 @@ class RemediationAuditEntryOut(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class RemediationExecuteRequest(BaseModel):
+    """The explicit click. `proposal_digest` is the fingerprint the screen was
+    showing (`RemediationProposalOut.proposal_digest`); the server refuses a
+    click that refers to anything else. Like the decision request, it carries
+    no command -- what runs is the stored, approved snapshot."""
+    confirm: Literal[True]
+    proposal_digest: str = Field(min_length=64, max_length=64)
+
+
+class RemediationExecutionInfo(BaseModel):
+    """What clicking Execute would do, or why it cannot be done right now."""
+    available: bool
+    # Plain-language description of the action (when there is one).
+    summary: str | None = None
+    backend: str | None = None
+    # Why there is no Execute button (a person can still run the command by hand).
+    blocked_reason: str | None = None
 
 
 class RemediationProposalOut(BaseModel):
@@ -516,6 +542,13 @@ class RemediationProposalOut(BaseModel):
     updated_at: datetime | None
     # Whether *this caller* may approve/reject (ask_more_info is always open).
     can_decide: bool
+    # Roadmap 4.4. Exactly what the Execute click must echo back, and whether
+    # *this caller* may click it right now.
+    proposal_digest: str
+    can_execute: bool
+    execution: RemediationExecutionInfo
+    # True while a question is waiting for its answer (the UI polls).
+    answer_pending: bool = False
     history: list[RemediationAuditEntryOut]
 
 

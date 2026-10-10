@@ -35,6 +35,13 @@ entry's hash and this entry's canonical content, across the whole table in
 Appends are serialised with a transaction-scoped advisory lock so two
 simultaneous decisions cannot both extend the same predecessor.
 
+Roadmap 4.4 (adr-0015) extends the lifecycle past the decision -- see
+services/remediation_execution.py, which owns `executing / executed /
+execution_failed` and the explicit Execute click. This module only has to know
+that once a proposal is past `approved`, it is closed to further decisions, and
+it now also *answers* an `ask_more_info` (`answer_info_request`, from the
+stored snapshot -- services/proposal_qa.py).
+
 Nothing in this module reads the Living Model, OpenStack or an LLM.
 """
 import hashlib
@@ -70,6 +77,14 @@ _DECISIONS: dict[str, tuple[str, str]] = {
     "ask_more_info": ("info_requested", "info_requested"),
 }
 _FINAL_STATUSES = frozenset({"approved", "rejected"})
+# Open for approve / reject / ask: nothing has been decided yet.
+OPEN_STATUSES = frozenset({"proposed", "info_requested"})
+EXECUTION_STATUSES = frozenset({"executing", "executed", "execution_failed"})
+# Once the proposal has left OPEN_STATUSES no decision can change it. (A failed
+# execution may be *executed* again -- that is not a decision.)
+CLOSED_STATUSES = _FINAL_STATUSES | EXECUTION_STATUSES
+
+_STATUS_WORDS = {"executing": "being executed", "executed": "executed", "execution_failed": "executed (and failed)"}
 
 # Arbitrary constant key for pg_advisory_xact_lock; every writer of the audit
 # chain takes the same one.
@@ -393,9 +408,10 @@ def decide(
     if row is None:
         raise DecisionError(404, "No such proposal.")
 
-    if row.status in _FINAL_STATUSES:
+    if row.status in CLOSED_STATUSES:
         db.rollback()
-        raise DecisionError(409, f"This proposal was already {row.status}; a final decision cannot be changed.")
+        word = _STATUS_WORDS.get(row.status, row.status)
+        raise DecisionError(409, f"This proposal was already {word}; a final decision cannot be changed.")
 
     event, new_status = _DECISIONS[decision]
     missing = _requires_reason(decision, step_details(row.proposal))
@@ -410,3 +426,79 @@ def decide(
     db.refresh(row)
     db.refresh(entry)
     return row, entry
+
+
+# --------------------------------------------------------------------
+# Used by services/remediation_execution.py (same chain, same lock)
+# --------------------------------------------------------------------
+
+def append_entry(
+    db: Session,
+    row: models.RemediationProposal,
+    *,
+    event: str,
+    from_status: Optional[str],
+    to_status: str,
+    actor: Optional[models.User],
+    comment: Optional[str] = None,
+    extra_details: Optional[dict] = None,
+) -> models.RemediationAuditEntry:
+    """`_append` for the other module that writes to the chain. Adds, does not
+    commit; the caller owns the transaction and has locked the proposal row."""
+    return _append(
+        db, row, event=event, from_status=from_status, to_status=to_status,
+        actor=actor, comment=comment, extra_details=extra_details,
+    )
+
+
+# --------------------------------------------------------------------
+# Answering "ask for more information"
+# --------------------------------------------------------------------
+
+def unanswered_questions(entries: list[models.RemediationAuditEntry]) -> list[models.RemediationAuditEntry]:
+    """The `info_requested` entries no `info_provided` entry points back at."""
+    answered = {(e.details or {}).get("answers_entry_id") for e in entries if e.event == "info_provided"}
+    return [e for e in entries if e.event == "info_requested" and e.id not in answered]
+
+
+def answer_info_request(
+    db: Session, *, proposal_row_id: uuid.UUID, question_entry_id: int
+) -> Optional[models.RemediationAuditEntry]:
+    """Write the answer to one logged question into the audit trail.
+
+    The answer is built only from the proposal's stored snapshot
+    (services/proposal_qa.py), so the trail records exactly what the person
+    was told before deciding. It does not change the proposal's status -- the
+    proposal stays open for a decision -- and it is idempotent per question,
+    so a retried or doubled background task adds one answer, not two.
+    Returns None when there is nothing to answer.
+    """
+    from .proposal_qa import answer_question  # local: keeps the import graph of this module small
+
+    row = db.execute(
+        select(models.RemediationProposal).where(models.RemediationProposal.id == proposal_row_id).with_for_update()
+    ).scalar_one_or_none()
+    if row is None:
+        db.rollback()
+        return None
+    entries = history(db, row.id)
+    question = next((e for e in entries if e.id == question_entry_id and e.event == "info_requested"), None)
+    if question is None or question not in unanswered_questions(entries):
+        db.rollback()
+        return None
+
+    qa = answer_question(row.proposal, question.comment)
+    entry = _append(
+        db, row,
+        event="info_provided", from_status=row.status, to_status=row.status,
+        actor=None, comment=qa["answer"],
+        extra_details={
+            "answers_entry_id": question.id,
+            "topics": qa["topics"],
+            "question_understood": qa["matched"],
+            "source": "proposal_snapshot",
+        },
+    )
+    db.commit()
+    db.refresh(entry)
+    return entry
