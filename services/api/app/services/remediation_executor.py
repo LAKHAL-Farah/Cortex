@@ -80,6 +80,25 @@ def execution_mode() -> ExecutionMode:
     return "off" if CORTEX_ENV == "production" else "live"
 
 
+def one_click_enabled() -> bool:
+    """`CORTEX_REMEDIATION_ONE_CLICK=on|off`. Lets the UI offer a single
+    "Approve & execute" button that sends the approval and the execute request
+    back to back. It is a *UI convenience only*: the API still receives two
+    separate requests, so the role check, the digest check, the audit trail
+    (an `approved` entry and an `execution_started` entry) and every other
+    rule in remediation_execution.start_execution still apply unchanged.
+
+    Default: on in the sandbox, off everywhere else. It can never be switched
+    on in production, whatever the variable says -- Level 0 there means a
+    person looks at the approval, then separately decides to run it."""
+    if CORTEX_ENV == "production":
+        return False
+    raw = (os.environ.get("CORTEX_REMEDIATION_ONE_CLICK") or "").strip().lower()
+    if raw in ("on", "off"):
+        return raw == "on"
+    return CORTEX_ENV == "sandbox"
+
+
 # --------------------------------------------------------------------
 # Plan
 # --------------------------------------------------------------------

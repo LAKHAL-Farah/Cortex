@@ -54,6 +54,7 @@ from .remediation_executor import (
     ExecutionPlan,
     NotExecutable,
     execution_mode,
+    one_click_enabled,
     plan_for,
     run_plan,
 )
@@ -116,11 +117,23 @@ def execution_info(row: models.RemediationProposal) -> dict:
     # fix is awaiting its decision tells the approver Cortex cannot run it.)
 
     available = reason is None and plan is not None and row.status in _EXECUTABLE_STATUSES
+    # One-click is offered while the fix is still awaiting its decision, so it
+    # cannot depend on `available` (which needs the status to be `approved`).
+    # It needs the same things Execute needs: a runnable plan, no blank to fill
+    # in, execution switched on -- and the sandbox-only switch.
+    one_click = (
+        one_click_enabled()
+        and plan is not None
+        and execution_mode() == "live"
+        and not details["inputs_needed"]
+        and row.status in approval.OPEN_STATUSES
+    )
     return {
         "available": available,
         "summary": plan.summary if plan else None,
         "backend": plan.backend if plan else None,
         "blocked_reason": reason,
+        "one_click": one_click,
     }
 
 

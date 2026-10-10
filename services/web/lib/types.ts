@@ -883,6 +883,8 @@ export interface RemediationExecutionInfo {
   summary: string | null;
   backend: "openstack_sdk" | "ansible" | null;
   blocked_reason: string | null;
+  // Sandbox only: the card may offer "Approve & execute".
+  one_click?: boolean;
 }
 
 export interface AgentExpertData {

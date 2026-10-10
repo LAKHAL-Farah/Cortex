@@ -524,6 +524,9 @@ class RemediationExecutionInfo(BaseModel):
     backend: str | None = None
     # Why there is no Execute button (a person can still run the command by hand).
     blocked_reason: str | None = None
+    # Sandbox only: the UI may offer "Approve & execute" (two requests, sent
+    # back to back; see remediation_executor.one_click_enabled).
+    one_click: bool = False
 
 
 class RemediationProposalOut(BaseModel):

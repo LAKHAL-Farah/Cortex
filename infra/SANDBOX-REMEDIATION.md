@@ -24,6 +24,38 @@ Deletes, rebuilds, prunes and compound commands are never run, here or anywhere.
   supports `restart | stop | start` on the simulated containers and nothing else.
 - Execution is on by default here (`CORTEX_ENV=sandbox` is not production).
 
+## One-click approve & execute (sandbox only)
+
+In the sandbox the proposal card has an extra **Approve & execute** button next to
+*Approve*. It sends exactly the two requests the manual flow sends (the decision, then
+the execute with the proposal digest), back to back, so the audit trail still shows
+`Approved` and `Execution started` as separate entries and every server-side check
+(admin role, digest, TTL, re-simulation, allow-list) still runs. The manual
+*Approve* then *Execute...* flow is unchanged and still there.
+
+It is on when `CORTEX_ENV=sandbox` and off in production no matter what
+(`CORTEX_REMEDIATION_ONE_CLICK=off` turns it off here too). It is only offered for fixes
+Cortex can actually run: no blank to fill in, and an allow-listed command.
+
+## When "Execution failed" shows up
+
+The card now shows the real reason and, for Ansible runs, the output tail (it was always
+in the audit entry's `details.execution`; the card just did not print it). Common ones:
+
+| Reason shown | Cause | Fix |
+|---|---|---|
+| `ConfigException: Cloud cortex-operator was not found` | The `clouds.yaml` mounted at `/etc/openstack` has no `cortex-operator` profile | `infra/openstack-sim/config/clouds.yaml` must have it (it does now). Restart `api` after pulling |
+| `ForbiddenException ... read-only identity` | The run used `cortex-reader` | `OS_REMEDIATION_CLOUD` must be `cortex-operator` (the default) |
+| `FileNotFoundError: playbook-remediate.yml not found` | `CORTEX_ANSIBLE_HOST_DIR` does not point at `infra/ansible-sandbox` | Set it in `.env`, recreate `api` |
+| `<host> was unreachable over SSH` | sim nodes not up or key missing | `docker compose exec api bash -c 'cd /infra/ansible && ansible all -m ping'` |
+| Ansible output says `docker: not found` / `No such file` | `cortex-docker-sim` shim not installed on the node | run `simulate-containers.yml` (Setup below) |
+
+### Log noise that is harmless
+
+`UnknownRelationshipTypeWarning ... RUNS_IN` from Neo4j only means no container has been
+ingested yet, so that edge type does not exist. It appears until `simulate-containers.yml`
+has run and the next container-health sync has created the `:Container` vertices.
+
 ## Setup
 
 ```bash

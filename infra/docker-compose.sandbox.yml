@@ -17,6 +17,11 @@ services:
       LOKI_URL: http://controller-sim:3100
       CORTEX_ANSIBLE_HOST_DIR: /infra/ansible-sandbox
       CORTEX_ENV: sandbox
+      # Roadmap 4.4, sandbox only: the approval card also offers one
+      # "Approve & execute" button (two requests, still two audit entries).
+      # Ignored -- always off -- when CORTEX_ENV=production. Set to 'off' to get
+      # the strict approve-then-confirm flow back while testing it.
+      CORTEX_REMEDIATION_ONE_CLICK: 'on'
       # Gives the "admin" sandbox project (see openstack-sim's PROJECTS/
       # NOVA_ABSOLUTE_LIMITS seed data) a budget_cap to check its estimated
       # spend against, alongside the capacity_cap checks its Nova/Cinder

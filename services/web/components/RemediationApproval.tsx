@@ -125,6 +125,7 @@ export function RemediationApproval({ approvalId }: { approvalId: string }) {
   const [problem, setProblem] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [confirmingExecute, setConfirmingExecute] = useState(false);
+  const [oneClickStep, setOneClickStep] = useState<"approving" | "starting" | null>(null);
 
   if (isLoading && !data) {
     return (
@@ -148,6 +149,10 @@ export function RemediationApproval({ approvalId }: { approvalId: string }) {
   const lastAnswer = [...data.history].reverse().find((e) => e.event === "info_provided");
   const lastFailure = [...data.history].reverse().find((e) => e.event === "execution_failed");
   const canRetry = data.status === "execution_failed" && data.can_execute;
+  // What the backend actually reported (stored on the audit entry; the API has
+  // always returned it, the card just never showed it).
+  const failureExec = (lastFailure?.details as { execution?: { error?: string | null; output_tail?: string; operation?: string; backend?: string } } | undefined)
+    ?.execution;
   const commentRequired =
     mode === "reject" || mode === "ask_more_info" || (mode === "approve" && data.effective_risk === "high");
 
@@ -222,6 +227,52 @@ export function RemediationApproval({ approvalId }: { approvalId: string }) {
     }
   };
 
+  // Sandbox only (the API sets `execution.one_click`). Two separate requests,
+  // exactly what clicking Approve and then Execute would send, so the audit
+  // trail, the digest check and every server-side rule are unchanged.
+  const approveAndExecute = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setProblem(null);
+    try {
+      setOneClickStep("approving");
+      const dec = await fetch(`/api/remediation/proposals/${approvalId}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision: "approve", comment: "Approved and executed in one step (sandbox one-click)." }),
+      });
+      const decBody = await dec.json().catch(() => null);
+      if (!dec.ok) {
+        if (dec.status === 409) void mutate();
+        throw new Error(typeof decBody?.detail === "string" ? decBody.detail : `The decision was not recorded (${dec.status}).`);
+      }
+      const approved = decBody.proposal as RemediationProposalRecord;
+      await mutate(approved, { revalidate: false });
+
+      setOneClickStep("starting");
+      const run = await fetch(`/api/remediation/proposals/${approvalId}/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true, proposal_digest: approved.proposal_digest }),
+      });
+      const runBody = await run.json().catch(() => null);
+      if (!run.ok) {
+        void mutate();
+        throw new Error(
+          "Approved, but it did not start: " +
+            (typeof runBody?.detail === "string" ? runBody.detail : `Execution was not started (${run.status}).`),
+        );
+      }
+      await mutate(runBody.proposal as RemediationProposalRecord, { revalidate: false });
+      setShowHistory(true);
+    } catch (err) {
+      setProblem(err instanceof Error ? err.message : "Approve & execute did not complete.");
+    } finally {
+      setOneClickStep(null);
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-2 rounded-[var(--radius-control)] px-3 py-2.5" style={{ background: "var(--canvas)" }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -250,6 +301,19 @@ export function RemediationApproval({ approvalId }: { approvalId: string }) {
           <div className="flex flex-wrap items-center gap-1.5">
             {data.can_decide && (
               <>
+                {data.execution.one_click && (
+                  <button
+                    type="button"
+                    className="agent-pill inline-flex cursor-pointer items-center gap-1.5"
+                    onClick={approveAndExecute}
+                    disabled={submitting}
+                    title="Sandbox only: records the approval, then runs the fix. Both steps are still logged separately."
+                    style={{ color: "var(--warning, #b7791f)", background: "var(--warning-soft, rgba(183,121,31,0.12))" }}
+                  >
+                    {oneClickStep ? <Loader2 className="h-3 w-3 animate-spin" strokeWidth={2} /> : <Play className="h-3 w-3" strokeWidth={2} />}
+                    {oneClickStep === "approving" ? "Approving..." : oneClickStep === "starting" ? "Starting..." : "Approve & execute"}
+                  </button>
+                )}
                 <button type="button" className="agent-pill cursor-pointer" onClick={() => open("approve")}
                   style={{ color: "var(--success, #2f855a)", background: "var(--success-soft, rgba(47,133,90,0.12))" }}>
                   Approve
@@ -310,6 +374,17 @@ export function RemediationApproval({ approvalId }: { approvalId: string }) {
           <p className="text-[12px] leading-relaxed" style={{ color: "var(--danger, #c53030)" }}>
             Execution failed{lastFailure?.comment ? `: ${lastFailure.comment}` : "."}
           </p>
+          {failureExec?.error && failureExec.error !== lastFailure?.comment && (
+            <p className="break-words font-mono text-[11px] leading-relaxed text-text-muted">Reason: {failureExec.error}</p>
+          )}
+          {failureExec?.output_tail && (
+            <details className="text-[11px] text-text-muted">
+              <summary className="cursor-pointer">Output from {failureExec.backend === "ansible" ? "Ansible" : "the backend"}</summary>
+              <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded p-2" style={{ background: "var(--surface, transparent)" }}>
+                {failureExec.output_tail}
+              </pre>
+            </details>
+          )}
           <p className="text-[12px] leading-relaxed text-text-muted">
             The attempt is in the audit trail. Check the host before trying again; the state may be partly changed.
           </p>
