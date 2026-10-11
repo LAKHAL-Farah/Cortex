@@ -15,7 +15,6 @@ from app.routers import knowledge as knowledge_router
 from app.services.knowledge import chat
 
 client = TestClient(app)
-HEADERS = {"X-API-Key": "test-key"}
 
 
 def _point(score: float, text: str = "some chunk text", source_path: str = "nova.md", heading: str | None = "Overview"):
@@ -124,12 +123,12 @@ def test_stream_answer_wraps_nim_failures(monkeypatch):
 
 # --------------------------------------------------------------- router --
 
-def test_chat_endpoint_requires_api_key():
+def test_chat_endpoint_requires_authentication():
     resp = client.post("/api/v1/knowledge/chat", json={"message": "hi"})
     assert resp.status_code == 401
 
 
-def test_chat_endpoint_streams_sse_events(monkeypatch):
+def test_chat_endpoint_streams_sse_events(monkeypatch, viewer_headers):
     fake_chunks = [
         chat.RetrievedChunk(
             text="Nova is the compute service.",
@@ -148,7 +147,7 @@ def test_chat_endpoint_streams_sse_events(monkeypatch):
         lambda message, history, chunks: iter(["Nova ", "handles ", "compute."]),
     )
 
-    resp = client.post("/api/v1/knowledge/chat", json={"message": "what does nova do"}, headers=HEADERS)
+    resp = client.post("/api/v1/knowledge/chat", json={"message": "what does nova do"}, headers=viewer_headers)
     assert resp.status_code == 200
     body = resp.text
     assert "event: sources" in body
@@ -158,7 +157,7 @@ def test_chat_endpoint_streams_sse_events(monkeypatch):
     assert "event: done" in body
 
 
-def test_chat_endpoint_no_context_skips_nim_and_still_streams(monkeypatch):
+def test_chat_endpoint_no_context_skips_nim_and_still_streams(monkeypatch, viewer_headers):
     monkeypatch.setattr(knowledge_router.knowledge_chat, "retrieve", lambda message, top_k, category: [])
 
     def _fail_require_configured():
@@ -166,13 +165,13 @@ def test_chat_endpoint_no_context_skips_nim_and_still_streams(monkeypatch):
 
     monkeypatch.setattr(knowledge_router.knowledge_chat, "require_configured", _fail_require_configured)
 
-    resp = client.post("/api/v1/knowledge/chat", json={"message": "totally unrelated question"}, headers=HEADERS)
+    resp = client.post("/api/v1/knowledge/chat", json={"message": "totally unrelated question"}, headers=viewer_headers)
     assert resp.status_code == 200
     assert '"sources": []' in resp.text
     assert chat._NO_CONTEXT_ANSWER in resp.text
 
 
-def test_chat_endpoint_missing_nvidia_key_fails_before_streaming(monkeypatch):
+def test_chat_endpoint_missing_nvidia_key_fails_before_streaming(monkeypatch, viewer_headers):
     fake_chunks = [
         chat.RetrievedChunk(text="x", source_path="a.md", doc_title="A", heading=None, category="general", score=0.9)
     ]
@@ -183,5 +182,5 @@ def test_chat_endpoint_missing_nvidia_key_fails_before_streaming(monkeypatch):
 
     monkeypatch.setattr(knowledge_router.knowledge_chat, "require_configured", _raise)
 
-    resp = client.post("/api/v1/knowledge/chat", json={"message": "what does nova do"}, headers=HEADERS)
+    resp = client.post("/api/v1/knowledge/chat", json={"message": "what does nova do"}, headers=viewer_headers)
     assert resp.status_code == 502

@@ -89,11 +89,13 @@ const fetcher = async (url: string): Promise<RemediationProposalRecord> => {
 
 function formatWhen(iso: string): string {
   const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? iso : date.toISOString().replace("T", " ").replace(".000Z", " UTC");
 }
 
 function HistoryRow({ entry }: { entry: RemediationAuditEntry }) {
-  const ui = EVENT_UI[entry.event];
+  // Keep rendering resilient when the API adds a new audit event before the
+  // web client is updated.
+  const ui = EVENT_UI[entry.event] ?? EVENT_UI.proposed;
   return (
     <li className="flex flex-col gap-0.5 border-l-2 pl-2.5" style={{ borderColor: ui.color }}>
       <div className="flex flex-wrap items-baseline gap-x-2 text-[12px]">
@@ -143,7 +145,8 @@ export function RemediationApproval({ approvalId }: { approvalId: string }) {
     );
   }
 
-  const status = STATUS_UI[data.status];
+  // Keep the card usable when a newer backend status reaches an older client.
+  const status = STATUS_UI[data.status] ?? STATUS_UI.proposed;
   const isOpen = OPEN.includes(data.status);
   const decidedBy = [...data.history].reverse().find((e) => e.event === "approved" || e.event === "rejected");
   const lastAnswer = [...data.history].reverse().find((e) => e.event === "info_provided");

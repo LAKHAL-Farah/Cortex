@@ -545,7 +545,9 @@ export function AgentTraceTimeline({ steps }: { steps?: AgentTraceStep[] }) {
                 {parallelInfo.agents.map((a) => {
                   const m = agentMeta(a.agent);
                   const BranchIcon = a.verdict === "winner" ? Crown : m.icon;
-                  const v = a.verdict ? VERDICT_STYLE[a.verdict] : undefined;
+                  // Branch verdicts come from the API and may contain a
+                  // newer value than this client knows about.
+                  const v = a.verdict ? VERDICT_STYLE[a.verdict] ?? VERDICT_STYLE.no_signal : undefined;
                   return (
                     <div key={a.agent} className="agent-trace-timeline__branch">
                       <span className="agent-trace-timeline__icon" style={{ background: m.soft, width: 16, height: 16 }}>

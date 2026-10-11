@@ -1,8 +1,20 @@
+import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 from app.services import loki_client
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _logged_in(viewer_headers):
+    """Every business route sits behind Depends(get_current_user) (main.py),
+    so these requests need a real account. They used to pass only because
+    test_topology_router.py leaked a fake-user override into the whole
+    session; see conftest.py's viewer_headers."""
+    client.headers.update(viewer_headers)
+    yield
+    client.headers.pop("Authorization", None)
 
 
 FAKE_STREAMS = [

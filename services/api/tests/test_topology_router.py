@@ -24,6 +24,7 @@ import types
 import uuid
 from datetime import datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import graph_db, models
@@ -32,11 +33,35 @@ from app.db import SessionLocal
 from app.main import app
 from app.routers import topology as topology_router
 
-app.dependency_overrides[get_current_user] = lambda: types.SimpleNamespace(
-    id="test-user", username="test-user", role="viewer", is_active=True
-)
-
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _use_fake_user():
+    """Overrides `get_current_user` for this module only.
+
+    This used to be a bare `app.dependency_overrides[...] = ...` at import
+    time. pytest imports every test module during collection, so that
+    override was installed for the *whole session* and silently turned every
+    other module's requests into "logged in as a viewer named test-user":
+    real-JWT tests (test_conversations_router) crashed writing the fake
+    user's non-UUID id to a UUID column, and X-API-Key tests (test_nodes,
+    test_knowledge_chat) got 403/502 instead of the 201/401 they assert.
+    A module-scoped fixture installs it for these tests and puts back
+    whatever was there before when they finish.
+    """
+    had = get_current_user in app.dependency_overrides
+    saved = app.dependency_overrides.get(get_current_user)
+    app.dependency_overrides[get_current_user] = lambda: types.SimpleNamespace(
+        id="test-user", username="test-user", role="viewer", is_active=True
+    )
+    try:
+        yield
+    finally:
+        if had:
+            app.dependency_overrides[get_current_user] = saved
+        else:
+            app.dependency_overrides.pop(get_current_user, None)
 
 
 # --------------------------------------------------------------- fake graph --

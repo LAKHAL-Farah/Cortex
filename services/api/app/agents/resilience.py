@@ -189,7 +189,7 @@ class CircuitBreaker:
                 # can pile onto the same overload. Fixed 2s rather than
                 # exponential: max_retries is 1 almost everywhere here, so
                 # there's nothing to back off progressively over.
-                time.sleep(2.0)
+                time.sleep(RETRY_PAUSE_SECONDS)
             try:
                 future = _EXECUTOR.submit(fn, *args, **kwargs)
                 value = future.result(timeout=self.timeout_seconds)
@@ -212,6 +212,10 @@ class CircuitBreaker:
         self._record_failure()
         return CallResult(ok=False, failure=_failure_record(self.name, error_type, message, attempts=attempts))
 
+
+# Pause before a retry (see CircuitBreaker.call). A module constant rather than
+# a literal so tests can zero it instead of paying 2s per retried failure.
+RETRY_PAUSE_SECONDS = 2.0
 
 _REGISTRY: dict[str, CircuitBreaker] = {}
 _REGISTRY_LOCK = threading.Lock()

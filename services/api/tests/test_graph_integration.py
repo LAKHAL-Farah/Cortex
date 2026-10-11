@@ -20,7 +20,7 @@ import app.agents.nodes.anomaly as anomaly
 import app.agents.nodes.monitoring as monitoring
 import app.agents.nodes.network as network
 from app.agents.graph import app_graph
-from app.services import cve_feed, ebpf_signal, loki_client, network_health, security_audit
+from app.services import cve_feed, ebpf_signal, exposed_ports, loki_client, network_health, security_audit
 
 NODE = {"hostname": "compute-02", "role": "compute", "instance": "10.0.1.12:9100"}
 KNOWN_NODES = [NODE]
@@ -85,6 +85,10 @@ def _stub_clean_network_and_security(monkeypatch):
     )
     monkeypatch.setattr(cve_feed, "get_package_inventory", lambda hostname: [])
     monkeypatch.setattr(ebpf_signal, "get_node_ebpf_alerts", lambda hostname: [])
+    # Security's exposed-ports cross-check (a later addition) reads the same
+    # package-inventory collector's /listening-ports route; unstubbed it tries
+    # to resolve `package-inventory` and records a spurious FailureRecord.
+    monkeypatch.setattr(exposed_ports, "get_listening_ports", lambda hostname: [])
 
 
 def _invoke(query: str):
@@ -334,6 +338,7 @@ def test_network_and_security_flavored_incidents_trigger_real_parallel_investiga
     ])
     monkeypatch.setattr(loki_client, "query_range", lambda *a, **k: [])
     monkeypatch.setattr(cve_feed, "get_package_inventory", lambda hostname: [])
+    monkeypatch.setattr(exposed_ports, "get_listening_ports", lambda hostname: [])
 
     # The network-flavored issue: a down Neutron agent on compute-01 --
     # both what pulls compute-01 into scope at all (via
@@ -372,7 +377,13 @@ def test_network_and_security_flavored_incidents_trigger_real_parallel_investiga
 
     # Both hosts genuinely got investigated -- not just the first one
     # anomaly_dispatch happened to resolve scope for.
-    multi_node = result["agent_result"]["raw_data"]["multi_node_findings"]
+    # The chained OpenStack Expert answer rebuilds raw_data from the
+    # *sanitized* arbitration block (see openstack_expert._public_arbitration),
+    # so the per-host ranking is read from `arbitration["hosts"]` -- the
+    # incident's `multi_node_findings` key only exists on the pre-expert
+    # (anomaly_arbitrate) result, and may quote Security evidence.
+    arbitration = result["agent_result"]["raw_data"]["arbitration"]
+    multi_node = arbitration["hosts"]
     assert {f["hostname"] for f in multi_node} == {"compute-01", "compute-02"}
 
     # Both flavors of issue actually surface as their own agent's theory

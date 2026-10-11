@@ -15,8 +15,10 @@ from fastapi.testclient import TestClient
 from app.auth import create_access_token, get_current_user, hash_password
 from app.db import SessionLocal
 from app.main import app
-from app import crud, schemas
+from app import crud, models, schemas
 from app.agents.nodes import security as security_agent_node
+from app.services.security_scan_cache import run_security_scan
+from tests.node_ips import next_free_node_ip
 
 client = TestClient(app)
 
@@ -62,13 +64,12 @@ def _make_node(hostname: str) -> None:
     try:
         if crud.get_node_by_hostname(db, hostname) is None:
             # Must fall inside a managed subnet -- see schemas.NodeBase's
-            # ip_must_be_in_private_subnet validator -- so this reuses the
-            # same 10.0.1.0/24 range the sandbox's compute*-sim nodes live
-            # in (infra/docker-compose.sandbox.yml), picking a unique last
-            # octet per test run to avoid colliding on the unique ip_address
-            # constraint across tests in the same session.
-            octet = int(uuid.uuid4().hex[:2], 16) % 250 + 2
-            crud.create_node(db, schemas.NodeCreate(hostname=hostname, ip_address=f"10.0.1.{octet}", role="compute"))
+            # ip_must_be_in_private_subnet validator -- so this stays in the
+            # same 10.0.1.0/24 range the sandbox's compute*-sim nodes live in
+            # (infra/docker-compose.sandbox.yml). The address comes from
+            # next_free_node_ip() so it can't collide on the unique
+            # ip_address constraint with a node another test module made.
+            crud.create_node(db, schemas.NodeCreate(hostname=hostname, ip_address=next_free_node_ip(), role="compute"))
     finally:
         db.close()
 
@@ -94,13 +95,36 @@ def _clean_investigate(monkeypatch, has_signal=False, degraded=False):
         agent_result = {
             "agent": "security",
             "summary": "1 finding." if has_signal else "All clear.",
-            "confidence": "config_signal" if has_signal else "clean_reading",
+            # A float, like the real _confidence() returns -- this lands in
+            # security_finding_cache.confidence, a Float column.
+            "confidence": (
+                security_agent_node._CONFIG_SIGNAL_CONFIDENCE
+                if has_signal else security_agent_node._NO_SIGNAL_CONFIDENCE
+            ),
             "raw_data": raw_data,
         }
         failures = [{"source": "security.neutron"}] if degraded else []
         return agent_result, failures
 
     monkeypatch.setattr(security_agent_node, "_investigate", fake_investigate)
+
+
+def _fresh_scan() -> None:
+    """Empties `security_finding_cache`, then runs one fleet-wide scan pass.
+
+    GET /status (and /findings etc.) read that cache rather than scanning
+    live per request, so a test has to populate it first. The table is
+    global and these tests share one DB with no per-test rollback, so rows
+    left by earlier tests (some with signals) would otherwise make /status's
+    fleet-wide "ok"/"degraded" depend on test order.
+    """
+    db = SessionLocal()
+    try:
+        db.query(models.SecurityFindingCache).delete()
+        db.commit()
+        run_security_scan(db)
+    finally:
+        db.close()
 
 
 # --------------------------------------------------------------------------
@@ -115,6 +139,7 @@ def test_status_requires_authentication():
 def test_status_ok_when_no_node_has_a_signal(monkeypatch):
     _make_node("sec-router-status-ok")
     _clean_investigate(monkeypatch, has_signal=False)
+    _fresh_scan()
 
     res = client.get("/api/v1/security/status", headers=_make_user_headers("admin"))
 
@@ -127,6 +152,7 @@ def test_status_ok_when_no_node_has_a_signal(monkeypatch):
 def test_status_degraded_when_any_node_has_a_signal(monkeypatch):
     _make_node("sec-router-status-degraded")
     _clean_investigate(monkeypatch, has_signal=True)
+    _fresh_scan()
 
     res = client.get("/api/v1/security/status", headers=_make_user_headers("admin"))
 
@@ -226,7 +252,11 @@ def test_get_security_groups_viewer_gets_booleans_only(monkeypatch):
     res = client.get("/api/v1/security/groups/sec-router-groups-viewer", headers=_make_user_headers("viewer"))
 
     assert res.status_code == 200
-    assert res.json() == {"has_signal": True, "degraded": False, "restricted": True}
+    body = res.json()
+    # scanned_at (when the cached row was last refreshed) goes to every role;
+    # it isn't a rule detail, so RBAC doesn't redact it.
+    assert body.pop("scanned_at")
+    assert body == {"has_signal": True, "degraded": False, "restricted": True}
 
 
 # --------------------------------------------------------------------------
