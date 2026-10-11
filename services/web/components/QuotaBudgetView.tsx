@@ -2,18 +2,20 @@
 
 import { useState } from "react";
 import { useSWRConfig } from "swr";
-import { Bell, FileText, LayoutDashboard, Table2 } from "lucide-react";
+import { Bell, FileText, Gauge, LayoutDashboard, Table2 } from "lucide-react";
 import QuotaResyncButton from "./QuotaResyncButton";
 import FinopsOverview from "./FinopsOverview";
 import FinopsProjects from "./FinopsProjects";
 import FinopsReports from "./FinopsReports";
+import FinopsRightSizing from "./FinopsRightSizing";
 import QuotaAlertsPanel from "./QuotaAlertsPanel";
 
-type Tab = "overview" | "projects" | "alerts" | "reports";
+type Tab = "overview" | "projects" | "rightsizing" | "alerts" | "reports";
 
 const TABS: { id: Tab; label: string; icon: typeof Bell }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "projects", label: "Projects", icon: Table2 },
+  { id: "rightsizing", label: "Right-sizing", icon: Gauge },
   { id: "alerts", label: "Alerts", icon: Bell },
   { id: "reports", label: "Reports", icon: FileText },
 ];
@@ -26,8 +28,11 @@ const TABS: { id: Tab; label: string; icon: typeof Bell }[] = [
  *  - Overview: how much of what we pay for is reserved vs idle, and are we
  *    promising (quotas) more than we own?
  *  - Projects: every project's usage, quota headroom, cost and budget.
+ *  - Right-sizing: over-provisioned VMs with a smaller size, savings and
+ *              risk (roadmap 4.10, recommendation only).
  *  - Alerts:   capacity-cap vs budget-cap breaches (roadmap 2.9).
- *  - Reports:  showback/chargeback by project and department, PDF/CSV.
+ *  - Reports:  showback/chargeback exports plus executive / financial /
+ *              technical PDF reports (roadmap 4.11).
  * See services/api/app/services/finops.py for the cost model.
  */
 export default function QuotaBudgetView() {
@@ -76,6 +81,7 @@ export default function QuotaBudgetView() {
 
       {tab === "overview" && <FinopsOverview />}
       {tab === "projects" && <FinopsProjects />}
+      {tab === "rightsizing" && <FinopsRightSizing />}
       {tab === "alerts" && <QuotaAlertsPanel />}
       {tab === "reports" && <FinopsReports />}
     </div>

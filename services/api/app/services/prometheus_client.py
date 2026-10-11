@@ -8,14 +8,14 @@ PROMETHEUS_URL = os.getenv(
 RANGE_URL = os.getenv("PROMETHEUS_RANGE_URL", "http://prometheus:9090/api/v1/query_range")
 
 
-def query(promql):
+def query(promql, timeout=5):
 
     response = requests.get(
         PROMETHEUS_URL,
         params={
             "query": promql
         },
-        timeout=5
+        timeout=timeout
     )
 
     response.raise_for_status()

@@ -597,6 +597,114 @@ export interface FinopsReport {
   method: string[];
 }
 
+// -- Right-sizing (roadmap 4.10) and professional reports (4.11) -------------
+
+export type RightSizingClass = "idle" | "underutilized" | "right_sized" | "saturated" | "insufficient_data";
+export type RightSizingRisk = "low" | "medium" | "high";
+export type RightSizingConfidence = "low" | "medium" | "high";
+
+export interface RightSizingAllocation {
+  flavor: string | null;
+  vcpus: number;
+  ram_mb: number;
+  monthly_cost_eur: number | null;
+  from_catalog?: boolean;
+}
+
+export interface RightSizingRecommendation {
+  vm_id: string;
+  name: string;
+  project_id: string | null;
+  project_name: string | null;
+  host: string | null;
+  status: string;
+  classification: RightSizingClass;
+  efficiency_score: number | null;
+  confidence: RightSizingConfidence;
+  current: RightSizingAllocation;
+  recommended: RightSizingAllocation;
+  utilization: {
+    cpu_avg: number | null;
+    cpu_p95: number | null;
+    cpu_max: number | null;
+    mem_avg: number | null;
+    mem_p95: number | null;
+    mem_max: number | null;
+    observed_hours: number;
+  };
+  /** null when the cloud's unit rates are unknown (nothing metered yet). */
+  estimated_monthly_savings_eur: number | null;
+  estimated_annual_savings_eur: number | null;
+  savings_pct: number | null;
+  risk: { level: RightSizingRisk; reasons: string[] };
+  rationale: string;
+  notes: string[];
+  action: string;
+}
+
+/** A VM that was analysed but needs no change (or can't be judged yet). */
+export interface RightSizingOtherVm {
+  vm_id: string;
+  name: string;
+  project_id: string | null;
+  project_name: string | null;
+  classification: RightSizingClass;
+  efficiency_score: number | null;
+  confidence: RightSizingConfidence;
+  vcpus: number;
+  ram_mb: number;
+  cpu_p95: number | null;
+  mem_p95: number | null;
+}
+
+export interface RightSizingSummary {
+  currency: string;
+  vms_analyzed: number;
+  flagged: number;
+  by_classification: Record<RightSizingClass, number>;
+  by_risk: Record<RightSizingRisk, number>;
+  estimated_monthly_savings_eur: number | null;
+  estimated_annual_savings_eur: number | null;
+  low_risk_monthly_savings_eur: number | null;
+  fleet_efficiency_score: number | null;
+  priced: boolean;
+  rate_source: string;
+  by_project: { project_id: string | null; project_name: string; vms: number; flagged: number; monthly_savings_eur: number }[];
+}
+
+export type RightSizingResponse =
+  | {
+      available: false;
+      reason: string;
+      source: string;
+      window_days: number;
+      recommendation_only: true;
+      recommendations: [];
+      others: [];
+      summary: null;
+    }
+  | {
+      available: true;
+      source: "live" | "synthetic";
+      window_days: number;
+      generated_at: string;
+      recommendation_only: true;
+      flavor_catalog: "nova" | "ladder";
+      caveat: string;
+      summary: RightSizingSummary;
+      recommendations: RightSizingRecommendation[];
+      others: RightSizingOtherVm[];
+    };
+
+export type ReportVariant = "executive" | "financial" | "technical";
+
+export interface ReportVariantInfo {
+  id: ReportVariant;
+  title: string;
+  audience: string;
+  description: string;
+}
+
 // -- Knowledge copilot (adr-0005) ------------------------------------------
 
 export type ChatRole = "user" | "assistant";

@@ -605,6 +605,27 @@ def fetch_instance_reachability(instance_id: str) -> dict | None:
         }
 
 
+def fetch_instance_inventory() -> list[dict]:
+    """Every :Instance with the allocation facts right-sizing needs (flavor
+    vCPU/RAM, status, owning project, hypervisor), straight from the topology
+    graph -- same "the graph already has this from topology_sync's regular
+    pass" reasoning as `fetch_all_instances`, so right-sizing adds no new
+    OpenStack polling. `host` is the :Node id the VM RUNS_ON, or None."""
+    with driver.session() as session:
+        result = session.run(
+            """
+            MATCH (i:Instance)
+            RETURN i {
+                .id, .name, .status, .project_id,
+                .flavor_name, .flavor_vcpus, .flavor_ram_mb,
+                host: head([(i)-[:RUNS_ON]->(n:Node) | n.id])
+            } AS instance
+            """
+        )
+        instances = [dict(record["instance"]) for record in result]
+        return sorted(instances, key=lambda i: (i.get("name") or "", i["id"]))
+
+
 def fetch_all_instances() -> list[dict]:
     """Every :Instance vertex's id + name, straight from the topology
     graph -- what services/instance_exposure.py's fleet-wide instance-

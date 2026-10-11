@@ -19,6 +19,8 @@ from .routers import knowledge
 from .routers import conversations
 from .routers import settings
 from .routers import quotas
+from .routers import rightsizing as rightsizing_router
+from .routers import reports as reports_router
 from .routers import agents
 from .routers import remediation
 from .routers import security
@@ -436,6 +438,10 @@ app.include_router(forecast.router, dependencies=_auth_required)
 app.include_router(topology.router, dependencies=_auth_required)
 app.include_router(network.router, dependencies=_auth_required)
 app.include_router(quotas.router, dependencies=_auth_required)
+# Roadmap 4.10 right-sizing (read-only recommendations) and 4.11 on-demand
+# PDF reports -- request/response only, nothing to poll on a schedule.
+app.include_router(rightsizing_router.router, dependencies=_auth_required)
+app.include_router(reports_router.router, dependencies=_auth_required)
 # Not added to the periodic lifespan tasks above on purpose -- unlike anomaly
 # detection/baselines/forecasting/topology sync, the knowledge base doesn't
 # drift on a schedule (see adr-0004), so ingestion is triggered on demand via

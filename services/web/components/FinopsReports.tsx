@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { AlertTriangle, Download, FileSpreadsheet, FileText, Info } from "lucide-react";
-import type { FinopsReport } from "@/lib/types";
+import { AlertTriangle, Download, FileSpreadsheet, FileText, Info, Loader2 } from "lucide-react";
+import type { FinopsReport, ReportVariant, ReportVariantInfo } from "@/lib/types";
 import { formatEur, formatPct, jsonFetcher, ratioColor } from "@/lib/quotas";
 import { Card } from "./ui/Card";
 
@@ -36,7 +36,99 @@ function ExportButton({ href, icon: Icon, children }: { href: string; icon: type
   );
 }
 
+
+const VARIANTS: ReportVariantInfo[] = [
+  {
+    id: "executive",
+    title: "Executive summary",
+    audience: "Management",
+    description: "Posture, headline cost and risk KPIs, decisions needed and top savings. One page.",
+  },
+  {
+    id: "financial",
+    title: "Financial report",
+    audience: "Finance / project owners",
+    description: "Showback and chargeback by department and project, budgets, projections and right-sizing savings.",
+  },
+  {
+    id: "technical",
+    title: "Technical report",
+    audience: "Operations / engineering",
+    description: "Capacity per node, forecast breaches, security findings, anomalies, agent actions and VM sizing detail.",
+  },
+];
+
+/** Fetches the PDF (rather than a bare <a download>) so the user sees that
+ * generation is running -- the operational variants query Prometheus -- and
+ * gets the API's real error message if it fails. */
+function ReportCard({ info, period, demo }: { info: ReportVariantInfo; period: string; demo: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [ai, setAi] = useState(false);
+
+  async function download(variant: ReportVariant) {
+    setBusy(true);
+    setError(null);
+    try {
+      const qs = new URLSearchParams({ period });
+      if (variant === "executive" && ai) qs.set("ai", "true");
+      if (demo) qs.set("rightsizing_source", "synthetic");
+      const res = await fetch(`/api/reports/${variant}/pdf?${qs}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error((body && (body.detail || body.message)) || `Request failed (${res.status})`);
+      }
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `cortex-${variant}-report-${period}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Report generation failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="flex flex-col justify-between gap-3">
+      <div>
+        <div className="text-sm font-semibold text-color-text">{info.title}</div>
+        <div className="text-xs text-text-faint">For {info.audience}</div>
+        <p className="mt-2 text-xs text-text-dim">{info.description}</p>
+      </div>
+      <div className="space-y-2">
+        {info.id === "executive" && (
+          <label className="flex items-center gap-1.5 text-xs text-text-faint">
+            <input type="checkbox" checked={ai} onChange={(e) => setAi(e.target.checked)} />
+            AI-written summary (slower)
+          </label>
+        )}
+        <button
+          type="button"
+          onClick={() => download(info.id)}
+          disabled={busy}
+          className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-control)] border px-3 text-sm font-medium text-color-text disabled:opacity-60"
+          style={{ borderColor: "var(--border)" }}
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} /> : <FileText className="h-3.5 w-3.5" strokeWidth={2} />}
+          {busy ? "Generating…" : "Download PDF"}
+        </button>
+        {error && (
+          <p className="text-xs" role="alert" style={{ color: "var(--crit)" }}>
+            {error}
+          </p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 export default function FinopsReports() {
+  const [demoVms, setDemoVms] = useState(false);
   const [period, setPeriod] = useState<string>("");
   const key = `/api/quotas/report${period ? `?period=${period}` : ""}`;
   const { data, error, isLoading } = useSWR<FinopsReport>(key, jsonFetcher<FinopsReport>, {
@@ -85,6 +177,26 @@ export default function FinopsReports() {
           <ExportButton href={`/api/quotas/report/csv${qs}`} icon={FileSpreadsheet}>
             Export CSV
           </ExportButton>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <div className="text-sm font-semibold text-color-text">Professional reports</div>
+            <div className="text-xs text-text-faint">
+              Generated on demand for {monthLabel(data.period)}. Operational figures (capacity, security, alerts) always cover the last 7 days.
+            </div>
+          </div>
+          <label className="inline-flex items-center gap-1.5 text-xs text-text-faint">
+            <input type="checkbox" checked={demoVms} onChange={(e) => setDemoVms(e.target.checked)} />
+            Use demo VM data (labelled in the PDF)
+          </label>
+        </div>
+        <div className="grid gap-3 md:grid-cols-3">
+          {VARIANTS.map((v) => (
+            <ReportCard key={v.id} info={v} period={data.period} demo={demoVms} />
+          ))}
         </div>
       </div>
 
