@@ -1,16 +1,23 @@
 // Default copy for each Landing section. Used as fallback when no override row
 // exists in the `landing_sections` table.
 //
-// Product: Cortex — an AIOps observability platform for OpenStack private
-// clouds. Metrics/logs from Prometheus + Loki, median/MAD baselines, a live
-// topology graph, graph-correlated incidents, quantile forecasting, and a
-// RAG knowledge copilot.
+// Product: Cortex -- an AI cockpit for OpenStack private clouds. Prometheus +
+// node_exporter metrics and Loki logs feed median/MAD weekday-hour baselines, a
+// Neo4j topology graph (the "living model") that alerts are correlated across,
+// pooled quantile forecasts, security signals (auth logs, security groups,
+// exposed ports, CVEs, Keystone tokens, optional eBPF), a LangGraph multi-agent
+// copilot grounded in Qdrant-indexed runbooks and OpenStack docs, and a
+// remediation flow that proposes, simulates, asks for approval and only then
+// executes via Ansible -- Confidence-Ladder Level 0, every step audited.
+//
+// Keep every claim here true of the shipped code; this page is the first thing
+// people read about the product.
 
 export type LandingSectionKey =
   | "hero"
   | "popular_events"
   | "features"
-  | "testimonials"
+  | "guardrails"
   | "cta";
 
 export interface HeroContent {
@@ -36,9 +43,11 @@ export interface FeaturesContent {
   items: { tag: string; title: string; description: string }[];
 }
 
-export interface TestimonialsContent {
+export interface GuardrailsContent {
+  eyebrow: string;
   title: string;
-  items: { quote: string; name: string; role: string }[];
+  subhead: string;
+  items: { tag: string; title: string; description: string }[];
 }
 
 export interface CtaContent {
@@ -50,95 +59,116 @@ export interface CtaContent {
 
 export const LANDING_DEFAULTS = {
   hero: {
-    badge: "AIOps for private cloud",
-    headline_prefix: "Your OpenStack cloud, explained by an",
-    rotating_words: ["AIOps brain.", "incident copilot.", "anomaly engine.", "topology graph."],
+    badge: "AI cockpit for OpenStack",
+    headline_prefix: "Operate your OpenStack cloud with",
+    rotating_words: ["AI diagnosis.", "early warnings.", "approved fixes.", "full audit trails."],
     subhead:
-      "Cortex ingests Prometheus metrics and Loki logs, learns each service's normal behaviour, correlates anomalies across your topology graph, and explains the incident in plain language — before your users notice.",
-    cta: "Deploy Cortex",
+      "Cortex collects metrics and logs from every node, learns what normal looks like on your own infrastructure, groups related alerts into one incident through a live topology graph, and explains it in plain language. It proposes the fix — you approve it.",
+    cta: "Open the cockpit",
   } as HeroContent,
   popular_events: {
-    title_line_1: "Live signal",
-    title_line_2: "across the fleet",
+    title_line_1: "Every node,",
+    title_line_2: "one health picture",
     subhead:
-      "Controller, compute and storage nodes streaming metrics, logs and health checks into Cortex right now.",
-    cta_label: "Open the console",
+      "Controller, compute, storage, network and monitoring nodes report through node_exporter. Each card shows what Cortex surfaces for a node — health, anomalies against its baseline, capacity forecasts. Illustrative fleet; yours appears once nodes are registered.",
+    cta_label: "Open your fleet",
   } as PopularEventsContent,
   features: {
-    eyebrow: "Built for cloud operators",
+    eyebrow: "Built for OpenStack operators",
     title_line_1: "From raw telemetry to",
-    title_line_2: "a diagnosed incident.",
+    title_line_2: "an approved fix.",
     subhead:
-      "Cortex closes the loop between detection, correlation, prediction and remediation on OpenStack 2024.1 deployments.",
+      "Metrics, logs, topology and your own runbooks feed a team of specialised agents. Detection, diagnosis and remediation are one workflow, with a person on the last step.",
     items: [
       {
         tag: "Detection",
-        title: "Baselines, not static thresholds",
+        title: "Baselines that know your Tuesday 10:00",
         description:
-          "Median/MAD baselines per service and per node flag genuine deviations while ignoring the noise thresholds always trip on.",
+          "Robust median/MAD baselines per node, per metric, per weekday and hour. Deviations are scored 2 / 3 / 4σ as medium, high and critical, so normal rhythms stay quiet and real drift stands out.",
       },
       {
         tag: "Correlation",
-        title: "Graph-correlated incidents",
+        title: "One incident, not twenty alerts",
         description:
-          "Alerts are walked across the topology graph so twenty symptoms collapse into one incident with a probable root cause.",
+          "Alerts are walked across the live topology graph — hosts, services, networks, instances — and grouped into a single incident with a probable root cause and a plain-language narrative.",
       },
       {
-        tag: "Forecasting",
+        tag: "Forecasting & capacity",
         title: "Saturation seen in advance",
         description:
-          "Pooled quantile forecasts project CPU, memory and volume growth so you resize capacity days before it becomes an outage.",
+          "Pooled quantile forecasts for CPU, memory and disk give a time-to-threshold ETA. A what-if simulator, quota and budget alerts, and VM right-sizing turn it into capacity decisions.",
+      },
+      {
+        tag: "Security",
+        title: "Security signals in context",
+        description:
+          "SSH auth-log anomalies, security-group drift, exposed ports, CVE matching and Keystone token audit — plus kernel-level eBPF signals from Falco or Tetragon when a sensor is deployed.",
       },
       {
         tag: "Copilot",
-        title: "RAG knowledge assistant",
+        title: "Ask the cloud, in plain language",
         description:
-          "Runbooks, logs and OpenStack docs are vector-indexed so operators can ask what broke and what to run next, in plain language.",
+          "A LangGraph orchestrator routes your question to the monitoring, anomaly, prediction, network, security and knowledge agents, with answers grounded in your runbooks and the OpenStack docs indexed in Qdrant.",
+      },
+      {
+        tag: "Remediation",
+        title: "Fixes you approve, never surprises",
+        description:
+          "The remediation agent proposes a concrete fix and simulates its impact on the topology graph. You approve, reject or ask for more information, then run it with an explicit click via Ansible.",
       },
     ],
   } as FeaturesContent,
 
-  testimonials: {
-    title: "Trusted by platform teams",
+  guardrails: {
+    eyebrow: "Guardrails",
+    title: "Built to be trusted with production",
+    subhead:
+      "An AI that can propose changes to your cloud needs hard limits. These are enforced in the product, not left to convention.",
     items: [
       {
-        quote:
-          "Cortex tied a Neutron L3 flap to a single compute host in seconds. That used to be a two-hour Grafana crawl.",
-        name: "Sarah Chen",
-        role: "Platform SRE",
+        tag: "Autonomy",
+        title: "Nothing runs without your click",
+        description:
+          "Cortex sits at Level 0 of the confidence ladder: it diagnoses and proposes, a person approves, and only an explicit click executes the fix — even for low-risk changes.",
       },
       {
-        quote:
-          "The MAD baselines killed our alert fatigue. Pager volume dropped by more than half in the first sprint.",
-        name: "Marcus Williams",
-        role: "Cloud operations lead",
+        tag: "Simulation",
+        title: "Impact shown before you decide",
+        description:
+          "Every proposal is simulated read-only against the topology graph, so you see which services, containers and instances a command would touch before you approve it.",
       },
       {
-        quote:
-          "Quantile forecasting warned us about Cinder saturation four days out. We resized during business hours.",
-        name: "Priya Patel",
-        role: "Infrastructure engineer",
+        tag: "Audit",
+        title: "Every decision on the record",
+        description:
+          "Diagnosis, proposal, approval or rejection, and execution are written to a timestamped audit trail you can browse from the console.",
       },
       {
-        quote:
-          "The topology graph is the first view that actually matches how our Kolla-Ansible deployment is wired.",
-        name: "James Liu",
-        role: "OpenStack administrator",
+        tag: "Access",
+        title: "Role-based by default",
+        description:
+          "Admin, operator and viewer roles. Operators handle low and medium-risk fixes, higher-risk ones need an admin, and viewers are read-only.",
       },
       {
-        quote:
-          "New on-call engineers ask the copilot instead of pinging me at 3am. That alone paid for the rollout.",
-        name: "Amara Osei",
-        role: "Head of infrastructure",
+        tag: "Alerting",
+        title: "Routed by severity",
+        description:
+          "Medium alerts stay on the dashboard. High and critical alerts are emailed and escalate if nobody acknowledges them. A weekly digest summarises capacity, security and what the agents caught.",
+      },
+      {
+        tag: "Resilience",
+        title: "Degrades, never goes dark",
+        description:
+          "If Prometheus, Loki or the language model is unreachable, each agent and dashboard widget falls back on its own with a clear degraded state instead of blanking the page.",
       },
     ],
-  } as TestimonialsContent,
+  } as GuardrailsContent,
   cta: {
-    title_line_1: "Stop chasing dashboards.",
-    title_line_2: "Start reading root causes.",
+    title_line_1: "Stop correlating alerts by hand.",
+    title_line_2: "Let Cortex explain the incident.",
     subhead:
-      "Point Cortex at your Prometheus and Loki endpoints and get baselines, correlated incidents and forecasts on day one.",
-    cta_label: "Get started free",
+      "Register your nodes, point Cortex at Prometheus and Loki, and get baselines, correlated incidents, forecasts and reviewed fix proposals in one console.",
+    cta_label: "Sign in to Cortex",
   } as CtaContent,
 };
 
@@ -146,7 +176,7 @@ export type LandingContentMap = {
   hero: HeroContent;
   popular_events: PopularEventsContent;
   features: FeaturesContent;
-  testimonials: TestimonialsContent;
+  guardrails: GuardrailsContent;
   cta: CtaContent;
 };
 
@@ -154,6 +184,6 @@ export const LANDING_SECTION_LABELS: Record<LandingSectionKey, string> = {
   hero: "Hero",
   popular_events: "Fleet status heading",
   features: "Capabilities grid",
-  testimonials: "Testimonials",
+  guardrails: "Guardrails",
   cta: "Final call to action",
 };

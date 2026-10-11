@@ -15,7 +15,6 @@ import { motion, AnimatePresence, useScroll, useTransform, useReducedMotion } fr
 import styles from "./public-pages.module.css";
 import {
   ArrowRight,
-  Star,
   Activity,
   Share2,
   TrendingUp,
@@ -24,21 +23,37 @@ import {
   Server,
   HardDrive,
   Network,
+  ShieldCheck,
+  Wrench,
+  MousePointerClick,
+  FlaskConical,
+  ScrollText,
+  KeyRound,
+  Bell,
+  LifeBuoy,
 } from "lucide-react";
 
-const FEATURE_ICONS = [Activity, Share2, TrendingUp, Sparkles];
+// Order matches LANDING_DEFAULTS.features.items:
+// detection, correlation, forecasting, security, copilot, remediation.
+const FEATURE_ICONS = [Activity, Share2, TrendingUp, ShieldCheck, Sparkles, Wrench];
 const FEATURE_TINTS = [
   "bg-primary/10 text-primary",
   "bg-info/10 text-info",
   "bg-success/10 text-success",
-  "bg-violet/10 text-violet",
-];
-const AVATAR_TINTS = [
-  "bg-primary/10 text-primary",
-  "bg-info/10 text-info",
-  "bg-success/10 text-success",
-  "bg-violet/10 text-violet",
   "bg-warning/10 text-warning",
+  "bg-violet/10 text-violet",
+  "bg-primary/10 text-primary",
+];
+// Order matches LANDING_DEFAULTS.guardrails.items:
+// autonomy, simulation, audit, access, alerting, resilience.
+const GUARDRAIL_ICONS = [MousePointerClick, FlaskConical, ScrollText, KeyRound, Bell, LifeBuoy];
+const GUARDRAIL_TINTS = [
+  "bg-primary/10 text-primary",
+  "bg-violet/10 text-violet",
+  "bg-info/10 text-info",
+  "bg-warning/10 text-warning",
+  "bg-primary/10 text-primary",
+  "bg-success/10 text-success",
 ];
 
 const fadeUp = {
@@ -69,26 +84,6 @@ function Sparkline({ color = "hsl(var(--primary))" }: { color?: string }) {
   );
 }
 
-/** Counter that keeps ticking, so the hero feels like a live metrics feed. */
-function LiveCounter({ start, step = 1, interval = 2200 }: { start: number; step?: number; interval?: number }) {
-  const [value, setValue] = useState(start);
-  useEffect(() => {
-    const id = setInterval(() => setValue((v) => v + Math.ceil(Math.random() * step)), interval);
-    return () => clearInterval(id);
-  }, [step, interval]);
-  return <span className="stat-figure tabular-nums">{value.toLocaleString()}</span>;
-}
-
-function initials(name: string) {
-  return name
-    .split(" ")
-    .map((p) => p[0])
-    .filter(Boolean)
-    .slice(0, 2)
-    .join("")
-    .toUpperCase();
-}
-
 const Landing = () => {
   const router = useRouter();
   const { user, loading: authLoading } = useCurrentUser();
@@ -101,7 +96,7 @@ const Landing = () => {
   const hero = LANDING_DEFAULTS.hero;
   const fleet = LANDING_DEFAULTS.popular_events;
   const featuresContent = LANDING_DEFAULTS.features;
-  const testimonialsContent = LANDING_DEFAULTS.testimonials;
+  const guardrailsContent = LANDING_DEFAULTS.guardrails;
   const ctaContent = LANDING_DEFAULTS.cta;
   const rotatingWords = hero.rotating_words;
 
@@ -198,7 +193,7 @@ const Landing = () => {
           <nav className="hidden md:flex items-center gap-7 text-sm font-medium text-muted-foreground">
             <a href="#fleet" className="hover:text-foreground transition-colors">Fleet</a>
             <a href="#features" className="hover:text-foreground transition-colors">Platform</a>
-            <a href="#testimonials" className="hover:text-foreground transition-colors">Customers</a>
+            <a href="#guardrails" className="hover:text-foreground transition-colors">Guardrails</a>
           </nav>
           <div className="flex items-center gap-2">
             <ThemeToggle />
@@ -290,7 +285,7 @@ const Landing = () => {
                 </Link>
               </Button>
               <Button size="lg" variant="outline" className="text-sm font-semibold px-7 h-12 w-full sm:w-auto glass" asChild>
-                <a href="#fleet">See the live fleet</a>
+                <a href="#fleet">See a sample fleet</a>
               </Button>
             </div>
           </motion.div>
@@ -334,7 +329,7 @@ const Landing = () => {
               </p>
               <p className="stat-figure text-2xl text-foreground">4.2σ</p>
               <Sparkline color="hsl(var(--primary))" />
-              <p className="text-[11px] text-muted-foreground">nova-compute · compute-02 iowait</p>
+              <p className="text-[11px] text-muted-foreground">Example · compute-02 iowait vs. its weekday-hour baseline</p>
             </motion.div>
 
             <motion.div
@@ -345,13 +340,14 @@ const Landing = () => {
               style={reduce ? undefined : { y: cardBY }}
             >
               <p className="eyebrow mb-2 flex items-center gap-1.5">
-                <Network className="w-3 h-3 text-info" /> Correlated incident
+                <Network className="w-3 h-3 text-info" /> Correlated incident · example
               </p>
               <p className="text-xs text-foreground leading-relaxed">
                 18 alerts collapsed into <span className="stat-figure text-primary">1 incident</span> — probable cause
                 on <span className="stat-figure">compute-02</span>.
               </p>
-              <div className="mt-3 space-y-1.5">
+              <p className="eyebrow mt-3 mb-1.5">Root-cause likelihood</p>
+              <div className="space-y-1.5">
                 {[
                   { label: "nova-compute", pct: 94, tone: "bg-primary" },
                   { label: "ovs-br-ex", pct: 61, tone: "bg-info" },
@@ -376,9 +372,9 @@ const Landing = () => {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.7, delay: 0.85 }}
             >
-              <p className="eyebrow mb-0.5">Series ingested</p>
-              <p className="text-lg text-foreground">
-                <LiveCounter start={184203} step={140} interval={1500} />
+              <p className="eyebrow mb-0.5">Scrape interval</p>
+              <p className="stat-figure text-lg text-foreground flex items-center gap-2">
+                <span className="status-dot bg-success animate-pulse" /> 20 s
               </p>
             </motion.div>
 
@@ -388,9 +384,9 @@ const Landing = () => {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.7, delay: 0.95 }}
             >
-              <p className="eyebrow mb-0.5">Control plane</p>
+              <p className="eyebrow mb-0.5">Autonomy</p>
               <p className="stat-figure text-lg text-foreground flex items-center gap-2">
-                <span className="status-dot bg-success animate-pulse" /> 99.98%
+                <span className="status-dot bg-primary" /> Level 0 · you approve
               </p>
             </motion.div>
           </div>
@@ -402,10 +398,10 @@ const Landing = () => {
             transition={{ duration: 0.55 }}
           >
             {[
-              { figure: "1.4M", label: "Metric samples/min" },
-              { figure: "-63%", label: "Alert noise" },
-              { figure: "<2s", label: "Correlation latency" },
-              { figure: "4 days", label: "Saturation lead time" },
+              { figure: "20 s", label: "Metric scrape interval" },
+              { figure: "7 × 24", label: "Weekday-hour baselines" },
+              { figure: "90 days", label: "Max forecast horizon" },
+              { figure: "Level 0", label: "Every fix needs approval" },
             ].map((stat) => (
               <div key={stat.label} className="relative glass light-sweep rounded-none px-6 py-5 text-center">
                 <dt className="eyebrow order-2 mt-1.5">{stat.label}</dt>
@@ -434,7 +430,7 @@ const Landing = () => {
               <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
             </Link>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5" aria-label="Illustrative fleet">
             {fleetNodes.map((node, i) => {
               const Icon = node.icon;
               return (
@@ -479,7 +475,7 @@ const Landing = () => {
             <p className="text-muted-foreground text-base lg:text-lg">{featuresContent.subhead}</p>
           </motion.div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
             {featuresContent.items.map((feature, i) => {
               const Icon = FEATURE_ICONS[i % FEATURE_ICONS.length];
               const tint = FEATURE_TINTS[i % FEATURE_TINTS.length];
@@ -509,9 +505,9 @@ const Landing = () => {
       {/* Stack strip */}
       <section className="relative z-10 py-14 border-t border-border">
         <div className="max-w-6xl mx-auto px-6 lg:px-8">
-          <p className="eyebrow text-center mb-7">Runs on the stack you already operate</p>
+          <p className="eyebrow text-center mb-7">Built on</p>
           <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3">
-            {["OpenStack 2024.1", "Kolla-Ansible", "Prometheus", "Loki", "Grafana", "Qdrant", "LangChain"].map((t) => (
+            {["OpenStack 2024.1", "Kolla-Ansible", "Prometheus", "node_exporter", "Loki", "Neo4j", "Qdrant", "LangGraph", "NVIDIA NIM", "Ansible"].map((t) => (
               <span key={t} className="stat-figure text-sm text-muted-foreground">
                 {t}
               </span>
@@ -520,42 +516,38 @@ const Landing = () => {
         </div>
       </section>
 
-      {/* Testimonials */}
-      <section id="testimonials" className="relative z-10 py-20 lg:py-28 border-t border-border">
+      {/* Guardrails */}
+      <section id="guardrails" className="relative z-10 py-20 lg:py-28 border-t border-border">
         <div className="max-w-7xl mx-auto px-6 lg:px-8">
-          <motion.div className="text-center mb-14" {...fadeUp} transition={{ duration: 0.55 }}>
-            <p className="eyebrow text-primary mb-3">Social proof</p>
-            <h2 className="text-3xl sm:text-4xl font-display font-bold text-foreground tracking-[-0.025em]">
-              {testimonialsContent.title}
+          <motion.div className="text-center max-w-2xl mx-auto mb-14" {...fadeUp} transition={{ duration: 0.55 }}>
+            <p className="eyebrow text-primary mb-3">{guardrailsContent.eyebrow}</p>
+            <h2 className="text-3xl sm:text-4xl font-display font-bold text-foreground tracking-[-0.025em] mb-3">
+              {guardrailsContent.title}
             </h2>
+            <p className="text-muted-foreground text-base">{guardrailsContent.subhead}</p>
           </motion.div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-            {testimonialsContent.items.map((testimonial, i) => (
-              <motion.div
-                key={`${testimonial.name}-${i}`}
-                {...fadeUp}
-                transition={{ duration: 0.5, delay: (i % 3) * 0.07, ease: [0.22, 1, 0.36, 1] }}
-              >
-                <div className="h-full panel p-6 flex flex-col">
-                  <div className="flex gap-0.5 mb-4">
-                    {[...Array(5)].map((_, j) => (
-                      <Star key={j} className="w-3.5 h-3.5 fill-warning text-warning" />
-                    ))}
-                  </div>
-                  <p className="text-foreground text-sm leading-relaxed mb-6 flex-1">&quot;{testimonial.quote}&quot;</p>
-                  <div className="flex items-center gap-3">
-                    <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold ${AVATAR_TINTS[i % AVATAR_TINTS.length]}`}>
-                      {initials(testimonial.name)}
+            {guardrailsContent.items.map((item, i) => {
+              const Icon = GUARDRAIL_ICONS[i % GUARDRAIL_ICONS.length];
+              const tint = GUARDRAIL_TINTS[i % GUARDRAIL_TINTS.length];
+              return (
+                <motion.div
+                  key={item.title}
+                  {...fadeUp}
+                  transition={{ duration: 0.5, delay: (i % 3) * 0.07, ease: [0.22, 1, 0.36, 1] }}
+                >
+                  <div className="h-full panel p-6 flex flex-col">
+                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center mb-4 ${tint}`}>
+                      <Icon className="w-4 h-4" />
                     </div>
-                    <div>
-                      <p className="font-semibold text-sm text-foreground">{testimonial.name}</p>
-                      <p className="text-xs text-muted-foreground">{testimonial.role}</p>
-                    </div>
+                    <p className="eyebrow mb-1.5">{item.tag}</p>
+                    <h3 className="font-display font-semibold text-base text-foreground mb-2 tracking-[-0.01em]">{item.title}</h3>
+                    <p className="text-foreground/80 text-sm leading-relaxed flex-1">{item.description}</p>
                   </div>
-                </div>
-              </motion.div>
-            ))}
+                </motion.div>
+              );
+            })}
           </div>
         </div>
       </section>
@@ -586,7 +578,7 @@ const Landing = () => {
                   {ctaContent.cta_label} <ArrowRight className="ml-2 w-4 h-4" />
                 </Link>
               </Button>
-              <p className="stat-figure text-[11px] opacity-50 mt-6">Self-hosted or managed · No agent lock-in</p>
+              <p className="stat-figure text-[11px] opacity-50 mt-6">Self-hosted · Built for OpenStack 2024.1</p>
             </div>
           </motion.div>
         </div>
@@ -599,20 +591,20 @@ const Landing = () => {
             <div>
               <Logo size="md" />
               <p className="text-sm text-muted-foreground mt-3 max-w-xs">
-                AIOps observability for OpenStack private clouds.
+                An AI cockpit for OpenStack private clouds: monitor, diagnose, forecast and fix — with your approval.
               </p>
             </div>
             <nav className="flex flex-wrap gap-x-8 gap-y-3 text-sm font-medium text-muted-foreground">
               <a href="#fleet" className="hover:text-foreground transition-colors">Fleet</a>
               <a href="#features" className="hover:text-foreground transition-colors">Platform</a>
-              <a href="#testimonials" className="hover:text-foreground transition-colors">Customers</a>
+              <a href="#guardrails" className="hover:text-foreground transition-colors">Guardrails</a>
               <Link href="/login" className="hover:text-foreground transition-colors">Log in</Link>
             </nav>
           </div>
           <div className="mt-10 pt-6 border-t border-border flex flex-col sm:flex-row items-center justify-between gap-3">
             <p className="stat-figure text-[11px] text-muted-foreground">© 2026 Cortex</p>
             <p className="stat-figure text-[11px] text-muted-foreground flex items-center gap-2">
-              <span className="status-dot bg-success" /> All systems operational
+              Built for OpenStack 2024.1 (Caracal)
             </p>
           </div>
         </div>
