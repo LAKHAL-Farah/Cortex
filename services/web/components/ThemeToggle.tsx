@@ -8,7 +8,7 @@ export default function ThemeToggle() {
       const t = localStorage.getItem("cortex-theme");
       if (t) return t === "dark";
       return matchMedia && matchMedia("(prefers-color-scheme: dark)").matches;
-    } catch (e) {
+    } catch {
       return false;
     }
   });
@@ -19,7 +19,7 @@ export default function ThemeToggle() {
       if (dark) doc.classList.add("dark");
       else doc.classList.remove("dark");
       localStorage.setItem("cortex-theme", dark ? "dark" : "light");
-    } catch (e) {}
+    } catch {}
   }, [dark]);
 
   return (

@@ -9,7 +9,7 @@ import Header from "./Header";
 // in the authenticated app chrome (sidebar nav + header with search/user
 // badge) — showing that chrome on the login screen implied a session that
 // didn't exist yet.
-const CHROMELESS_ROUTES = ["/login", "/account/change-password"];
+const CHROMELESS_ROUTES = ["/", "/login", "/account/change-password"];
 
 export default function AppChrome({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
