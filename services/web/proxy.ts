@@ -9,6 +9,10 @@ import { SESSION_COOKIE } from "@/lib/serverAuth";
  * pages before that 401 round-trips, by bouncing straight to /login when
  * there's obviously no session at all. */
 export function proxy(req: NextRequest) {
+  if (req.nextUrl.pathname === "/") {
+    return NextResponse.next();
+  }
+
   const hasSession = req.cookies.has(SESSION_COOKIE);
 
   if (!hasSession) {
