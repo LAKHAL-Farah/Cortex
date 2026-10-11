@@ -1601,3 +1601,113 @@ export interface AgentOrchestrateResponse {
   steps?: AgentTraceStep[];
 }
 
+
+// --- Roadmap 4.8: one incident, end to end (GET /remediation/audit/incidents) ---
+
+export type IncidentStageName = "diagnose" | "propose" | "validate" | "execute";
+
+export interface IncidentStage {
+  stage: IncidentStageName;
+  done: boolean;
+  /** true when the tamper-evident chain itself records this stage */
+  chained: boolean;
+  at: string | null;
+  by: string | null;
+  detail: string | null;
+}
+
+export interface IncidentSummary {
+  trace_id: string;
+  hosts: string[];
+  proposals: number;
+  outcome: string;
+  highest_risk: string | null;
+  first_at: string | null;
+  last_at: string | null;
+}
+
+export interface IncidentAuditEntry {
+  id: number;
+  proposal_row_id: string;
+  proposal_id: string;
+  event: string;
+  from_status: string | null;
+  to_status: string;
+  actor_username: string | null;
+  actor_role: string | null;
+  comment: string | null;
+  details: Record<string, unknown>;
+  entry_hash: string;
+  created_at: string;
+}
+
+export interface IncidentAlert {
+  id: string;
+  hostname: string;
+  metric_name: string;
+  severity: string;
+  started_at: string | null;
+  resolved_at: string | null;
+  acknowledged_at: string | null;
+  acknowledged_by: string | null;
+  routing: AlertRouting | null;
+}
+
+export interface IncidentAudit {
+  trace_id: string;
+  outcome: string;
+  complete: boolean;
+  stages: IncidentStage[];
+  trace: {
+    trace_id: string;
+    created_at: string | null;
+    user_query: string;
+    intent: string | null;
+    target_agent: string | null;
+    critic_verdict_status: string | null;
+    degraded: boolean;
+    requested_by_role: string | null;
+    steps: { node: string | null; status: string | null; duration_ms: number | null }[];
+  } | null;
+  proposals: {
+    id: string;
+    proposal_id: string;
+    status: string;
+    command: string | null;
+    host: string | null;
+    effective_risk: string | null;
+  }[];
+  entries: IncidentAuditEntry[];
+  alerts: IncidentAlert[];
+  chain: { ok: boolean; entries_checked: number; broken_at: number | null; reason: string | null };
+}
+
+// --- Anomaly detection sensitivity (GET /settings/anomaly-detection) ---
+
+export type SensitivityPreset = "low" | "balanced" | "high" | "custom";
+
+export interface DetectionValues {
+  z: { medium: number; high: number; critical: number };
+  ssh: { medium: number; high: number; critical: number };
+  persist_minutes: number;
+}
+
+export interface DetectionSettings {
+  preset: SensitivityPreset;
+  effective: DetectionValues & { confirm_ticks: number };
+  presets: Record<"low" | "balanced" | "high", DetectionValues>;
+  custom: DetectionValues;
+  limits: { z: [number, number]; ssh: [number, number]; persist_minutes: [number, number] };
+  detection_interval_seconds: number;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+export interface DetectionPreview {
+  window_days: number;
+  alerts_raised: number;
+  alerts_would_raise: number;
+  by_severity_raised: Record<"medium" | "high" | "critical", number>;
+  by_severity_would_raise: Record<"medium" | "high" | "critical", number>;
+  unaffected_service_alerts: number;
+}

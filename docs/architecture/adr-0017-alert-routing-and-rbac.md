@@ -45,3 +45,11 @@ Risk is the proposal's *effective* risk (command rating raised by the impact sim
 - **Refused attempts are not written to the chain.** The existing design (and tests) treat "nothing was decided" as not an audit event; logging them would also let any account append rows at will. They are logged as warnings.
 - **No separation of duties** (the requester may approve their own proposal). Reasonable next step once there is more than one operator.
 - **Per-permission tables.** Three fixed roles are enough for now (see `models.User`).
+
+
+## Addendum — detection speed and sensitivity (follow-up)
+
+- **Detection-to-email.** Detection now runs every 30 s (was 60) and the emails it queues are sent by the same job, not on the next dispatcher tick. With a 20 s scrape the worst case from "metric crossed the line" to "critical email sent" is under a minute (the 4.7 target); the 10 s dispatcher stays as the retry and escalation safety net. The EWMA fallback's smoothing is scaled with the interval so changing it does not change how fast the fallback learns.
+- **Admin-controlled sensitivity.** `detection_settings` (single row) holds a preset (`low` / `balanced` / `high` / `custom`) controlling the z-score cut-offs, the SSH failed-login floor, and a persistence requirement (an alert opens only after the reading stays abnormal for N minutes). `balanced` equals the previous hard-coded behaviour and is the default when no row exists. Changing it is admin-only; a preview replays the last 7 days of alerts against a candidate so the effect is visible before saving. Service-down alerts are not statistical and are never filtered.
+- **Why persistence as well as thresholds.** Raising σ cut-offs hides real-but-modest problems; requiring a few minutes of persistence removes one-tick blips (the most common source of noise) without hiding sustained problems.
+- **Incident audit page** (`/remediation-audit`) makes the per-incident API usable without tooling. The dead `/operations` sidebar entry was removed.

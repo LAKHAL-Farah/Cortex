@@ -30,7 +30,6 @@ import {
   SEVERITY_COLOR,
   SEVERITY_LABEL,
   SEVERITY_SOFT,
-  SEVERITY_THRESHOLDS,
   METHOD_LABEL,
   formatDetectedAt,
   formatMetricValue,
@@ -41,8 +40,8 @@ import {
   metricLabel,
   parseServiceId,
   serviceDisplayName,
-  zScoreFill,
 } from "@/lib/anomalies";
+import ZScoreMeter from "./ZScoreMeter";
 import { ProgressBar } from "./ui/ProgressBar";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 
@@ -177,40 +176,6 @@ function EventRow({ e, onOpen }: { e: AnomalyEvent; onOpen: () => void }) {
 
       <ChevronRight className="hidden h-4 w-4 text-text-muted transition-transform group-hover:translate-x-0.5 sm:block" strokeWidth={2} />
     </button>
-  );
-}
-
-function ZScoreMeter({ z, severity }: { z: number; severity: AnomalySeverity }) {
-  const fill = zScoreFill(z);
-  const scale = SEVERITY_THRESHOLDS.critical + 1.5;
-  const markers: { at: number; label: string }[] = [
-    { at: SEVERITY_THRESHOLDS.medium / scale, label: "2σ" },
-    { at: SEVERITY_THRESHOLDS.high / scale, label: "3σ" },
-    { at: SEVERITY_THRESHOLDS.critical / scale, label: "4σ" },
-  ];
-  return (
-    <div className="relative pt-1">
-      <div className="relative h-2 overflow-hidden rounded-full" style={{ background: "var(--border-soft)" }}>
-        <div
-          className="h-full rounded-full transition-[width] duration-700 ease-out"
-          style={{ width: `${fill * 100}%`, background: SEVERITY_COLOR[severity] }}
-        />
-        {markers.map((m) => (
-          <div
-            key={m.label}
-            className="absolute top-0 h-full w-px"
-            style={{ left: `${m.at * 100}%`, background: "var(--surface)", opacity: 0.6 }}
-          />
-        ))}
-      </div>
-      <div className="relative mt-1 h-3.5 text-[10px] text-text-faint">
-        {markers.map((m) => (
-          <span key={m.label} className="absolute -translate-x-1/2" style={{ left: `${m.at * 100}%` }}>
-            {m.label}
-          </span>
-        ))}
-      </div>
-    </div>
   );
 }
 

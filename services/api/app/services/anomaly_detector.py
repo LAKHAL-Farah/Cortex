@@ -23,12 +23,13 @@ _score_and_record() upsert helper the Prometheus metrics already use.
 """
 
 import logging
+import os
 from datetime import datetime
 
 from sqlalchemy.orm import Session
 
 from .. import crud, models
-from . import prometheus_client, auth_log_metrics, alert_routing
+from . import prometheus_client, auth_log_metrics, alert_routing, detection_settings
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +100,18 @@ MIN_BASELINE_DAYS = 5
 # real anomaly -- it just stops the denominator from collapsing to noise.
 MIN_MAD_FLOOR = 1.0
 
+# How often detect_anomalies() runs (main.py schedules it with this). 30 s by
+# default: with Prometheus scraping every 20 s that keeps "metric crossed the
+# line" to "alert exists" under a minute in the worst case, which the 4.7
+# "critical reaches email within 1 minute" target needs. The alert is then
+# e-mailed straight after the pass (main.py), not on the next dispatcher tick.
+DETECTION_INTERVAL_SECONDS = max(5, int(os.getenv("ANOMALY_DETECTION_INTERVAL_SECONDS", "30")))
+
 # EWMA smoothing factor for the fallback path. Lower = slower to adapt, less
-# sensitive to noise. This value updates roughly over ~1-2 hours of 1-minute ticks.
-EWMA_ALPHA = 0.02
+# sensitive to noise. 0.02 was tuned for 60-second ticks (it updates over ~1-2
+# hours); it is scaled with the real interval so changing how often detection
+# runs does not silently change how fast the fallback learns.
+EWMA_ALPHA = min(0.5, 0.02 * DETECTION_INTERVAL_SECONDS / 60)
 
 # Story 3.8: how much pooled history a (role, weekday, hour) slot needs
 # before it's trusted as a host's fallback, one tier above EWMA. Same
@@ -139,27 +149,31 @@ def fetch_instant(promql_query: str) -> list[dict]:
     return prometheus_client.query(promql_query)
 
 
-def severity_from_zscore(z: float) -> str:
+def severity_from_zscore(z: float, thresholds: dict | None = None) -> str:
+    """`thresholds` are the admin's z-score cut-offs (settings -> anomaly
+    detection); the module default is the balanced preset."""
+    cut = thresholds or THRESHOLDS
     abs_z = abs(z)
-    if abs_z >= THRESHOLDS["critical"]:
+    if abs_z >= cut["critical"]:
         return "critical"
-    if abs_z >= THRESHOLDS["high"]:
+    if abs_z >= cut["high"]:
         return "high"
-    if abs_z >= THRESHOLDS["medium"]:
+    if abs_z >= cut["medium"]:
         return "medium"
     return "normal"
 
 
-def _severity_for_ssh_failed_count(count: float) -> str:
+def _severity_for_ssh_failed_count(count: float, thresholds: dict | None = None) -> str:
     """Fixed-count severity for ssh_failed_logins_5min, independent of any
     baseline/EWMA state -- see SSH_FAILED_ABSOLUTE_THRESHOLDS above for why
     this exists alongside (not instead of) the statistical severity.
     """
-    if count >= SSH_FAILED_ABSOLUTE_THRESHOLDS["critical"]:
+    cut = thresholds or SSH_FAILED_ABSOLUTE_THRESHOLDS
+    if count >= cut["critical"]:
         return "critical"
-    if count >= SSH_FAILED_ABSOLUTE_THRESHOLDS["high"]:
+    if count >= cut["high"]:
         return "high"
-    if count >= SSH_FAILED_ABSOLUTE_THRESHOLDS["medium"]:
+    if count >= cut["medium"]:
         return "medium"
     return "normal"
 
@@ -193,7 +207,8 @@ def _update_ewma(state: "models.EwmaState", value: float, alpha: float = EWMA_AL
 
 
 def score_current_value(db: Session, hostname: str, metric_name: str, current_value: float,
-                         weekday: int, hour: int) -> tuple[float, str, str, int | None]:
+                         weekday: int, hour: int,
+                         thresholds: dict | None = None) -> tuple[float, str, str, int | None]:
     """
     Returns (z_score, severity, method, baseline_n).
     method is:
@@ -224,7 +239,7 @@ def score_current_value(db: Session, hostname: str, metric_name: str, current_va
     if use_baseline:
         effective_mad = max(baseline.mad, MIN_MAD_FLOOR)
         z = (current_value - baseline.median) / (MAD_SCALE * effective_mad)
-        return z, severity_from_zscore(z), "robust_zscore", baseline.sample_count
+        return z, severity_from_zscore(z, thresholds), "robust_zscore", baseline.sample_count
 
     # Tier 2 (story 3.8): this host doesn't have enough of its own history
     # yet -- fall back to what's normal for its *role* at this (weekday,
@@ -245,13 +260,13 @@ def score_current_value(db: Session, hostname: str, metric_name: str, current_va
         if use_role_baseline:
             effective_mad = max(role_baseline.mad, MIN_MAD_FLOOR)
             z = (current_value - role_baseline.median) / (MAD_SCALE * effective_mad)
-            return z, severity_from_zscore(z), "role_zscore", role_baseline.sample_count
+            return z, severity_from_zscore(z, thresholds), "role_zscore", role_baseline.sample_count
 
     # Tier 3: EWMA, no (weekday, hour) table needed at all.
     state = _get_or_init_ewma(db, hostname, metric_name, seed_value=current_value)
     std = state.var ** 0.5
     z = (current_value - state.mean) / std if std > 0 else 0.0
-    severity = severity_from_zscore(z)
+    severity = severity_from_zscore(z, thresholds)
 
     # Only let the EWMA estimate learn from values it currently considers
     # normal. Previously every value -- anomalous or not -- was folded
@@ -273,6 +288,7 @@ def _score_and_record(
     db: Session, hostname: str, metric_name: str, current_value: float,
     weekday: int, hour: int, now: datetime, details: dict | None = None,
     severity_override: str | None = None,
+    config: "detection_settings.DetectionConfig | None" = None,
 ) -> None:
     """Shared upsert logic for every metric this module scores (Prometheus
     gauges and the Loki-backed SSH counts alike): scores current_value via
@@ -289,8 +305,9 @@ def _score_and_record(
     metrics. None for every metric that doesn't populate it (cpu_usage,
     ram_usage).
     """
+    cfg = config or detection_settings.DEFAULT_CONFIG
     z_score, severity, method, baseline_n = score_current_value(
-        db, hostname, metric_name, current_value, weekday, hour
+        db, hostname, metric_name, current_value, weekday, hour, thresholds=cfg.z
     )
 
     # Story 3.4: let a caller-supplied floor (e.g. SSH_FAILED_ABSOLUTE_THRESHOLDS)
@@ -307,10 +324,28 @@ def _score_and_record(
         .filter_by(hostname=hostname, metric_name=metric_name)
         .first()
     )
+    open_event = (
+        db.query(models.AnomalyEvent)
+        .filter_by(hostname=hostname, metric_name=metric_name, resolved_at=None)
+        .first()
+    )
     # An operator can close an alert even while the signal stays elevated.
     # Keep it suppressed until the signal recovers; a later recurrence then
     # creates a new episode instead of re-opening it on the next poll.
     was_manually_resolved = existing is not None and existing.manually_resolved_at is not None
+
+    # Persistence (settings -> anomaly detection): a reading must stay abnormal
+    # for `confirm_needed` ticks in a row before it counts. Until then it is
+    # recorded as normal, so neither the dashboard badge nor an alert appears
+    # for a blip. Once an alert is open it stays open for as long as the value
+    # is abnormal, so this only ever delays the *start* of an episode.
+    raw_severity = severity
+    prior_ticks = (existing.consecutive_anomalous_ticks or 0) if existing else 0
+    ticks = prior_ticks + 1 if raw_severity != "normal" else 0
+    confirm_needed = cfg.confirm_ticks(DETECTION_INTERVAL_SECONDS)
+    if raw_severity != "normal" and open_event is None and not was_manually_resolved and ticks < confirm_needed:
+        severity = "normal"
+
     if existing:
         existing.current_value = current_value
         existing.z_score = z_score
@@ -319,7 +354,8 @@ def _score_and_record(
         existing.baseline_n = baseline_n
         existing.details = details
         existing.detected_at = now
-        if severity == "normal":
+        existing.consecutive_anomalous_ticks = ticks
+        if raw_severity == "normal":
             existing.manually_resolved_at = None
             existing.resolution_note = None
     else:
@@ -327,17 +363,12 @@ def _score_and_record(
             hostname=hostname, metric_name=metric_name,
             current_value=current_value, z_score=z_score,
             severity=severity, method=method, baseline_n=baseline_n,
-            details=details, detected_at=now,
+            details=details, detected_at=now, consecutive_anomalous_ticks=ticks,
         ))
 
     # History: keep one open AnomalyEvent per (hostname, metric_name)
     # episode so past anomalies remain visible after they resolve, instead
     # of only ever showing the current state like AnomalyFlag.
-    open_event = (
-        db.query(models.AnomalyEvent)
-        .filter_by(hostname=hostname, metric_name=metric_name, resolved_at=None)
-        .first()
-    )
     if severity != "normal" and not was_manually_resolved:
         if open_event is None:
             event = models.AnomalyEvent(
@@ -369,6 +400,7 @@ def _score_and_record(
 
 def detect_anomalies(db: Session) -> None:
     now = datetime.utcnow()
+    config = detection_settings.effective_config(db)
     weekday = now.weekday()
     hour = now.hour
 
@@ -378,7 +410,7 @@ def detect_anomalies(db: Session) -> None:
         for series in current_results:
             hostname = resolve_hostname(db, series["metric"])
             current_value = float(series["value"][1])
-            _score_and_record(db, hostname, metric_name, current_value, weekday, hour, now)
+            _score_and_record(db, hostname, metric_name, current_value, weekday, hour, now, config=config)
 
         db.commit()
         logger.info("Anomaly detection pass done for %s", metric_name)
@@ -394,10 +426,10 @@ def detect_anomalies(db: Session) -> None:
         hostname = node.hostname
         stats = auth_log_metrics.get_failed_login_stats(hostname)
         details = {"source_ips": stats.source_ips} if stats.source_ips else None
-        absolute_severity = _severity_for_ssh_failed_count(stats.count)
+        absolute_severity = _severity_for_ssh_failed_count(stats.count, config.ssh)
         _score_and_record(
             db, hostname, failed_metric, float(stats.count), weekday, hour, now, details,
-            severity_override=absolute_severity,
+            severity_override=absolute_severity, config=config,
         )
 
     db.commit()
@@ -413,7 +445,7 @@ def detect_anomalies(db: Session) -> None:
         hostname = node.hostname
         stats = auth_log_metrics.get_successful_login_stats(hostname)
         details = {"source_ips": stats.source_ips} if stats.source_ips else None
-        _score_and_record(db, hostname, success_metric, float(stats.count), weekday, hour, now, details)
+        _score_and_record(db, hostname, success_metric, float(stats.count), weekday, hour, now, details, config=config)
 
     db.commit()
     logger.info("Anomaly detection pass done for %s", success_metric)

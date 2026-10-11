@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..auth import require_admin
 from ..db import get_db
-from ..services import alert_email, weekly_digest
+from ..services import alert_email, anomaly_detector, detection_settings, weekly_digest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/settings", tags=["settings"])
@@ -112,3 +112,78 @@ def preview_weekly_digest(use_ai: bool = True, db: Session = Depends(get_db)):
     except Exception as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"could not build digest: {exc}") from exc
     return HTMLResponse(html)
+
+
+# -- Anomaly detection sensitivity ---------------------------------------
+
+def _detection_out(db: Session) -> dict:
+    row = detection_settings.get_row(db)
+    cfg = detection_settings._config_from_row(row)
+    interval = anomaly_detector.DETECTION_INTERVAL_SECONDS
+    stored_custom = detection_settings.DetectionConfig(
+        "custom",
+        {"medium": row.z_medium, "high": row.z_high, "critical": row.z_critical},
+        {"medium": row.ssh_medium, "high": row.ssh_high, "critical": row.ssh_critical},
+        row.persist_minutes,
+    )
+    return {
+        "preset": row.preset,
+        "effective": {**cfg.as_dict(), "confirm_ticks": cfg.confirm_ticks(interval)},
+        "presets": {name: preset.as_dict() for name, preset in detection_settings.PRESETS.items()},
+        "custom": stored_custom.as_dict(),
+        "limits": {
+            "z": [detection_settings.Z_MIN, detection_settings.Z_MAX],
+            "ssh": [detection_settings.SSH_MIN, detection_settings.SSH_MAX],
+            "persist_minutes": [0, detection_settings.PERSIST_MAX_MINUTES],
+        },
+        "detection_interval_seconds": interval,
+        "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
+        "updated_by": row.updated_by,
+    }
+
+
+@router.get("/anomaly-detection")
+def get_detection_settings(db: Session = Depends(get_db)):
+    """The current sensitivity, the presets, and the limits for custom values.
+    Readable by any signed-in account (the alert meters use the thresholds)."""
+    out = _detection_out(db)
+    db.commit()
+    return out
+
+
+def _config_from_update(payload: schemas.DetectionSettingsUpdate) -> detection_settings.DetectionConfig:
+    try:
+        if payload.preset != "custom":
+            return detection_settings.PRESETS[payload.preset]
+        if payload.custom is None:
+            raise detection_settings.InvalidSettings("Custom sensitivity needs its thresholds.")
+        return detection_settings.validate_custom(
+            payload.custom.z, payload.custom.ssh, payload.custom.persist_minutes
+        )
+    except detection_settings.InvalidSettings as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+
+@router.put("/anomaly-detection")
+def update_detection_settings(
+    payload: schemas.DetectionSettingsUpdate,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    """Admin-only: changes what counts as an alert for the whole installation."""
+    _config_from_update(payload)  # validate first -> clean 422, nothing written
+    detection_settings.save(
+        db,
+        preset=payload.preset,
+        custom=payload.custom.model_dump() if payload.custom else None,
+        username=admin.username,
+    )
+    return _detection_out(db)
+
+
+@router.post("/anomaly-detection/preview", dependencies=[Depends(require_admin)])
+def preview_detection_settings(payload: schemas.DetectionSettingsUpdate, db: Session = Depends(get_db)):
+    """Nothing is saved: replays the last 7 days of alerts against these
+    settings so the admin can see the effect before choosing."""
+    cfg = _config_from_update(payload)
+    return detection_settings.preview(db, cfg, days=7, interval_seconds=anomaly_detector.DETECTION_INTERVAL_SECONDS)
