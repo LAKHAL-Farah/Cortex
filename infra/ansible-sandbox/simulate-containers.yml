@@ -1,0 +1,19 @@
+---
+# SANDBOX ONLY. Writes simulated Kolla container metrics on every monitored
+# node (see roles/container_metrics_simulator) so the Living Model's container
+# detection (adr-0012) can be demoed without Docker inside the sim nodes.
+# Kept out of site.yml so it can never run against real infra.
+#
+# Healthy baseline:  ansible-playbook simulate-containers.yml
+# Kill rabbitmq:     ansible-playbook simulate-containers.yml -e '{"sim_down_containers": ["rabbitmq"]}'
+# docker rm it:      ansible-playbook simulate-containers.yml -e '{"sim_removed_containers": ["rabbitmq"]}'
+# Unhealthy:         ansible-playbook simulate-containers.yml -e '{"sim_unhealthy_containers": ["mariadb"]}'
+#
+# The timestamp is written at run time: re-run it (or loop it) to keep the data
+# fresh -- if you stop, the twin correctly goes "unknown" after a few minutes.
+- name: Simulate container telemetry
+  hosts: monitoring
+  become: true
+  gather_facts: true
+  roles:
+    - container_metrics_simulator

@@ -1,6 +1,7 @@
 import {
   Activity,
   Boxes,
+  Container as ContainerIcon,
   Cpu,
   Globe,
   Grid2x2,
@@ -54,6 +55,9 @@ export const LABEL_COLOR: Record<Exclude<TopologyVertexLabel, "Node">, string> =
   // why reusing an existing color would collide with what it already
   // means elsewhere on this same graph.
   Port: "var(--chart-6)",
+  // Docker containers (Phase 4b, container_health.py): chart-7 exists only
+  // for these -- see globals.css.
+  Container: "var(--chart-7)",
 };
 
 /** Single color for a vertex: role color for :Node (falling back to accent
@@ -106,6 +110,7 @@ const LABEL_GLYPH: Record<Exclude<TopologyVertexLabel, "Node">, VertexGlyph> = {
   FloatingIP: "globe",
   Instance: "vm",
   Port: "plug",
+  Container: "box",
 };
 
 /** Which glyph a vertex gets on the canvas graph -- role-specific for
@@ -137,6 +142,7 @@ const LABEL_ICON: Record<Exclude<TopologyVertexLabel, "Node">, LucideIcon> = {
   FloatingIP: Globe,
   Instance: Monitor,
   Port: Plug,
+  Container: ContainerIcon,
 };
 
 export function vertexIcon(vertex: Pick<TopologyVertex, "label" | "properties">): LucideIcon {
@@ -181,6 +187,7 @@ export const VERTEX_RADIUS: Record<TopologyVertexLabel, number> = {
   Instance: 6,
   FloatingIP: 5,
   Port: 5,
+  Container: 5,
 };
 
 export function vertexRadius(vertex: Pick<TopologyVertex, "label">): number {
@@ -196,6 +203,7 @@ export const EDGE_DASH: Record<TopologyEdgeType, number[]> = {
   CONNECTS: [2, 2],
   HAS_PORT: [1, 1],
   SERVES: [5, 3],
+  RUNS_IN: [6, 2],
 };
 
 // Color per relationship type -- off the same restrained chart/status
@@ -211,6 +219,8 @@ export const EDGE_COLOR: Record<TopologyEdgeType, string> = {
   CONNECTS: "var(--chart-3)",
   HAS_PORT: "var(--chart-6)",
   SERVES: "var(--accent)",
+  // A Service's own container (Phase 4b): same neutral as hosting.
+  RUNS_IN: "var(--chart-7)",
 };
 
 export const EDGE_LABEL: Record<TopologyEdgeType, string> = {
@@ -218,6 +228,7 @@ export const EDGE_LABEL: Record<TopologyEdgeType, string> = {
   CONNECTS: "connects",
   HAS_PORT: "has port",
   SERVES: "serves",
+  RUNS_IN: "runs in",
 };
 
 // Only SERVES gets an animated directional particle (see
@@ -230,6 +241,7 @@ export const EDGE_PARTICLES: Record<TopologyEdgeType, number> = {
   CONNECTS: 0,
   HAS_PORT: 0,
   SERVES: 2,
+  RUNS_IN: 0,
 };
 
 // Mirrors routers/topology.py's _STATUS_SEVERITY ordering, for coloring the
@@ -258,7 +270,7 @@ export const SYNC_STATUS_LABEL: Record<TopologySyncStatus, string> = {
 // Fixed display order for the label filter chips / legend, so they don't
 // jump around between renders (Object.entries on the graph response isn't
 // order-stable across syncs).
-export const VERTEX_LABELS: TopologyVertexLabel[] = ["Node", "Service", "Network", "Subnet", "Router", "FloatingIP", "Instance", "Port"];
+export const VERTEX_LABELS: TopologyVertexLabel[] = ["Node", "Service", "Network", "Subnet", "Router", "FloatingIP", "Instance", "Port", "Container"];
 
 /** Does this vertex match a free-text search? Checks the id, display name,
  * and (for :Node) role, so "compute" or a partial hostname both work. */

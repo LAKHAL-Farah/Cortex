@@ -5,7 +5,7 @@ import React from "react";
 export type CurrentUser = {
   id: string;
   username: string;
-  role: "admin" | "viewer";
+  role: "admin" | "operator" | "viewer";
   is_active: boolean;
   must_change_password: boolean;
 };

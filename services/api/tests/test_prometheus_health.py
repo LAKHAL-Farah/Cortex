@@ -23,6 +23,17 @@ from app.services.prometheus_health import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_container_pass(monkeypatch):
+    """Phase 4b's container pass (container_health.py, covered by
+    test_container_health.py) talks to its own Prometheus queries and graph
+    shapes; these tests are about the node-health/service-state half."""
+    monkeypatch.setattr(
+        mod.container_health, "sync_container_health",
+        lambda: {"queried": False, "containers": 0, "problems": 0, "alert_rows": []},
+    )
+
+
 @pytest.fixture
 def db():
     # Same in-memory-SQLite fixture pattern as test_anomaly_detector.py --
@@ -62,7 +73,7 @@ class _FakeSession:
                     node["health"] = "unknown"
             return None
 
-        if "SET s.state = CASE" in query:
+        if "s.state = CASE" in query:
             # Real Neo4j returns the RETURN clause's rows from session.run()
             # itself -- mirror that here (a plain list of dict-like records
             # is enough; _sync_service_state_to_graph only does row["key"]

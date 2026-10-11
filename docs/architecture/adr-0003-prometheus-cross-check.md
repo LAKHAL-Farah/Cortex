@@ -78,6 +78,7 @@ Phase 4 splits that into two properties:
   | `up` | `down` | `unreachable` | A genuine disagreement: Nova/Cinder/Neutron still lists the service as `up`, but the host it runs on doesn't answer `node_exporter` scrapes at all. Nova's service table can lag reality by up to its own report interval, so this is treated as its own state rather than silently trusting either source — it's exactly the case this phase exists to surface. |
   | `up` | `up` | `up` | Both sources agree; nothing to reconcile. |
   | `up` | `unknown` | `up` | No cross-check data yet (new node, Prometheus outage) — fall back to OpenStack rather than penalizing a service for the health overlay simply not having run against its host yet. |
+  | `up` | `up` | `down` | **Phase 4b (adr-0012), third input.** OpenStack still says `up` and the host is reachable, but the Docker container that runs the service is `down`, `restarting` or `missing`. OpenStack's heartbeat takes about a minute to notice, so this is the earlier signal. `unhealthy` (running but failing its own healthcheck) deliberately does *not* change the state; it raises its own alert. |
   | anything else / `None` | *(any)* | passthrough | No defined cross-check for values outside `up`/`down` (e.g. a service whose host never resolved to a `Node` at all). |
 
 The asymmetry is intentional: a service-level `down` is trusted outright,
@@ -133,6 +134,9 @@ special-cased initial value.
   its host's `node_exporter` reachability (e.g. a service reachable over a
   network path Prometheus's scrape doesn't use) — the host-health
   cross-check would misfire for it specifically.
-- Cortex grows a second, independent per-process liveness signal (rather
+- ~~Cortex grows a second, independent per-process liveness signal (rather
   than only host-level `up`) — the reconciliation table above would need a
-  third input.
+  third input.~~ **Done in Phase 4b:** the container state from
+  `container_health.py` is that third input (see adr-0012). A host that is
+  itself `down` still wins (`unreachable`), because the container's state is
+  meaningless when its host cannot be observed.

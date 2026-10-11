@@ -16,3 +16,17 @@ clouds:
       project_domain_name: Default
     region_name: RegionOne
     identity_api_version: 3
+  # Roadmap 4.4: the identity approved remediation runs as (OS_REMEDIATION_CLOUD,
+  # default "cortex-operator"). openstack-sim only accepts writes from this user;
+  # cortex-reader above gets a 403, like a real cloud's policy would.
+  # Sandbox only: never copy this into a real clouds.yaml.
+  cortex-operator:
+    auth:
+      auth_url: http://openstack-sim:5000/v3
+      username: cortex-operator
+      password: sandbox-sim-doesnt-check-this
+      project_name: admin
+      user_domain_name: Default
+      project_domain_name: Default
+    region_name: RegionOne
+    identity_api_version: 3

@@ -165,6 +165,34 @@ export interface AnomalyEvent {
   resolution_type: "automatic" | "manual" | null;
   resolution_note: string | null;
   is_active: boolean;
+  // Roadmap 4.7: who picked the alert up, and where it was routed.
+  acknowledged_at?: string | null;
+  acknowledged_by?: string | null;
+  routing?: AlertRouting | null;
+}
+
+export interface AlertNotificationRecord {
+  id: string;
+  channel: "dashboard" | "email";
+  kind: "initial" | "severity_upgrade" | "escalation";
+  severity: string;
+  recipient: string | null;
+  status: "delivered" | "pending" | "sent" | "failed" | "skipped";
+  attempts: number;
+  last_error: string | null;
+  created_at: string | null;
+  sent_at: string | null;
+  latency_seconds: number | null;
+}
+
+// null for alerts raised before routing existed.
+export interface AlertRouting {
+  channels: ("dashboard" | "email")[];
+  email_status: AlertNotificationRecord["status"] | null;
+  email_sent_at: string | null;
+  escalated: boolean;
+  escalation_status: AlertNotificationRecord["status"] | null;
+  notifications: AlertNotificationRecord[];
 }
 
 // --- Alert correlation (Phase 6 -- see routers/anomalies.py's /incidents,
@@ -229,9 +257,9 @@ export interface RcaSuggestion {
 // a handful of well-known keys (role, state, hostname, ...) off of it, read
 // defensively via lib/topology.ts's helpers.
 
-export type TopologyVertexLabel = "Node" | "Service" | "Network" | "Subnet" | "Router" | "FloatingIP" | "Instance" | "Port";
+export type TopologyVertexLabel = "Node" | "Service" | "Network" | "Subnet" | "Router" | "FloatingIP" | "Instance" | "Port" | "Container";
 
-export type TopologyEdgeType = "RUNS_ON" | "SERVES" | "CONNECTS" | "HAS_PORT";
+export type TopologyEdgeType = "RUNS_ON" | "SERVES" | "CONNECTS" | "HAS_PORT" | "RUNS_IN";
 
 export interface TopologyVertex {
   id: string;
@@ -432,6 +460,251 @@ export interface QuotaResyncSummary {
   };
 }
 
+// -- FinOps (private-cloud cost model) -------------------------------------
+//
+// See services/api/app/services/finops.py. A self-hosted cloud has a fixed
+// monthly bill, not a price list: unit rates are derived (pool / sellable
+// capacity), every project is charged for what it has *reserved*, and what
+// nobody reserved is idle capacity.
+
+export interface FinopsCapacityRow {
+  physical: number | null;
+  sellable: number | null; // physical x planned allocation ratio
+  allocated: number; // reserved by projects right now
+  committed: number; // sum of project quota ceilings (what the cloud has promised)
+  unlimited_projects: number; // projects with no ceiling -> promise is unbounded
+  allocated_pct: number | null;
+  committed_pct: number | null;
+}
+
+export interface FinopsCloud {
+  monthly_cost_eur: number;
+  pools: { compute_eur: number; storage_eur: number; platform_eur: number };
+  rates: {
+    vcpu_month_eur: number | null;
+    ram_gb_month_eur: number | null;
+    storage_gb_month_eur: number | null;
+    floating_ip_month_eur: number;
+  };
+  cost: { allocated_eur: number; idle_eur: number; platform_eur: number; utilization_pct: number | null };
+  capacity: { vcpus: FinopsCapacityRow; ram_mb: FinopsCapacityRow; gigabytes: FinopsCapacityRow };
+  allocation_ratios: { cpu: number; ram: number };
+  compute_nodes: number;
+  oversold: boolean;
+  capacity_source: Record<string, string>;
+  unpriced: string[];
+  warnings: string[];
+  physical_utilization: { compute_nodes: number; cpu_percent: number; memory_percent: number } | null;
+}
+
+export interface FinopsUsageRow {
+  used: number;
+  quota: number | null; // null = unlimited
+  quota_ratio: number | null;
+}
+
+export interface FinopsProject {
+  project_id: string;
+  project_name: string;
+  department: string;
+  usage: {
+    instances: FinopsUsageRow;
+    vcpus: FinopsUsageRow;
+    ram_mb: FinopsUsageRow;
+    gigabytes: FinopsUsageRow;
+    volumes: FinopsUsageRow;
+    floating_ips: FinopsUsageRow;
+  };
+  cloud_share: { vcpus_pct: number | null; ram_pct: number | null; storage_pct: number | null };
+  cost: {
+    compute_eur: number;
+    storage_eur: number;
+    network_eur: number;
+    direct_eur: number;
+    platform_eur: number;
+    idle_eur: number;
+    fully_loaded_eur: number;
+    share_pct: number;
+  };
+  budget_eur: number | null;
+  budget_used_ratio: number | null;
+  severity: QuotaSeverity;
+  breaches: number;
+}
+
+export type FinopsOverview =
+  | { available: false; currency: string }
+  | {
+      available: true;
+      currency: string;
+      updated_at: string;
+      cloud: FinopsCloud;
+      projects: FinopsProject[];
+    };
+
+export interface FinopsReportProject {
+  project_id: string;
+  project_name: string;
+  department: string;
+  hours_metered: number;
+  avg_vcpus: number;
+  avg_ram_gb: number;
+  avg_storage_gb: number;
+  compute_eur: number;
+  storage_eur: number;
+  network_eur: number;
+  direct_eur: number;
+  platform_eur: number;
+  idle_eur: number;
+  fully_loaded_eur: number;
+  projected_month_end_eur: number | null;
+  budget_eur: number | null;
+  budget_used_ratio: number | null;
+  share_pct: number;
+}
+
+export interface FinopsReportDepartment {
+  department: string;
+  projects: number;
+  direct_eur: number;
+  platform_eur: number;
+  idle_eur: number;
+  fully_loaded_eur: number;
+  budget_eur: number | null;
+  share_pct: number;
+}
+
+export interface FinopsReport {
+  period: string;
+  generated_at: string;
+  currency: string;
+  is_current_period: boolean;
+  hours_in_month: number;
+  hours_metered: number;
+  coverage_pct: number;
+  totals: {
+    direct_eur: number;
+    platform_eur: number;
+    idle_eur: number;
+    fully_loaded_eur: number;
+    projected_month_end_eur: number | null;
+    cloud_bill_metered_eur: number;
+    unrecovered_eur: number;
+  };
+  departments: FinopsReportDepartment[];
+  projects: FinopsReportProject[];
+  available_periods: string[];
+  method: string[];
+}
+
+// -- Right-sizing (roadmap 4.10) and professional reports (4.11) -------------
+
+export type RightSizingClass = "idle" | "underutilized" | "right_sized" | "saturated" | "insufficient_data";
+export type RightSizingRisk = "low" | "medium" | "high";
+export type RightSizingConfidence = "low" | "medium" | "high";
+
+export interface RightSizingAllocation {
+  flavor: string | null;
+  vcpus: number;
+  ram_mb: number;
+  monthly_cost_eur: number | null;
+  from_catalog?: boolean;
+}
+
+export interface RightSizingRecommendation {
+  vm_id: string;
+  name: string;
+  project_id: string | null;
+  project_name: string | null;
+  host: string | null;
+  status: string;
+  classification: RightSizingClass;
+  efficiency_score: number | null;
+  confidence: RightSizingConfidence;
+  current: RightSizingAllocation;
+  recommended: RightSizingAllocation;
+  utilization: {
+    cpu_avg: number | null;
+    cpu_p95: number | null;
+    cpu_max: number | null;
+    mem_avg: number | null;
+    mem_p95: number | null;
+    mem_max: number | null;
+    observed_hours: number;
+  };
+  /** null when the cloud's unit rates are unknown (nothing metered yet). */
+  estimated_monthly_savings_eur: number | null;
+  estimated_annual_savings_eur: number | null;
+  savings_pct: number | null;
+  risk: { level: RightSizingRisk; reasons: string[] };
+  rationale: string;
+  notes: string[];
+  action: string;
+}
+
+/** A VM that was analysed but needs no change (or can't be judged yet). */
+export interface RightSizingOtherVm {
+  vm_id: string;
+  name: string;
+  project_id: string | null;
+  project_name: string | null;
+  classification: RightSizingClass;
+  efficiency_score: number | null;
+  confidence: RightSizingConfidence;
+  vcpus: number;
+  ram_mb: number;
+  cpu_p95: number | null;
+  mem_p95: number | null;
+}
+
+export interface RightSizingSummary {
+  currency: string;
+  vms_analyzed: number;
+  flagged: number;
+  by_classification: Record<RightSizingClass, number>;
+  by_risk: Record<RightSizingRisk, number>;
+  estimated_monthly_savings_eur: number | null;
+  estimated_annual_savings_eur: number | null;
+  low_risk_monthly_savings_eur: number | null;
+  fleet_efficiency_score: number | null;
+  priced: boolean;
+  rate_source: string;
+  by_project: { project_id: string | null; project_name: string; vms: number; flagged: number; monthly_savings_eur: number }[];
+}
+
+export type RightSizingResponse =
+  | {
+      available: false;
+      reason: string;
+      source: string;
+      window_days: number;
+      recommendation_only: true;
+      recommendations: [];
+      others: [];
+      summary: null;
+    }
+  | {
+      available: true;
+      source: "live" | "synthetic";
+      window_days: number;
+      generated_at: string;
+      recommendation_only: true;
+      flavor_catalog: "nova" | "ladder";
+      caveat: string;
+      summary: RightSizingSummary;
+      recommendations: RightSizingRecommendation[];
+      others: RightSizingOtherVm[];
+    };
+
+export type ReportVariant = "executive" | "financial" | "technical";
+
+export interface ReportVariantInfo {
+  id: ReportVariant;
+  title: string;
+  audience: string;
+  description: string;
+}
+
 // -- Knowledge copilot (adr-0005) ------------------------------------------
 
 export type ChatRole = "user" | "assistant";
@@ -456,7 +729,15 @@ export interface ChatSource {
 // actually return, used by components/CopilotAgentPanels.tsx to pick a
 // renderer.
 
-export type AgentName = "monitoring" | "prediction" | "rag" | "anomaly" | "openstack_expert" | "network" | "security";
+export type AgentName =
+  | "monitoring"
+  | "prediction"
+  | "rag"
+  | "anomaly"
+  | "openstack_expert"
+  | "network"
+  | "security"
+  | "remediation";
 
 // Same live-status shape as LiveMetrics above, just named for clarity at
 // the copilot call site.
@@ -738,7 +1019,156 @@ export type AgentExpertCategory =
   | "hypervisor"
   | "host";
 
+// Remediation agent (v1.3, roadmap 4.1, services/api/app/agents/nodes/
+// remediation.py) -- one recommended fix, proposal-only: `executed` is always
+// false and `requires_approval` always true until the later Remediation
+// Copilot items (simulation, approval UI, execution, audit) advance `status`.
+export type FixRisk = "low" | "medium" | "high";
+
+// Roadmap 4.2 (services/api/app/services/impact_simulator.py): what the step
+// would touch, read off the Living Model before anyone approves it.
+// `unmodelled` = no rule for this command; `unavailable` = graph unreadable
+// or host unknown. Neither is ever shown as "safe".
+export type SimulationVerdict = "safe" | "caution" | "disruptive";
+
+export interface AgentSimulationEffect {
+  entity: string;
+  id: string;
+  name: string;
+  effect: string;
+  detail: string;
+}
+
+export interface AgentFixSimulation {
+  status: "simulated" | "unmodelled" | "unavailable";
+  verdict: SimulationVerdict | null;
+  headline: string;
+  effects: AgentSimulationEffect[];
+  effects_total: number;
+  counts: Record<string, number>;
+  assumptions: string[];
+  warnings: string[];
+  reversible: boolean | null;
+  duration: string | null;
+  action: { kind: string; verb: string | null; host: string | null; target: string | null };
+  model: { node?: string | null; node_health?: string };
+}
+
+export interface AgentFixStep {
+  command: string;
+  description: string;
+  risk: FixRisk;
+  read_only: boolean;
+  placeholders: string[];
+  undo: string | null;
+  undo_note?: string;
+  note: string | null;
+  run_where: "openstack-cli" | "on-host";
+  // Added by the simulator (4.2); absent on a proposal that was never simulated.
+  simulation?: AgentFixSimulation;
+  effective_risk?: FixRisk;
+}
+
+export interface AgentFixProposal {
+  proposal_id: string;
+  status: string;
+  executed: boolean;
+  requires_approval: boolean;
+  symptom_id: string;
+  symptom_title: string;
+  host: string | null;
+  evidence: string;
+  plain_language: string;
+  primary: AgentFixStep;
+  alternatives: AgentFixStep[];
+  verify_commands: { command: string; description: string; note: string | null }[];
+  inputs_needed: string[];
+  doc_ref: string;
+  // Convenience copy of primary.simulation, plus the gentler runnable
+  // alternative when one simulates strictly lower-impact.
+  simulation?: AgentFixSimulation;
+  safer_alternative?: { command: string; description: string; verdict: SimulationVerdict } | null;
+  // Roadmap 4.3: handle to the server-side record of this proposal, added by
+  // POST /agents/orchestrate. Absent when the proposal could not be recorded
+  // -- in which case no decision can be taken on it. `status` here is only
+  // the status at the time of the turn; the live one comes from
+  // GET /api/remediation/proposals/{id}.
+  approval?: { id: string; status: RemediationStatus };
+}
+
+export type RemediationStatus =
+  | "proposed"
+  | "approved"
+  | "rejected"
+  | "info_requested"
+  // Roadmap 4.4: an approved fix an admin explicitly executed.
+  | "executing"
+  | "executed"
+  | "execution_failed";
+// Everything the audit trail records: the statuses, plus the answer to a question.
+export type RemediationEvent =
+  | RemediationStatus
+  | "info_provided"
+  | "execution_started";
+export type RemediationDecisionKind = "approve" | "reject" | "ask_more_info";
+
+export interface RemediationAuditEntry {
+  id: number;
+  proposal_id: string;
+  event: RemediationEvent;
+  from_status: RemediationStatus | null;
+  to_status: RemediationStatus;
+  actor_username: string | null;
+  actor_role: string | null;
+  comment: string | null;
+  details: Record<string, unknown>;
+  entry_hash: string;
+  created_at: string;
+}
+
+export interface RemediationProposalRecord {
+  id: string;
+  proposal_id: string;
+  trace_id: string | null;
+  status: RemediationStatus;
+  command: string | null;
+  host: string | null;
+  effective_risk: string | null;
+  simulation_verdict: string | null;
+  inputs_needed: string[];
+  created_at: string;
+  updated_at: string | null;
+  // May *this* user approve/reject right now? (Asking for more info is
+  // always allowed while the proposal is open.)
+  can_decide: boolean;
+  // Roadmap 4.8: why *this* user cannot decide on this proposal (their role
+  // falls short of its risk), or null. Show it instead of generic copy.
+  approver_hint?: string | null;
+  // Roadmap 4.4. The fingerprint the Execute click must echo back, whether
+  // *this* user may click it now, and what it would do / why it cannot.
+  proposal_digest: string;
+  can_execute: boolean;
+  execution: RemediationExecutionInfo;
+  // A question is waiting for its answer (the card polls until it arrives).
+  answer_pending: boolean;
+  history: RemediationAuditEntry[];
+}
+
+export interface RemediationExecutionInfo {
+  available: boolean;
+  summary: string | null;
+  backend: "openstack_sdk" | "ansible" | null;
+  blocked_reason: string | null;
+  // Sandbox only: the card may offer "Approve & execute".
+  one_click?: boolean;
+}
+
 export interface AgentExpertData {
+  // v1.3: present when the Remediation agent proposed a fix on top of this
+  // runbook match; `hostname`/`evidence_line` are what it was built from.
+  fix_proposal?: AgentFixProposal;
+  hostname?: string | null;
+  evidence_line?: string;
   // v1.2: set when the expert was reached through the parallel incident
   // investigation -- the winning theory it walks through, and who else
   // flagged the same host.

@@ -1,13 +1,14 @@
 """Tests for services/quota_budget_monitor.py.
 
 OpenStack is faked with a small object exposing `.identity.projects()`,
-`.compute.get_limits(project_id=...)` and
-`.block_storage.get_limits(project=...)`, whose `.absolute` is a plain
-namespace with openstacksdk's *pythonic* attribute names
-(`instances_used`, `total_cores`, `total_volumes_used`, ...) -- the same
-attributes services/quota_budget_monitor.py::_fetch_project_limits reads
-off the real `AbsoluteLimits`/`AbsoluteLimit` resource, not the raw
-camelCase JSON keys those attributes are mapped from. Same faking style
+`.compute.get_limits(tenant_id=...)` (whose `.absolute` is a plain
+namespace with openstacksdk's *pythonic* attribute names --
+`instances_used`, `total_cores`, ... -- the same attributes
+services/quota_budget_monitor.py::_fetch_project_limits reads off the real
+`AbsoluteLimits` resource) and `.block_storage.get_quota_set(project,
+usage=True)`. Volume numbers are given to the fake in the old
+`_volume_absolute` shape for brevity and converted to the SDK's
+quota-set shape (`volumes` = limit, `usage["volumes"]` = in_use). Same faking style
 as test_topology_sync.py's `_hv`/`_svc` helpers.
 """
 import types
@@ -31,19 +32,41 @@ class _FakeLimits:
 
 
 class _FakeComputeProxy:
-    def __init__(self, absolute):
+    def __init__(self, absolute, hypervisors):
         self._absolute = absolute
+        self._hypervisors = hypervisors
 
-    def get_limits(self, project_id=None):
+    def get_limits(self, tenant_id=None, **unexpected):
+        # Nova's selector is `tenant_id`; anything else (e.g. `project_id`)
+        # would make real Nova answer for the *token's own* project.
+        assert not unexpected, f"unexpected get_limits kwargs: {unexpected}"
         return _FakeLimits(self._absolute)
+
+    def hypervisors(self, details=False):
+        if self._hypervisors is None:
+            raise RuntimeError("hypervisor stats need an admin credential")
+        return self._hypervisors
 
 
 class _FakeBlockStorageProxy:
-    def __init__(self, absolute):
+    def __init__(self, absolute, pools):
         self._absolute = absolute
+        self._pools = pools
 
-    def get_limits(self, project=None):
-        return _FakeLimits(self._absolute)
+    def get_quota_set(self, project, usage=False):
+        # openstacksdk's normalised shape: `<resource>` = limit,
+        # `usage[<resource>]` = in_use.
+        a = self._absolute
+        return types.SimpleNamespace(
+            volumes=a.max_total_volumes,
+            gigabytes=a.max_total_volume_gigabytes,
+            usage={"volumes": a.total_volumes_used, "gigabytes": a.total_gigabytes_used},
+        )
+
+    def backend_pools(self):
+        if self._pools is None:
+            raise RuntimeError("backend pools need an admin credential")
+        return self._pools
 
 
 class _FakeIdentityProxy:
@@ -54,15 +77,29 @@ class _FakeIdentityProxy:
         return self._projects
 
 
-def _project(id_, name):
-    return types.SimpleNamespace(id=id_, name=name)
+def _project(id_, name, tags=None):
+    return types.SimpleNamespace(id=id_, name=name, tags=tags or [])
 
 
-def _fake_conn(compute_absolute, block_storage_absolute, projects):
+def _hypervisor(vcpus=8, memory_mb=16384, status="enabled"):
+    # openstacksdk's Hypervisor maps Nova's `memory_mb` onto `memory_size`.
+    return types.SimpleNamespace(vcpus=vcpus, memory_size=memory_mb, status=status)
+
+
+def _pool(total_gb=1000):
+    return types.SimpleNamespace(name="storage@lvm#LVM", capabilities={"total_capacity_gb": total_gb})
+
+
+# Two 8-vCPU / 16 GB compute nodes + a 1 TB Cinder pool.
+DEFAULT_HYPERVISORS = [_hypervisor(), _hypervisor()]
+DEFAULT_POOLS = [_pool()]
+
+
+def _fake_conn(compute_absolute, block_storage_absolute, projects, hypervisors=DEFAULT_HYPERVISORS, pools=DEFAULT_POOLS):
     return types.SimpleNamespace(
         identity=_FakeIdentityProxy(projects),
-        compute=_FakeComputeProxy(compute_absolute),
-        block_storage=_FakeBlockStorageProxy(block_storage_absolute),
+        compute=_FakeComputeProxy(compute_absolute, hypervisors),
+        block_storage=_FakeBlockStorageProxy(block_storage_absolute, pools),
     )
 
 
@@ -119,8 +156,9 @@ def test_budget_cap_breach_message_names_budget_cap_not_capacity(monkeypatch):
         qbm, "_load_project_budgets", lambda: {"proj-2": 1.0}
     )
     db = _db()
-    # Low quota usage (well under warning ratio) but the estimated cost
-    # from that usage still exceeds the tiny configured budget.
+    # Low quota usage (well under warning ratio) but the cost of what is
+    # reserved (4 vCPUs / 8 GB / 40 GB on this fake 16-vCPU cloud) still
+    # exceeds the tiny configured budget.
     compute = _compute_absolute(total_cores_used=4, total_ram_used=8192)
     conn = _fake_conn(compute, NORMAL_VOLUME, [_project("proj-2", "mern-prod")])
 

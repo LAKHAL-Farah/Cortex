@@ -7,7 +7,7 @@ import { useCurrentUser } from "@/lib/useCurrentUser";
 type AdminUser = {
   id: string;
   username: string;
-  role: "admin" | "viewer";
+  role: "admin" | "operator" | "viewer";
   is_active: boolean;
   must_change_password: boolean;
   created_at: string;
@@ -21,7 +21,7 @@ export default function AdminUsersPage() {
 
   const [newUsername, setNewUsername] = React.useState("");
   const [newPassword, setNewPassword] = React.useState("");
-  const [newRole, setNewRole] = React.useState<"admin" | "viewer">("viewer");
+  const [newRole, setNewRole] = React.useState<"admin" | "operator" | "viewer">("viewer");
   const [creating, setCreating] = React.useState(false);
   const [createdInfo, setCreatedInfo] = React.useState<string | null>(null);
 
@@ -140,11 +140,12 @@ export default function AdminUsersPage() {
             Role
             <select
               value={newRole}
-              onChange={(e) => setNewRole(e.target.value as "admin" | "viewer")}
+              onChange={(e) => setNewRole(e.target.value as "admin" | "operator" | "viewer")}
               className="rounded-[var(--radius-control)] px-3 py-1.5 text-sm text-color-text"
               style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
             >
-              <option value="viewer">Viewer</option>
+              <option value="viewer">Viewer (read-only)</option>
+              <option value="operator">Operator (low/medium-risk fixes)</option>
               <option value="admin">Admin</option>
             </select>
           </label>
@@ -197,6 +198,7 @@ export default function AdminUsersPage() {
                       style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
                     >
                       <option value="viewer">Viewer</option>
+                      <option value="operator">Operator</option>
                       <option value="admin">Admin</option>
                     </select>
                   </td>

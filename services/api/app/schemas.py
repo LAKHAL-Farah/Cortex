@@ -56,6 +56,14 @@ class AlertEmailSettingsUpdate(BaseModel):
         return email
 
 
+class WeeklyDigestSettingsUpdate(BaseModel):
+    """Schedule for the weekly digest (roadmap 4.5). UTC, so the schedule
+    means the same thing regardless of where the API host or the reader is."""
+    enabled: bool = True
+    weekday: int = Field(ge=0, le=6, description="0 = Monday ... 6 = Sunday")
+    hour_utc: int = Field(ge=0, le=23)
+
+
 class NodeUpdate(NodeBase):
     pass
 
@@ -119,6 +127,20 @@ class TopologyServiceOut(BaseModel):
     model_config = ConfigDict(extra="allow")
     id: str
     node_id: str | None = None
+
+
+class TopologyContainerOut(BaseModel):
+    """A Docker container the Living Model tracks (Phase 4b). `state` is
+    running | unhealthy | restarting | down | missing | unknown; `service_id`
+    is the :Service it implements, None for rabbitmq/mariadb/keystone-style
+    containers that are not an OpenStack API service."""
+
+    model_config = ConfigDict(extra="allow")
+    id: str
+    name: str | None = None
+    host: str | None = None
+    state: str | None = None
+    service_id: str | None = None
 
 
 class TopologyNetworkOut(BaseModel):
@@ -450,6 +472,190 @@ class SecurityAuditLogResponse(BaseModel):
     entries: list[SecurityAuditLogEntry]
 
 
+# ---------------------------------------------------------------------
+# Roadmap 4.3: approve / reject / ask-for-more-info on a proposed fix.
+# ---------------------------------------------------------------------
+
+RemediationDecisionKind = Literal["approve", "reject", "ask_more_info"]
+RemediationStatus = Literal[
+    "proposed", "approved", "rejected", "info_requested", "executing", "executed", "execution_failed"
+]
+# Everything the audit trail can record: the statuses plus the answer to a question.
+RemediationEvent = Literal[
+    "diagnosed", "proposed", "approved", "rejected", "info_requested", "info_provided",
+    "execution_started", "executed", "execution_failed",
+]
+
+
+class RemediationDecisionRequest(BaseModel):
+    """The whole request body -- deliberately no command, risk or proposal
+    here. What is being decided on is the server's own snapshot of the
+    proposal (models.RemediationProposal), never something the caller sends.
+    A comment is optional in the schema because whether one is *required*
+    depends on the decision and the proposal (services/remediation_approval.py).
+    """
+    decision: RemediationDecisionKind
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class RemediationAuditEntryOut(BaseModel):
+    id: int
+    proposal_row_id: uuid.UUID
+    proposal_id: str
+    event: RemediationEvent
+    from_status: RemediationStatus | None
+    to_status: RemediationStatus
+    actor_username: str | None
+    actor_role: str | None
+    comment: str | None
+    details: dict
+    entry_hash: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RemediationExecuteRequest(BaseModel):
+    """The explicit click. `proposal_digest` is the fingerprint the screen was
+    showing (`RemediationProposalOut.proposal_digest`); the server refuses a
+    click that refers to anything else. Like the decision request, it carries
+    no command -- what runs is the stored, approved snapshot."""
+    confirm: Literal[True]
+    proposal_digest: str = Field(min_length=64, max_length=64)
+
+
+class RemediationExecutionInfo(BaseModel):
+    """What clicking Execute would do, or why it cannot be done right now."""
+    available: bool
+    # Plain-language description of the action (when there is one).
+    summary: str | None = None
+    backend: str | None = None
+    # Why there is no Execute button (a person can still run the command by hand).
+    blocked_reason: str | None = None
+    # Sandbox only: the UI may offer "Approve & execute" (two requests, sent
+    # back to back; see remediation_executor.one_click_enabled).
+    one_click: bool = False
+
+
+class RemediationProposalOut(BaseModel):
+    id: uuid.UUID
+    proposal_id: str
+    trace_id: uuid.UUID | None
+    status: RemediationStatus
+    # What was proposed, flattened for display; the full snapshot is not
+    # returned (the chat turn that produced it already carries it).
+    command: str | None
+    host: str | None
+    effective_risk: str | None
+    simulation_verdict: str | None
+    inputs_needed: list[str]
+    created_at: datetime
+    updated_at: datetime | None
+    # Whether *this caller* may approve/reject (ask_more_info is always open).
+    # Depends on the caller's role and this fix's risk (rbac.py, roadmap 4.8).
+    can_decide: bool
+    # Why not, in a sentence, when the caller's role falls short of this fix's
+    # risk (None when they can decide, or when nothing is open to decide).
+    approver_hint: str | None = None
+    # Roadmap 4.4. Exactly what the Execute click must echo back, and whether
+    # *this caller* may click it right now.
+    proposal_digest: str
+    can_execute: bool
+    execution: RemediationExecutionInfo
+    # True while a question is waiting for its answer (the UI polls).
+    answer_pending: bool = False
+    history: list[RemediationAuditEntryOut]
+
+
+class RemediationDecisionResponse(BaseModel):
+    proposal: RemediationProposalOut
+    entry: RemediationAuditEntryOut
+
+
+class RemediationAuditLogResponse(BaseModel):
+    since: str
+    entries: list[RemediationAuditEntryOut]
+
+
+class RemediationChainReport(BaseModel):
+    ok: bool
+    entries_checked: int
+    broken_at: int | None = None
+    reason: str | None = None
+
+
+# --- Roadmap 4.8: one incident, end to end -----------------------------------
+
+class IncidentStageOut(BaseModel):
+    stage: Literal["diagnose", "propose", "validate", "execute"]
+    done: bool
+    # True when the tamper-evident chain itself records this stage (as opposed
+    # to e.g. a trace row that exists but was never bound into the chain).
+    chained: bool
+    at: datetime | None = None
+    by: str | None = None
+    detail: str | None = None
+
+
+class IncidentTraceOut(BaseModel):
+    trace_id: str
+    created_at: datetime | None = None
+    user_query: str
+    intent: str | None = None
+    target_agent: str | None = None
+    critic_verdict_status: str | None = None
+    degraded: bool = False
+    requested_by_role: str | None = None
+    steps: list[dict] = []
+
+
+class IncidentProposalOut(BaseModel):
+    id: uuid.UUID
+    proposal_id: str
+    status: RemediationStatus
+    command: str | None = None
+    host: str | None = None
+    effective_risk: str | None = None
+
+
+class IncidentAlertOut(BaseModel):
+    """An alert open on the affected host while this incident unfolded --
+    correlated by host and time, shown for context (not part of the hash chain)."""
+    id: uuid.UUID
+    hostname: str
+    metric_name: str
+    severity: str
+    started_at: datetime | None = None
+    resolved_at: datetime | None = None
+    acknowledged_at: datetime | None = None
+    acknowledged_by: str | None = None
+    routing: dict | None = None
+
+
+class RemediationIncidentAudit(BaseModel):
+    trace_id: uuid.UUID
+    outcome: str
+    # All four stages (diagnose, propose, validate, execute) happened.
+    complete: bool
+    stages: list[IncidentStageOut]
+    trace: IncidentTraceOut | None = None
+    proposals: list[IncidentProposalOut]
+    # Every chained entry for this incident's proposals, oldest first.
+    entries: list[RemediationAuditEntryOut]
+    alerts: list[IncidentAlertOut]
+    chain: RemediationChainReport
+
+
+class RemediationIncidentSummary(BaseModel):
+    trace_id: uuid.UUID
+    hosts: list[str]
+    proposals: int
+    outcome: str
+    highest_risk: str | None = None
+    first_at: datetime | None = None
+    last_at: datetime | None = None
+
+
 class AgentStatsResponse(BaseModel):
     since: str
     total_invocations: int
@@ -472,6 +678,7 @@ class AgentStatsResponse(BaseModel):
 
 class UserRole(str, Enum):
     admin = "admin"
+    operator = "operator"
     viewer = "viewer"
 
 

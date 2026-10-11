@@ -1,0 +1,55 @@
+---
+# Approved remediation (roadmap 4.4, docs/architecture/adr-0015-remediation-execution.md).
+#
+# Run ONLY by services/api/app/services/remediation_executor.py, after a person
+# approved the proposal and clicked Execute. It is not part of site.yml and
+# has no schedule. Every value arrives as extra-vars from a JSON file the API
+# validated against a strict allow-list; nothing here builds a shell line from
+# them (`argv` for docker, the systemd module for units).
+#
+#   ansible-playbook playbook-remediate.yml --limit <one host> -e @vars.json
+#
+# vars.json: {"remediation_kind": "container"|"unit",
+#             "remediation_action": "restart"|"stop"|"start",
+#             "remediation_targets": ["name", ...],
+#             "remediation_host": "<the one host>"}
+#
+# `--limit` also accepts group names and `all`; the first task refuses to do
+# anything unless the play resolved to exactly the one host that was approved.
+- name: Cortex approved remediation
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Refuse anything but the single approved host
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname == remediation_host
+        fail_msg: "Refusing: this playbook runs on exactly one host ({{ remediation_host }}), not {{ ansible_play_hosts_all | length }}."
+        quiet: true
+      run_once: true
+
+    - name: Refuse anything outside the allow-list
+      ansible.builtin.assert:
+        that:
+          - remediation_kind in ['container', 'unit']
+          - remediation_action in ['restart', 'stop', 'start']
+          - remediation_targets | length > 0
+          - remediation_targets | length <= 4
+          - remediation_targets | map('regex_search', '^[A-Za-z0-9][A-Za-z0-9@_.:-]{0,63}$') | select('none') | list | length == 0
+        quiet: true
+
+    - name: "docker {{ remediation_action }}"
+      ansible.builtin.command:
+        argv: ["docker", "{{ remediation_action }}", "{{ item }}"]
+      loop: "{{ remediation_targets }}"
+      when: remediation_kind == 'container'
+      changed_when: true
+
+    - name: "systemd unit {{ remediation_action }}"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: "{{ {'restart': 'restarted', 'stop': 'stopped', 'start': 'started'}[remediation_action] }}"
+      loop: "{{ remediation_targets }}"
+      when: remediation_kind == 'unit'

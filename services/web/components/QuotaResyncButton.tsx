@@ -16,7 +16,7 @@ type Phase = "idle" | "running" | "ok" | "failed";
  * pass doesn't have a "degraded" state -- it either reaches OpenStack and
  * produces a summary, or it doesn't.
  */
-export default function QuotaResyncButton() {
+export default function QuotaResyncButton({ onDone }: { onDone?: () => void } = {}) {
   const { mutate } = useSWRConfig();
   const [phase, setPhase] = useState<Phase>("idle");
   const [lastSummary, setLastSummary] = useState<QuotaResyncSummary["summary"] | null>(null);
@@ -39,6 +39,7 @@ export default function QuotaResyncButton() {
       setPhase("failed");
     } finally {
       mutate("/api/quotas/alerts");
+      onDone?.();
       setTimeout(() => setPhase("idle"), 2600);
     }
   };

@@ -42,6 +42,14 @@
     from_ip: "{{ monitoring_network }}"
   when: ufw_enabled | default(false)
 
+- name: Create the textfile-collector directory (container metrics, adr-0012)
+  ansible.builtin.file:
+    path: /var/lib/node_exporter/textfile
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Deploy node_exporter systemd service
   ansible.builtin.template:
     src: node_exporter.service.j2

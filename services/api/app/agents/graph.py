@@ -116,6 +116,29 @@ of the runbook. Flow for "what is wrong with X": router -> anomaly_dispatch ->
 {anomaly, network, security}_investigate in parallel -> anomaly_arbitrate
 (best-supported theory) -> openstack_expert -> critic -> compose.
 
+v1.3 (Remediation Agent, roadmap 4.1) adds a ninth node, "remediation"
+(nodes/remediation.py) -- the first agent whose job is to say what to *do*
+rather than what is wrong. Like openstack_expert it is reachable two ways:
+
+- **Chained** after openstack_expert, via a new conditional edge replacing
+  the old fixed openstack_expert -> critic edge: should_propose_fix decides,
+  from what the expert just matched, whether there is a concrete
+  state-changing step worth proposing (always for an incident the expert was
+  chained into; for a standalone expert question only when it asked for a
+  fix). Nothing else about the incident flow changes -- the proposal is
+  appended to the expert's walkthrough, never a replacement for it.
+- **Directly** from the router ("propose a fix for the high CPU on
+  compute-02") -- a ninth conditional-edge target. That path runs the
+  expert's catalog matching inside the node itself, so it needs no extra
+  edge into openstack_expert.
+
+It is proposal-only (executes nothing, calls no LLM), wrapped in
+guarded_node like every agent, and itself swallows any error building a
+proposal so a bug there can only ever cost the turn its *proposal*, never the
+diagnosis the expert already produced. Flow for "what is wrong with X":
+router -> anomaly_dispatch -> {anomaly, network, security}_investigate ->
+anomaly_arbitrate -> openstack_expert -> remediation -> critic -> compose.
+
 v0.8 (efficiency & scale prep) replaces the single "anomaly" node with
 three: "anomaly_dispatch" (resolves which node(s) this turn investigates,
 scoped by the Living Model rather than any fixed list -- see nodes/
@@ -156,6 +179,7 @@ from .nodes.openstack_expert import (
 )
 from .nodes.prediction import prediction_agent
 from .nodes.rag import rag_agent
+from .nodes.remediation import remediation_agent, should_propose_fix
 from .nodes.security import security_agent, security_investigate_one
 from .resilience import guarded_node
 from .state import CortexState
@@ -212,6 +236,13 @@ def build_graph():
         "openstack_expert",
         guarded_node("openstack_expert", timeout_seconds=20.0)(openstack_expert_agent),
     )
+    # 30s, not the expert's 20s: the direct-from-router path runs the expert's
+    # catalog matching (including its docs-search fallback tiers) inside this
+    # node before proposing -- see nodes/remediation.py.
+    graph.add_node(
+        "remediation",
+        guarded_node("remediation", timeout_seconds=30.0)(remediation_agent),
+    )
     graph.add_node("critic", traced("critic")(critic_check))
     graph.add_node("compose", traced("compose")(compose_answer))
 
@@ -227,6 +258,7 @@ def build_graph():
             "rag": "rag",
             "anomaly": "anomaly_dispatch",
             "openstack_expert": "openstack_expert",
+            "remediation": "remediation",
             # No node to run -- the router already wrote the clarifying
             # question into state["error"]; go straight through critic
             # (which no-ops on an error turn, see nodes/critic.py) to the
@@ -262,7 +294,12 @@ def build_graph():
     graph.add_edge("security", "critic")
     graph.add_edge("prediction", "critic")
     graph.add_edge("rag", "critic")
-    graph.add_edge("openstack_expert", "critic")
+    graph.add_conditional_edges(
+        "openstack_expert",
+        lambda state: "remediation" if should_propose_fix(state) else "critic",
+        {"remediation": "remediation", "critic": "critic"},
+    )
+    graph.add_edge("remediation", "critic")
     graph.add_edge("critic", "compose")
     graph.add_edge("compose", END)
 

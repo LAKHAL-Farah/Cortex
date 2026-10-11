@@ -1,0 +1,29 @@
+---
+# SANDBOX ONLY. The simulated nodes are themselves containers with no Docker
+# daemon, so this writes the same textfile the real container_metrics role's
+# script would -- from a list -- so the Living Model's container pipeline can be
+# exercised end to end. Flip containers with:
+#   ansible-playbook simulate-containers.yml -e '{"sim_down_containers": ["rabbitmq"]}'
+sim_textfile_dir: /var/lib/node_exporter/textfile
+sim_containers_controllers:
+  - rabbitmq
+  - mariadb
+  - keystone
+  - haproxy
+  - memcached
+  - nova_scheduler
+  - neutron_server
+sim_containers_computes:
+  - nova_compute
+  - nova_libvirt
+  - neutron_openvswitch_agent
+  - neutron_l3_agent
+sim_containers_storages:
+  - cinder_volume
+# Containers to render as stopped (state=exited). Names not hosted on a given
+# node are ignored for that node.
+sim_down_containers: []
+# Containers to render as running-but-failing-their-healthcheck.
+sim_unhealthy_containers: []
+# Containers to leave OUT of the file entirely (what `docker rm` looks like).
+sim_removed_containers: []

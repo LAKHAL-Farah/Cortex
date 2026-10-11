@@ -19,7 +19,11 @@ from .routers import knowledge
 from .routers import conversations
 from .routers import settings
 from .routers import quotas
+from .routers import rightsizing as rightsizing_router
+from .routers import capacity as capacity_router
+from .routers import reports as reports_router
 from .routers import agents
+from .routers import remediation
 from .routers import security
 from .routers import openstack_docs
 from .routers import openstack_expert
@@ -28,6 +32,8 @@ from .auth import get_current_user, hash_password
 from . import models
 from .services.anomaly_detector import detect_anomalies
 from .services.quota_budget_monitor import check_quota_and_budget
+from .services import alert_routing
+from .services.weekly_digest import DIGEST_CHECK_INTERVAL_SECONDS, send_due_digest
 from .services.baseline_builder import compute_baselines
 from .services.security_snapshot_builder import capture_security_group_snapshots
 from .services.security_scan_cache import run_security_scan
@@ -110,6 +116,12 @@ PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS = int(os.getenv("PROMETHEUS_HEALTH_SYNC_
 # TOPOLOGY_SYNC_INTERVAL_SECONDS since it's the same class of "poll
 # OpenStack" job.
 QUOTA_BUDGET_CHECK_INTERVAL_SECONDS = int(os.getenv("QUOTA_BUDGET_CHECK_INTERVAL_SECONDS", "300"))
+
+# How often the alert outbox is flushed and escalations are checked (roadmap
+# 4.7). This interval is the floor on alert-to-inbox latency once an alert
+# exists -- 10 s keeps a critical alert comfortably inside the one-minute
+# target even with a retry or two, and an idle tick is a single indexed read.
+ALERT_DISPATCH_INTERVAL_SECONDS = int(os.getenv("ALERT_DISPATCH_INTERVAL_SECONDS", "10"))
 
 async def _run_periodic(fn, interval_seconds: float, name: str) -> None:
     """Runs fn(db) in a worker thread on a fixed interval, forever.
@@ -384,6 +396,19 @@ async def lifespan(app: FastAPI):
                 record_fn=crud.record_security_scan_run,
             )
         ),
+        # Roadmap 4.5: weekly digest. Cheap tick -- send_due_digest() is a
+        # single-row read unless a send is actually due, and keeps its own
+        # "already sent this week" state in the database (see its docstring).
+        asyncio.create_task(
+            _run_periodic(send_due_digest, DIGEST_CHECK_INTERVAL_SECONDS, "weekly digest")
+        ),
+        # Roadmap 4.7: deliver queued alert emails (critical first in line by
+        # age, retried with backoff) and queue escalations for alerts nobody
+        # has acknowledged. Separate from detection on purpose, see
+        # services/alert_routing.py.
+        asyncio.create_task(
+            _run_periodic(alert_routing.run_cycle, ALERT_DISPATCH_INTERVAL_SECONDS, "alert dispatch")
+        ),
     ]
     try:
         yield
@@ -414,6 +439,13 @@ app.include_router(forecast.router, dependencies=_auth_required)
 app.include_router(topology.router, dependencies=_auth_required)
 app.include_router(network.router, dependencies=_auth_required)
 app.include_router(quotas.router, dependencies=_auth_required)
+# Roadmap 4.10 right-sizing (read-only recommendations) and 4.11 on-demand
+# PDF reports -- request/response only, nothing to poll on a schedule.
+app.include_router(rightsizing_router.router, dependencies=_auth_required)
+app.include_router(reports_router.router, dependencies=_auth_required)
+# Roadmap 4.12 capacity what-if simulator -- read-only, request/response only
+# (it simulates over forecast + FinOps data other loops already refresh).
+app.include_router(capacity_router.router, dependencies=_auth_required)
 # Not added to the periodic lifespan tasks above on purpose -- unlike anomaly
 # detection/baselines/forecasting/topology sync, the knowledge base doesn't
 # drift on a schedule (see adr-0004), so ingestion is triggered on demand via
@@ -426,6 +458,7 @@ app.include_router(knowledge.router, dependencies=_auth_required)
 # poll on a schedule.
 app.include_router(conversations.router, dependencies=_auth_required)
 app.include_router(agents.router, dependencies=_auth_required)
+app.include_router(remediation.router, dependencies=_auth_required)
 # Phase Sec-2: direct, pollable GET endpoints for the Security Agent's
 # findings, the same shape network.router gives the Network agent's data
 # -- see routers/security.py's module docstring for why this doesn't

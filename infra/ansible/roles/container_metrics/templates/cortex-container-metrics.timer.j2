@@ -1,0 +1,10 @@
+[Unit]
+Description=Cortex: refresh Docker container state every {{ container_metrics_interval_seconds | default(20) }}s
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec={{ container_metrics_interval_seconds | default(20) }}s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

@@ -1,4 +1,9 @@
-"""SMTP delivery for high/critical alert episodes."""
+"""SMTP delivery for alert emails, plus the settings row.
+
+*Which* alerts get emailed, when, and the retry/escalation behaviour live in
+services/alert_routing.py (roadmap 4.7); this module is the transport and the
+message body.
+"""
 import logging
 import os
 import smtplib
@@ -10,7 +15,6 @@ from .. import models
 
 logger = logging.getLogger(__name__)
 DEFAULT_RECIPIENT = os.getenv("ALERT_DEFAULT_RECIPIENT_EMAIL", "yosratig0@gmail.com")
-NOTIFIABLE_SEVERITIES = {"high", "critical"}
 
 
 def get_settings(db: Session) -> models.AlertEmailSettings:
@@ -26,19 +30,29 @@ def smtp_configured() -> bool:
     return bool(os.getenv("SMTP_HOST") and os.getenv("SMTP_FROM"))
 
 
-def _send(recipient: str, subject: str, body: str) -> None:
+def send_email(recipient: str, subject: str, text: str, html: str | None = None) -> None:
+    """Send a plain-text email, or a multipart/alternative one when `html` is
+    given (text part first so clients that can't render HTML still get a
+    readable message). Raises on any SMTP problem -- callers decide whether
+    delivery is best-effort (alerts) or must be reported (digest 'Send now')."""
     host, sender = os.getenv("SMTP_HOST"), os.getenv("SMTP_FROM")
     if not host or not sender:
         raise RuntimeError("SMTP is not configured (SMTP_HOST and SMTP_FROM are required)")
     message = EmailMessage()
     message["From"], message["To"], message["Subject"] = sender, recipient, subject
-    message.set_content(body)
+    message.set_content(text)
+    if html:
+        message.add_alternative(html, subtype="html")
     with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=15) as smtp:
         if os.getenv("SMTP_STARTTLS", "true").lower() == "true":
             smtp.starttls()
         if os.getenv("SMTP_USERNAME") and os.getenv("SMTP_PASSWORD"):
             smtp.login(os.environ["SMTP_USERNAME"], os.environ["SMTP_PASSWORD"])
         smtp.send_message(message)
+
+
+def _send(recipient: str, subject: str, body: str) -> None:
+    send_email(recipient, subject, body)
 
 
 def _event_body(event: models.AnomalyEvent) -> str:
@@ -77,16 +91,9 @@ def send_test_email(db: Session) -> None:
 
 
 def notify_new_anomaly(db: Session, event: models.AnomalyEvent) -> None:
-    """Best-effort notification; monitoring must not fail because mail does."""
-    if event.severity not in NOTIFIABLE_SEVERITIES:
-        return
-    try:
-        settings = get_settings(db)
-        if settings.enabled:
-            _send(
-                settings.recipient_email,
-                f"[Cortex] {event.severity.upper()} alert: {event.hostname}",
-                _event_body(event),
-            )
-    except Exception:
-        logger.exception("alert email delivery failed for %s/%s", event.hostname, event.metric_name)
+    """Kept for existing callers: routes the alert (dashboard, plus email for
+    high/critical) via services/alert_routing.py. Nothing is sent from here --
+    the routing layer queues it and its dispatcher delivers; see that module."""
+    from . import alert_routing  # local: alert_routing imports this module
+
+    alert_routing.route_event(db, event)

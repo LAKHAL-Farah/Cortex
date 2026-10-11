@@ -30,7 +30,8 @@ write to Neo4j or Postgres.
 |---|---|---|
 | GET | `/graph` | The whole graph, flattened to `{nodes: [...], edges: [...]}` for a generic graph-visualization client. |
 | GET | `/nodes/{vertex_id}` | One vertex of *any* label plus its immediate neighbors in both directions. |
-| GET | `/services` | Every `:Service` vertex, with the `:Node` it `RUNS_ON` and both `openstack_state`/`state`. |
+| GET | `/services` | Every `:Service` vertex, with the `:Node` it `RUNS_ON` and both `openstack_state`/`state` (and, since Phase 4b, `container_state`). |
+| GET | `/containers` | Every `:Container` vertex (Phase 4b, adr-0012): name, host, normalized `state` (`running`/`unhealthy`/`restarting`/`down`/`missing`/`unknown`), and the `service_id` it implements (`null` for rabbitmq, mariadb, keystone and other non-API containers). |
 | GET | `/networks` | Every `:Network` vertex with its subnets/gateway routers/floating IPs/serving DHCP+L3 agents nested inline. |
 | GET | `/health` | Latest run of each sync loop (`openstack`, `prometheus_health`), read from Postgres, not a live Neo4j query. |
 

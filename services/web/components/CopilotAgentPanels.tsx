@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import Link from "next/link";
+import { RemediationApproval } from "@/components/RemediationApproval";
 import {
   Activity,
   AlertTriangle,
@@ -58,6 +59,10 @@ import type {
   AgentAnomalyData,
   AgentExpertCommand,
   AgentExpertData,
+  AgentFixProposal,
+  AgentFixSimulation,
+  FixRisk,
+  SimulationVerdict,
   IncidentArbitration,
   ParallelismSummary,
   AgentMonitoringData,
@@ -123,6 +128,13 @@ export const AGENT_META: Record<
     icon: Wrench,
     color: "var(--accent)",
     soft: "var(--accent-soft)",
+  },
+  remediation: {
+    label: "Remediation agent",
+    short: "Proposed fix (needs approval)",
+    icon: ShieldCheck,
+    color: "var(--warn)",
+    soft: "var(--warn-soft)",
   },
   network: {
     label: "Network agent",
@@ -1925,7 +1937,157 @@ function ExpertPanel({ data }: { data: AgentExpertData }) {
     <>
       {data.arbitration && <ArbitrationPanel arbitration={data.arbitration} />}
       <ExpertRunbookPanel data={data} />
+      {data.fix_proposal && <FixProposalPanel proposal={data.fix_proposal} />}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Remediation panel (v1.3, roadmap 4.1) -- the one recommended fix as a card:
+// plain-language why, the exact command (copyable), what you still have to
+// fill in, where to run it, the undo, and the alternatives. Proposal-only: the
+// pill says so, and nothing here executes anything -- a human copies and runs.
+// ---------------------------------------------------------------------------
+
+const FIX_RISK_TONE: Record<FixRisk, { color: string; soft: string; label: string }> = {
+  low: { color: "var(--ok)", soft: "var(--ok-soft)", label: "Low risk" },
+  medium: { color: "var(--warn)", soft: "var(--warn-soft)", label: "Medium risk" },
+  high: { color: "var(--crit)", soft: "var(--crit-soft)", label: "High risk" },
+};
+
+const VERDICT_TONE: Record<SimulationVerdict, { color: string; soft: string; label: string }> = {
+  safe: { color: "var(--ok)", soft: "var(--ok-soft)", label: "No workload impact" },
+  caution: { color: "var(--warn)", soft: "var(--warn-soft)", label: "Workloads keep running" },
+  disruptive: { color: "var(--crit)", soft: "var(--crit-soft)", label: "Disrupts running workloads" },
+};
+
+// Roadmap 4.2: the simulation, shown right under the command it is about.
+function SimulationPanel({
+  simulation,
+  safer,
+}: {
+  simulation: AgentFixSimulation;
+  safer?: AgentFixProposal["safer_alternative"];
+}) {
+  if (simulation.status !== "simulated" || !simulation.verdict) {
+    return (
+      <div className="flex flex-col gap-1 rounded-md border border-dashed border-color-border px-3 py-2 text-[12px] leading-relaxed text-text-muted">
+        <span className="font-medium text-color-text">Not simulated</span>
+        <span>{simulation.headline}</span>
+      </div>
+    );
+  }
+  const tone = VERDICT_TONE[simulation.verdict];
+  return (
+    <div
+      className="flex flex-col gap-2 rounded-md border px-3 py-2.5"
+      style={{ borderColor: `color-mix(in srgb, ${tone.color} 30%, var(--border))`, background: tone.soft }}
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="font-display text-[12px] font-semibold text-color-text">Expected impact</span>
+        <span className="agent-pill" style={{ color: tone.color, background: "var(--canvas)" }}>
+          {tone.label}
+        </span>
+        <span className="text-[11px] text-text-muted">simulated on the Living Model</span>
+      </div>
+      <p className="text-[12px] leading-relaxed text-color-text">{simulation.headline}</p>
+      {simulation.effects.length > 0 && (
+        <ul className="flex flex-col gap-0.5 text-[12px] leading-relaxed text-text-muted">
+          {simulation.effects.map((e) => (
+            <li key={`${e.entity}:${e.id}`}>
+              <span className="font-medium text-color-text">{e.name}</span>: {e.effect}
+              {e.detail ? ` — ${e.detail}` : ""}
+            </li>
+          ))}
+          {simulation.effects_total > simulation.effects.length && <li>…and more.</li>}
+        </ul>
+      )}
+      <div className="text-[11px] leading-relaxed text-text-muted">
+        {simulation.duration && <span>Lasts: {simulation.duration}. </span>}
+        <span>{simulation.reversible ? "Reversible." : "Not reversible with one command."}</span>
+      </div>
+      {simulation.warnings.map((w) => (
+        <p key={w} className="text-[11px] leading-relaxed" style={{ color: "var(--warn)" }}>
+          {w}
+        </p>
+      ))}
+      {simulation.assumptions.length > 0 && (
+        <p className="text-[11px] leading-relaxed text-text-muted">Assumptions: {simulation.assumptions.join(" ")}</p>
+      )}
+      {safer && (
+        <div className="text-[11px] leading-relaxed text-text-muted">
+          A gentler option by simulation ({safer.verdict}): <span className="font-medium text-color-text">{safer.description}</span>
+          <code className="mt-1 block whitespace-pre-wrap break-all rounded bg-canvas px-2 py-1 text-[11px]">{safer.command}</code>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FixProposalPanel({ proposal }: { proposal: AgentFixProposal }) {
+  const { primary } = proposal;
+  const tone = FIX_RISK_TONE[primary.effective_risk ?? primary.risk];
+  return (
+    <div className="agent-panel" style={{ borderColor: `color-mix(in srgb, ${tone.color} 28%, var(--border))` }}>
+      <div className="agent-panel__header">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-3.5 w-3.5" style={{ color: tone.color }} strokeWidth={1.9} />
+          <span className="font-display text-[13px] font-semibold text-color-text">Proposed fix</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="agent-pill" style={{ color: tone.color, background: tone.soft }}>
+            {tone.label}
+          </span>
+          <span className="agent-pill" style={{ color: "var(--text-muted)", background: "var(--canvas)" }}>
+            Proposal only · needs your approval
+          </span>
+        </div>
+      </div>
+
+      <p className="text-[12px] leading-relaxed text-text-muted">{proposal.plain_language}</p>
+
+      <CommandRow cmd={{ command: primary.command, description: primary.description, read_only: false }} />
+
+      {proposal.simulation && <SimulationPanel simulation={proposal.simulation} safer={proposal.safer_alternative} />}
+
+      <div className="flex flex-col gap-1 text-[12px] leading-relaxed text-text-muted">
+        {primary.note && <span>Heads-up: {primary.note}</span>}
+        {proposal.inputs_needed.length > 0 && <span>Fill in before running: {proposal.inputs_needed.join(", ")}</span>}
+        <span>
+          {primary.run_where === "on-host"
+            ? `Run it on the host itself${proposal.host ? ` (${proposal.host})` : ""}, for example over SSH.`
+            : "Run it from any machine where the openstack CLI is set up for this cloud."}
+        </span>
+        {!primary.undo && primary.undo_note && <span>{primary.undo_note}</span>}
+      </div>
+
+      {primary.undo && (
+        <CommandRow cmd={{ command: primary.undo, description: "Undo it with", read_only: false }} />
+      )}
+
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <CommandSection
+          title="Check it yourself, before and after"
+          commands={proposal.verify_commands.map((v) => ({ ...v, read_only: true }))}
+        />
+        <CommandSection
+          title="If that is not the right move"
+          commands={proposal.alternatives.map((a) => ({
+            command: a.command,
+            description: `${a.description} (${a.risk} risk)`,
+            read_only: false,
+          }))}
+        />
+      </div>
+
+      {proposal.approval ? (
+        <RemediationApproval approvalId={proposal.approval.id} />
+      ) : (
+        <p className="text-[12px] leading-relaxed text-text-muted">
+          This proposal was not recorded, so it cannot be approved or rejected here. Ask again to get a fresh one.
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -2338,7 +2500,7 @@ function AgentPanelSkeleton({ agentUsed }: { agentUsed?: string }) {
       </div>
     );
   }
-  if (agentUsed === "openstack_expert") {
+  if (agentUsed === "openstack_expert" || agentUsed === "remediation") {
     return (
       <div
         className="agent-panel"
@@ -2412,7 +2574,9 @@ export function AgentAnswerPanel({
       {agentUsed === "anomaly" && rawData && (
         <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />
       )}
-      {agentUsed === "openstack_expert" && rawData && <ExpertPanel data={rawData as AgentExpertData} />}
+      {(agentUsed === "openstack_expert" || agentUsed === "remediation") && rawData && (
+        <ExpertPanel data={rawData as AgentExpertData} />
+      )}
     </div>
   );
 }
@@ -2465,7 +2629,9 @@ export function AnimatedAgentAnswer({
           {agentUsed === "prediction" && <PredictionSwitch data={rawData} />}
           {agentUsed === "rag" && <RagPanel data={rawData as AgentRagData} />}
           {agentUsed === "anomaly" && <AnomalyPanel data={rawData as AgentAnomalyData} confidence={confidence} />}
-          {agentUsed === "openstack_expert" && <ExpertPanel data={rawData as AgentExpertData} />}
+          {(agentUsed === "openstack_expert" || agentUsed === "remediation") && (
+            <ExpertPanel data={rawData as AgentExpertData} />
+          )}
         </motion.div>
       )}
     </div>

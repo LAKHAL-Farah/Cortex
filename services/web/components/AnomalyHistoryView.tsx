@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import useSWR from "swr";
+import useSWR, { useSWRConfig } from "swr";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   History,
@@ -44,6 +44,7 @@ import {
   zScoreFill,
 } from "@/lib/anomalies";
 import { ProgressBar } from "./ui/ProgressBar";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 const fetcher = async (url: string) => {
   const res = await fetch(url);
@@ -248,6 +249,75 @@ function buildEventInsight(e: AnomalyEvent): string {
   return `${metric} on ${e.hostname} reached ${formatMetricValue(e.metric_name, e.current_value)} on ${startedAt}, ${direction}. It was ${magnitude}σ from the contextual baseline, based on ${e.baseline_n ?? "—"} historical samples for the same weekday and hour. ${status}`;
 }
 
+function AlertRouting({ e }: { e: AnomalyEvent }) {
+  // Roadmap 4.7: where this alert went, and who has picked it up. Admins and
+  // operators can acknowledge (which stops escalation); the API enforces that.
+  const { user } = useCurrentUser();
+  const { mutate } = useSWRConfig();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const routing = e.routing;
+  const canAck = user?.role === "admin" || user?.role === "operator";
+
+  const ack = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/anomalies/events/${encodeURIComponent(e.id)}/ack`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail ?? `Could not acknowledge (${res.status}).`);
+      }
+      await mutate("/api/anomalies/history");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not acknowledge.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const emailLine = !routing
+    ? "Raised before alert routing existed."
+    : !routing.channels.includes("email")
+      ? "Dashboard only (this severity is not emailed)."
+      : routing.email_status === "sent"
+        ? `Emailed${routing.email_sent_at ? ` at ${formatDetectedAt(routing.email_sent_at)}` : ""}.`
+        : routing.email_status === "pending"
+          ? "Email queued, sending shortly."
+          : routing.email_status === "failed"
+            ? "Email could not be delivered. The alert is on the dashboard only."
+            : "Email is switched off in settings.";
+
+  return (
+    <div className="panel flex flex-col gap-2 p-4 text-sm">
+      <div className="eyebrow">Alert routing</div>
+      <div className="text-color-text">{emailLine}</div>
+      {routing?.escalated && (
+        <div className="text-xs text-text-dim">Escalated: nobody acknowledged it in time.</div>
+      )}
+      {e.acknowledged_at ? (
+        <div className="text-xs text-text-dim">
+          Acknowledged by {e.acknowledged_by ?? "someone"} at {formatDetectedAt(e.acknowledged_at)}.
+        </div>
+      ) : e.is_active && canAck ? (
+        <button
+          type="button"
+          onClick={ack}
+          disabled={busy}
+          className="mt-1 inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 py-2 text-sm font-medium transition-colors hover:bg-[var(--canvas)] disabled:opacity-60"
+          style={{ border: "1px solid var(--border)", color: "var(--text)" }}
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2} />
+          {busy ? "Acknowledging…" : "Acknowledge (stops escalation)"}
+        </button>
+      ) : e.is_active ? (
+        <div className="text-xs text-text-faint">Not acknowledged yet. Only an operator or admin can acknowledge.</div>
+      ) : null}
+      {error && <div className="text-xs" style={{ color: "var(--critical, #c0392b)" }}>{error}</div>}
+    </div>
+  );
+}
+
 function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
   const isService = isServiceStateMetric(e.metric_name);
   const service = isService ? parseServiceId(e.hostname) : null;
@@ -372,6 +442,7 @@ function Detail({ e, onClose }: { e: AnomalyEvent; onClose: () => void }) {
               </div>
             ))}
           </div>
+          <AlertRouting e={e} />
           <ResolutionDetails e={e} />
         </div>
 

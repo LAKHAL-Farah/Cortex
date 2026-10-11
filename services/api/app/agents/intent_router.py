@@ -99,7 +99,9 @@ from .state import CortexState
 
 logger = logging.getLogger(__name__)
 
-AgentName = Literal["monitoring", "prediction", "rag", "anomaly", "openstack_expert", "network", "security"]
+AgentName = Literal[
+    "monitoring", "prediction", "rag", "anomaly", "openstack_expert", "network", "security", "remediation"
+]
 
 # Safest, cheapest default: a direct status pull, no forecast math,
 # knowledge-base retrieval, or multi-source investigation involved.
@@ -117,7 +119,7 @@ _CLARIFYING_QUESTION = (
     "floating-IP health, forecast a future trend (e.g. \"will X run out of disk\"), look up "
     "how-to/troubleshooting guidance from the knowledge base, investigate a suspected incident "
     "by correlating metrics and logs, or walk through a specific known symptom (a service down, "
-    "a resource pressure) with commands to check and fix it."
+    "a resource pressure) with commands to check and fix it, or propose a concrete fix for a problem you name."
 )
 
 _SYSTEM_PROMPT = """You route a user's infrastructure question to exactly one specialist agent:
@@ -137,8 +139,10 @@ the same kind of question scoped to a network/subnet/instance instead of a node:
 network X", "is anything down on subnet Z", "why can't instance Y reach the internet".
 - prediction: forecast / future-trend questions -- "will X run out of disk", "CPU trend for \
 the next week", "when will Y hit 90%" -- for one node or several ("which nodes will run out of disk").
-- rag: how-to / troubleshooting / explanatory questions -- "how do we fix X", "why does Y \
-happen", "what's the procedure for Z", anything about docs, runbooks, or how a system works.
+- rag: how-to / troubleshooting / explanatory questions in general -- "how do we fix a stuck \
+instance", "why does Y happen", "what's the procedure for Z", anything about docs, runbooks, or how a \
+system works. Generic and conceptual: no particular node or live problem is being asked about (a \
+specific problem the person wants fixed is remediation, see its bullet below).
 - anomaly: something is wrong / investigate an incident -- "something's wrong with compute-01", \
 "why is X acting up", "investigate this alert", "is X having an issue" -- questions that need \
 correlating metric and log evidence to figure out what's actually happening, as opposed to a \
@@ -161,6 +165,15 @@ is up", "what causes an instance to get stuck in BUILD". Different from rag: rag
 conceptual/procedural documentation questions about how THIS cloud is set up or how to do \
 something end-to-end (e.g. "how do I create a new project", "what's our network topology"), not a \
 specific technical symptom with a command-level answer.
+
+- remediation: the person wants a concrete fix PROPOSED for a specific problem that is happening \
+now or that they name explicitly -- "propose a fix for the high CPU on compute-02", "what should I do \
+about nova-compute being down on compute-01", "fix the RAM pressure on storage-09", "how do I resolve \
+the neutron-l3-agent being down". The answer is one recommended command in plain language with its risk \
+and how to undo it. Different from openstack_expert: that one explains how to *check/confirm* a symptom \
+(and lists what's usually done); remediation is asked to *decide what to do*. Different from rag: rag \
+answers generic how-to/procedure questions with no specific live problem. Different from anomaly: \
+anomaly figures out *what is wrong*; remediation is for when the problem is already named.
 
 Pick the single best match, and honestly report your confidence in that pick from 0.0 (a pure \
 guess -- the question could just as easily fit a different agent) to 1.0 (unambiguous). Do not \

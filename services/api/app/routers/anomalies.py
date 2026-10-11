@@ -1,12 +1,14 @@
 import logging
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
 from sqlalchemy.orm import Session
-from .. import models, schemas
+from .. import models, rbac, schemas
+from ..auth import require_roles
 from ..db import get_db
-from ..services import alert_correlation, rca_suggester
+from ..services import alert_correlation, alert_routing, rca_suggester
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/anomalies", tags=["anomalies"])
@@ -77,6 +79,7 @@ def list_anomaly_history(hostname: str | None = None, limit: int = 200, db: Sess
     if hostname:
         query = query.filter(models.AnomalyEvent.hostname == hostname)
     rows = query.order_by(models.AnomalyEvent.started_at.desc()).limit(min(limit, 1000)).all()
+    routing = alert_routing.notifications_for(db, [r.id for r in rows])
     return [
         {
             "id": str(r.id),
@@ -93,9 +96,53 @@ def list_anomaly_history(hostname: str | None = None, limit: int = 200, db: Sess
             "is_active": r.resolved_at is None,
             "resolution_type": r.resolution_type,
             "resolution_note": r.resolution_note,
+            # Roadmap 4.7: who has picked it up, and where it was routed.
+            "acknowledged_at": _iso_utc(r.acknowledged_at),
+            "acknowledged_by": r.acknowledged_by,
+            "routing": alert_routing.routing_summary(routing.get(r.id)),
         }
         for r in rows
     ]
+
+
+@router.post("/events/{event_id}/ack")
+def acknowledge_alert(
+    event_id: uuid.UUID,
+    current_user: models.User = Depends(require_roles(*sorted(rbac.ALERT_ACK_ROLES))),
+    db: Session = Depends(get_db),
+):
+    """Roadmap 4.7: take ownership of an alert. Stops its escalation (the alert
+    stays open until it resolves or is closed with a note). Admins and
+    operators only -- a read-only account must not be able to silence the
+    escalation of an alert it cannot act on. Idempotent: the first
+    acknowledgement is kept."""
+    event = db.get(models.AnomalyEvent, event_id)
+    if event is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "alert not found")
+    changed = alert_routing.acknowledge(db, event, username=current_user.username)
+    return {
+        "id": str(event.id),
+        "acknowledged_at": _iso_utc(event.acknowledged_at),
+        "acknowledged_by": event.acknowledged_by,
+        "already_acknowledged": not changed,
+    }
+
+
+@router.get("/events/{event_id}/notifications")
+def get_alert_notifications(event_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Where one alert went and whether delivery succeeded (dashboard / email /
+    escalation rows, with the alert-to-inbox latency on sent emails)."""
+    event = db.get(models.AnomalyEvent, event_id)
+    if event is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "alert not found")
+    rows = alert_routing.notifications_for(db, [event.id]).get(event.id, [])
+    return {
+        "id": str(event.id),
+        "severity": event.severity,
+        "acknowledged_at": _iso_utc(event.acknowledged_at),
+        "acknowledged_by": event.acknowledged_by,
+        "routing": alert_routing.routing_summary(rows),
+    }
 
 
 @router.get("/incidents")

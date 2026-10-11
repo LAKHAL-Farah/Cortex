@@ -42,7 +42,7 @@ export const BREACH_TYPE_LABEL: Record<QuotaBreachType, string> = {
 // alert message text.
 export const BREACH_TYPE_DESCRIPTION: Record<QuotaBreachType, string> = {
   capacity_cap: "OpenStack quota limit — raising it takes an admin action, not more budget.",
-  budget_cap: "Estimated spend ceiling — quota headroom may still be available.",
+  budget_cap: "Monthly budget — the project's share of the cloud's fixed cost; quota headroom may still remain.",
 };
 
 const RESOURCE_LABEL: Record<QuotaResource, string> = {
@@ -52,7 +52,7 @@ const RESOURCE_LABEL: Record<QuotaResource, string> = {
   floating_ips: "Floating IPs",
   volumes: "Volumes",
   gigabytes: "Volume storage",
-  estimated_cost_eur: "Estimated monthly cost",
+  estimated_cost_eur: "Monthly cost of reserved resources",
 };
 
 export function resourceLabel(resource: QuotaResource | string): string {
@@ -102,4 +102,63 @@ export function groupByProject(alerts: QuotaAlert[]): Map<string, QuotaAlert[]> 
     }
   }
   return grouped;
+}
+
+// -- FinOps helpers ---------------------------------------------------------
+
+export function formatEur(value: number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return `€${value.toLocaleString("en", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+}
+
+export function formatPct(value: number | null | undefined, digits = 0): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return `${value.toFixed(digits)}%`;
+}
+
+/** ram_mb -> "24 GB" (or "512 MB" below 1 GB). */
+export function formatMb(mb: number | null | undefined): string {
+  if (mb === null || mb === undefined) return "—";
+  return mb >= 1024 ? `${(mb / 1024).toFixed(mb % 1024 === 0 ? 0 : 1)} GB` : `${mb.toFixed(0)} MB`;
+}
+
+export function formatCount(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return Number.isInteger(value) ? value.toString() : value.toFixed(1);
+}
+
+/** Palette for per-project segments of the "where the bill goes" bar --
+ * cycles through the app's chart tokens so it follows light/dark themes. */
+const PROJECT_COLORS = [
+  "var(--chart-2)",
+  "var(--chart-3)",
+  "var(--chart-4)",
+  "var(--chart-5)",
+  "var(--chart-6)",
+  "var(--chart-7)",
+  "var(--chart-1)",
+];
+
+export function projectColor(index: number): string {
+  return PROJECT_COLORS[index % PROJECT_COLORS.length];
+}
+
+/** Color for a 0..1+ budget/quota ratio, matching the alert thresholds the
+ * backend uses (80% warning, 95% critical). */
+export function ratioColor(ratio: number | null | undefined): string {
+  if (ratio === null || ratio === undefined) return "var(--text-faint)";
+  if (ratio >= 0.95) return "var(--crit)";
+  if (ratio >= 0.8) return "var(--warn)";
+  return "var(--ok)";
+}
+
+/** SWR fetcher that surfaces the API's `detail` message on failure. */
+export async function jsonFetcher<T>(url: string): Promise<T> {
+  const res = await fetch(url);
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message = (data && (data.detail || data.message)) || `Request failed (${res.status})`;
+    throw new Error(typeof message === "string" ? message : `Request failed (${res.status})`);
+  }
+  return data as T;
 }

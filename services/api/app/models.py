@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Boolean, DateTime, CheckConstraint, ForeignKey, func
+from sqlalchemy import BigInteger, String, Integer, Boolean, DateTime, CheckConstraint, ForeignKey, Identity, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import Column, Float, UniqueConstraint, Text, JSON
@@ -22,17 +22,18 @@ class User(Base):
       become a long-lived credential -- the frontend forces a password
       change before letting that session do anything else.
 
-    role is a plain string CHECK rather than a permissions table -- Cortex
-    only needs two tiers right now (operators who can act on the platform,
-    and admins who can additionally manage nodes/knowledge-base ingestion
-    and other accounts). If that grows past "admin can do everything viewer
-    can, plus X", revisit with real per-permission rows instead of adding
-    more roles here.
+    role is a plain string CHECK rather than a permissions table. Three tiers
+    (see rbac.py for exactly what each may do): `admin` (everything, incl.
+    accounts/nodes/settings and high-risk remediation), `operator` (validate
+    and execute low/medium-risk remediation, read the audit trail,
+    acknowledge alerts) and `viewer` (read-only; may ask questions about a
+    proposal). If this grows past "a few tiers", revisit with real
+    per-permission rows instead of adding more roles here.
     """
     __tablename__ = "users"
 
     __table_args__ = (
-        CheckConstraint("role IN ('admin','viewer')", name="ck_users_role_allowed"),
+        CheckConstraint("role IN ('admin','operator','viewer')", name="ck_users_role_allowed"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -163,6 +164,61 @@ class AnomalyEvent(Base):
     resolved_at = Column(DateTime, nullable=True)  # NULL while still active
     resolution_type = Column(String, nullable=True)  # e.g. "manual"; NULL while unresolved
     resolution_note = Column(Text, nullable=True)
+    # Roadmap 4.7: someone has taken ownership of this alert. Stops the
+    # escalation clock (services/alert_routing.py) without closing the alert.
+    # `acknowledged_by` is a username snapshot, like the audit trail's actor
+    # columns -- renaming or removing the account must not rewrite who acked.
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by = Column(String(64), nullable=True)
+
+
+class AlertNotification(Base):
+    """Roadmap 4.7 -- where one alert went, and whether it got there.
+
+    One row per (alert episode, channel, kind, severity), written by
+    services/alert_routing.py when an episode opens or its severity ratchets
+    up, so "this low-severity alert stayed on the dashboard" and "this critical
+    alert reached the inbox 4 seconds after it opened" are both facts you can
+    query, not behaviour you have to trust.
+
+    - `channel`: `dashboard` (always; the alert itself is the delivery, so
+      these rows are born `delivered`) or `email`.
+    - `kind`: `initial` (the episode opened at a routable severity),
+      `severity_upgrade` (it later got worse) or `escalation` (nobody
+      acknowledged it in time).
+    - `status` (email only): `pending` -> `sent` | `failed` | `skipped`.
+      Email rows double as the outbox: the detection loop only inserts them,
+      a separate dispatcher sends, so a slow or dead SMTP server cannot stall
+      anomaly detection and a failed send is retried (`attempts`,
+      `next_attempt_at`) instead of lost.
+
+    `sent_at - created_at` is the alert-to-inbox latency the roadmap's "within
+    1 min" criterion is measured on. Timestamps are naive UTC, like
+    AnomalyEvent's.
+    """
+    __tablename__ = "alert_notifications"
+
+    __table_args__ = (
+        UniqueConstraint("event_id", "channel", "kind", "severity", name="uq_alert_notifications_route"),
+        CheckConstraint("channel IN ('dashboard','email')", name="ck_alert_notifications_channel"),
+        CheckConstraint("kind IN ('initial','severity_upgrade','escalation')", name="ck_alert_notifications_kind"),
+        CheckConstraint(
+            "status IN ('delivered','pending','sent','failed','skipped')", name="ck_alert_notifications_status"
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_id = Column(UUID(as_uuid=True), ForeignKey("anomaly_events.id", ondelete="CASCADE"), nullable=False, index=True)
+    channel = Column(String(16), nullable=False)
+    kind = Column(String(20), nullable=False)
+    severity = Column(String(16), nullable=False)
+    recipient = Column(String(320), nullable=True)
+    status = Column(String(16), nullable=False)
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    last_error = Column(Text, nullable=True)
+    next_attempt_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    sent_at = Column(DateTime, nullable=True)
 
 
 class AlertEmailSettings(Base):
@@ -173,6 +229,15 @@ class AlertEmailSettings(Base):
     recipient_email = Column(String(320), nullable=False)
     enabled = Column(Boolean, nullable=False, default=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    # Roadmap 4.5 -- weekly digest schedule, kept on this same single-row
+    # table (same recipient, same SMTP) rather than a second settings table.
+    # Day/hour are UTC so the schedule means the same thing on every host;
+    # `digest_last_sent_at` is what makes the scheduler restart-safe (see
+    # services/weekly_digest.py::send_due_digest).
+    digest_enabled = Column(Boolean, nullable=False, default=True, server_default="true")
+    digest_weekday = Column(Integer, nullable=False, default=0, server_default="0")  # 0=Monday .. 6=Sunday
+    digest_hour_utc = Column(Integer, nullable=False, default=8, server_default="8")
+    digest_last_sent_at = Column(DateTime, nullable=True)
 
 
 class EwmaState(Base):
@@ -291,6 +356,110 @@ class QuotaAlert(Base):
             "project_id", "breach_type", "resource", name="uq_quota_alert_slot"
         ),
     )
+
+
+class ProjectFinopsSetting(Base):
+    """Owner-editable FinOps metadata for one OpenStack project: which
+    department it is charged back to, and its monthly budget. Kept in
+    Postgres (not env JSON) so the cloud owner can change it from the
+    Quotas & Budget page; the QUOTA_PROJECT_BUDGETS_EUR /
+    FINOPS_PROJECT_DEPARTMENTS env vars remain as bootstrap defaults for
+    projects with no row here. See services/finops.py.
+    """
+    __tablename__ = "project_finops_settings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(String, nullable=False, unique=True, index=True)
+    department = Column(String, nullable=True)
+    monthly_budget_eur = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by = Column(String, nullable=True)
+
+
+class FinopsProjectSample(Base):
+    """Hourly metering row for one project: what it had reserved, and the
+    monthly run-rate (EUR/month) each cost component was running at, in the
+    hour starting at `sampled_at`.
+
+    Cost is stored as a run-rate at sample time rather than recomputed at
+    report time, so a later change to the cost pool, the allocation ratios
+    or the hardware doesn't silently rewrite last month's chargeback. A
+    sample's actual cost is `run_rate / hours_in_that_month`; a month's
+    bill is the sum of its samples (see services/finops_report.py).
+
+    Written by quota_budget_monitor.check_quota_and_budget(), upserted per
+    (project, hour): the periodic pass runs every few minutes, the last pass
+    inside an hour wins.
+    """
+    __tablename__ = "finops_project_samples"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(String, nullable=False, index=True)
+    project_name = Column(String, nullable=False)
+    department = Column(String, nullable=True)
+    sampled_at = Column(DateTime, nullable=False, index=True)  # naive UTC, truncated to the hour
+
+    instances = Column(Float, nullable=False, default=0.0)
+    vcpus = Column(Float, nullable=False, default=0.0)
+    ram_mb = Column(Float, nullable=False, default=0.0)
+    volumes = Column(Float, nullable=False, default=0.0)
+    gigabytes = Column(Float, nullable=False, default=0.0)
+    floating_ips = Column(Float, nullable=False, default=0.0)
+
+    compute_eur_month = Column(Float, nullable=False, default=0.0)
+    storage_eur_month = Column(Float, nullable=False, default=0.0)
+    network_eur_month = Column(Float, nullable=False, default=0.0)
+    platform_eur_month = Column(Float, nullable=False, default=0.0)
+    idle_eur_month = Column(Float, nullable=False, default=0.0)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "sampled_at", name="uq_finops_project_sample_hour"),
+    )
+
+
+class FinopsCloudSample(Base):
+    """Hourly cloud-level snapshot: physical vs sellable vs reserved vs
+    promised (sum of quotas) capacity, the cost pools, and the derived unit
+    rates. Powers the Overview tab; the latest row is "now".
+    """
+    __tablename__ = "finops_cloud_samples"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    sampled_at = Column(DateTime, nullable=False, unique=True, index=True)
+
+    physical_vcpus = Column(Float, nullable=True)
+    physical_ram_mb = Column(Float, nullable=True)
+    storage_gb = Column(Float, nullable=True)
+    compute_nodes = Column(Integer, nullable=False, default=0)
+    cpu_allocation_ratio = Column(Float, nullable=False, default=1.0)
+    ram_allocation_ratio = Column(Float, nullable=False, default=1.0)
+
+    allocated_vcpus = Column(Float, nullable=False, default=0.0)
+    allocated_ram_mb = Column(Float, nullable=False, default=0.0)
+    allocated_gb = Column(Float, nullable=False, default=0.0)
+    # Sum of project quota ceilings (what the cloud has promised). `unlimited_*`
+    # counts projects with no ceiling, which makes the promise unbounded.
+    committed_vcpus = Column(Float, nullable=False, default=0.0)
+    committed_ram_mb = Column(Float, nullable=False, default=0.0)
+    committed_gb = Column(Float, nullable=False, default=0.0)
+    unlimited_vcpus = Column(Integer, nullable=False, default=0)
+    unlimited_ram = Column(Integer, nullable=False, default=0)
+    unlimited_gb = Column(Integer, nullable=False, default=0)
+
+    monthly_cost_eur = Column(Float, nullable=False, default=0.0)
+    pool_compute_eur = Column(Float, nullable=False, default=0.0)
+    pool_storage_eur = Column(Float, nullable=False, default=0.0)
+    pool_platform_eur = Column(Float, nullable=False, default=0.0)
+    rate_vcpu_eur = Column(Float, nullable=True)
+    rate_ram_gb_eur = Column(Float, nullable=True)
+    rate_storage_gb_eur = Column(Float, nullable=True)
+    rate_floating_ip_eur = Column(Float, nullable=False, default=0.0)
+
+    allocated_eur_month = Column(Float, nullable=False, default=0.0)
+    idle_eur_month = Column(Float, nullable=False, default=0.0)
+    oversold = Column(Boolean, nullable=False, default=False)
+    # JSON: {"capacity_source": {...}, "unpriced": [...], "warnings": [...]}
+    details = Column(JSON, nullable=True)
 
 
 class Conversation(Base):
@@ -475,6 +644,123 @@ class AgentTrace(Base):
     security_involved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RemediationProposal(Base):
+    """Roadmap 4.3 -- the server-side record of one fix proposal shown to a
+    person, so a decision (approve / reject / ask for more info) refers to
+    something Cortex itself kept rather than to whatever the browser says it
+    was shown.
+
+    One row per (orchestrate turn, `proposal_id`): `proposal_id` is the
+    remediation agent's deterministic hash of (symptom, host, command), so
+    the *same* incident proposed on two different days yields the same
+    `proposal_id` but two rows here -- each with its own simulation snapshot
+    and its own decision history. A decision on yesterday's proposal must
+    never silently count for today's.
+
+    `proposal` is the full `fix_proposal` object exactly as the agent emitted
+    it (command, risk, simulation, undo, ...) and is never rewritten after
+    insert; only `status`/`updated_at` move. That frozen copy is what the
+    audit entries' `proposal_digest` is computed from.
+
+    `status` is a cache of the latest audit entry's `to_status`, kept on this
+    row so "is this still open" is a primary-key read; the audit log is the
+    source of truth.
+
+    Roadmap 4.4 extends the lifecycle past the decision: an `approved`
+    proposal an admin explicitly executes goes `executing` -> `executed` or
+    `execution_failed` (a failed one may be executed again by another explicit
+    click). `proposed`/`info_requested` are open for decisions; everything
+    from `approved` on is not.
+    """
+
+    __tablename__ = "remediation_proposals"
+
+    __table_args__ = (
+        UniqueConstraint("trace_id", "proposal_id", name="uq_remediation_proposals_trace_proposal"),
+        CheckConstraint(
+            "status IN ('proposed','approved','rejected','info_requested',"
+            "'executing','executed','execution_failed')",
+            name="ck_remediation_proposals_status_allowed",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # The orchestrate turn that produced it. SET NULL rather than CASCADE: if
+    # old traces are ever purged, the proposal and its audit trail stay.
+    trace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_traces.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    proposal_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="proposed", index=True)
+    proposal: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # Who triggered the turn that produced the proposal (not who decides it).
+    requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class RemediationAuditEntry(Base):
+    """Roadmap 4.3 -- the append-only audit trail of everything that happens
+    to a remediation proposal: it was proposed, then approved / rejected /
+    more information was asked for. One row per event, never updated or
+    deleted (§7.11: "journal d'audit obligatoire et infalsifiable").
+
+    Three things make "never updated" more than a convention:
+
+    - the migration installs a Postgres trigger that rejects UPDATE, DELETE
+      and TRUNCATE on this table, so not even application code can rewrite
+      history by accident;
+    - the actor columns are *snapshots* (`actor_username`, `actor_role`) and
+      `actor_user_id` is deliberately NOT a foreign key -- an FK with
+      ON DELETE SET NULL would itself be an UPDATE of an audit row the
+      moment an account is removed, and that must stay possible without
+      touching the trail;
+    - every row carries `prev_hash` / `entry_hash`, a SHA-256 chain over the
+      whole table in `id` order (services/remediation_approval.py), so a row
+      edited or removed behind the trigger's back (superuser, restored
+      backup) shows up as a break in `verify_chain`.
+
+    `details` carries what was actually decided on: the exact command, host,
+    risk and simulation verdict at that moment, and `proposal_digest`.
+    `created_at` is set by the application (not a server default) because it
+    is part of the hashed content and must be known before the insert.
+    """
+
+    __tablename__ = "remediation_audit_log"
+
+    __table_args__ = (
+        CheckConstraint(
+            "event IN ('diagnosed','proposed','approved','rejected','info_requested','info_provided',"
+            "'execution_started','executed','execution_failed')",
+            name="ck_remediation_audit_log_event_allowed",
+        ),
+    )
+
+    # Identity (not UUID): the chain needs a total order that is cheap to read
+    # back, and a database-assigned sequence is exactly that.
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    proposal_row_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("remediation_proposals.id"), nullable=False, index=True
+    )
+    # Denormalised copy of RemediationProposal.proposal_id so a log line is
+    # readable on its own.
+    proposal_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    event: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    from_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    actor_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    actor_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    prev_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    entry_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
 class AgentSessionMemory(Base):

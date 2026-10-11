@@ -319,6 +319,30 @@
       "query": "audit security groups on compute-01",
       "expected_target_agent": "security",
       "source": "router_prompt_example"
+    },
+    {
+      "id": "r53",
+      "query": "propose a fix for the high CPU on compute-02",
+      "expected_target_agent": "remediation",
+      "source": "router_prompt_example"
+    },
+    {
+      "id": "r54",
+      "query": "what should I do about nova-compute being down on compute-01",
+      "expected_target_agent": "remediation",
+      "source": "router_prompt_example"
+    },
+    {
+      "id": "r55",
+      "query": "fix the RAM pressure on storage-09",
+      "expected_target_agent": "remediation",
+      "source": "router_prompt_example"
+    },
+    {
+      "id": "r56",
+      "query": "how do I resolve the neutron-l3-agent being down on compute-02",
+      "expected_target_agent": "remediation",
+      "source": "extrapolated"
     }
   ]
 }
