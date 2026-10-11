@@ -20,7 +20,6 @@ import {
   ShieldCheck,
   ShieldAlert,
   Settings2,
-  LifeBuoy,
   LogOut,
 } from "lucide-react";
 import { useCurrentUser } from "@/lib/useCurrentUser";
@@ -56,7 +55,6 @@ const NAV_SECTIONS = [
 
 const FOOTER_ITEMS = [
   { title: "Settings", href: "/settings", icon: Settings2 },
-  { title: "Support", href: "/support", icon: LifeBuoy },
 ];
 
 function NavLink({ href, icon: Icon, title, active }: { href: string; icon: any; title: string; active: boolean }) {

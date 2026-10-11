@@ -1,8 +1,12 @@
 "use client";
 
 import React from "react";
-import { Search, Bell, RefreshCw, Sparkles } from "lucide-react";
+import Link from "next/link";
+import { RefreshCw, Sparkles } from "lucide-react";
 import ThemeToggle from "./ThemeToggle";
+import NotificationsMenu from "./NotificationsMenu";
+import GlobalSearch from "./GlobalSearch";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 function IconButton({
   onClick,
@@ -27,7 +31,9 @@ function IconButton({
 }
 
 export default function Header() {
-  const [q, setQ] = React.useState("");
+  const { user } = useCurrentUser();
+  const username = user?.username ?? "";
+  const initial = username ? username.charAt(0).toUpperCase() : "·";
 
   const doRefresh = () => {
     window.dispatchEvent(new Event("cortex:refresh"));
@@ -42,7 +48,7 @@ export default function Header() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="eyebrow">Workspace</div>
-          <h1 className="font-display mt-1 text-xl font-semibold text-color-text">Welcome back, operator.</h1>
+          <h1 className="font-display mt-1 text-xl font-semibold text-color-text">{username ? `Welcome back, ${username}.` : "Welcome back."}</h1>
         </div>
 
         <div className="flex items-center gap-2">
@@ -50,15 +56,7 @@ export default function Header() {
             <RefreshCw className="h-[15px] w-[15px]" strokeWidth={1.75} />
           </IconButton>
 
-          <IconButton title="Notifications">
-            <Bell className="h-[15px] w-[15px]" strokeWidth={1.75} />
-            <span
-              className="absolute -right-1 -top-1 inline-flex h-4 min-w-[1rem] items-center justify-center rounded-full px-1 text-[10px] font-semibold text-white"
-              style={{ background: "var(--crit)" }}
-            >
-              3
-            </span>
-          </IconButton>
+          <NotificationsMenu />
 
           <button
             onClick={openChat}
@@ -71,34 +69,24 @@ export default function Header() {
 
           <ThemeToggle />
 
-          <button
-            className="inline-flex h-9 items-center gap-2 rounded-[var(--radius-control)] px-3 text-sm font-medium"
+          <Link
+            href="/settings"
+            title={user ? `${username} (${user.role})` : "Account"}
+            className="inline-flex h-9 items-center gap-2 rounded-[var(--radius-control)] px-3 text-sm font-medium transition-colors hover:bg-[var(--canvas)]"
             style={{ border: "1px solid var(--border)", color: "var(--text)" }}
           >
             <span
               className="grid h-5 w-5 place-items-center rounded-full text-[10px] font-semibold"
               style={{ background: "var(--accent-soft)", color: "var(--accent)" }}
             >
-              A
+              {initial}
             </span>
-            Alex
-          </button>
+            {username || "…"}
+          </Link>
         </div>
       </div>
 
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search the cockpit..."
-          className="w-full rounded-[var(--radius-control)] py-2.5 pl-9 pr-4 text-sm text-color-text outline-none transition-colors"
-          style={{ border: "1px solid var(--border)", background: "var(--canvas)" }}
-          onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
-          onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
-          aria-label="Global search"
-        />
-      </div>
+      <GlobalSearch />
     </header>
   );
 }
