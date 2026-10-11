@@ -34,7 +34,8 @@ _filter_security_steps_for_role = security_rbac.filter_security_steps_for_role
 
 
 def _record_fix_proposal(
-    db: Session, *, trace_id: uuid.UUID, agent_result: dict, current_user: models.User
+    db: Session, *, trace_id: uuid.UUID, agent_result: dict, current_user: models.User,
+    diagnosis: dict | None = None,
 ) -> dict | None:
     """Roadmap 4.3: when this turn ended with a remediation `fix_proposal`,
     keep a server-side copy and log that it was proposed, so a later
@@ -51,7 +52,7 @@ def _record_fix_proposal(
         return None
     try:
         row = remediation_approval.record_proposal(
-            db, trace_id=trace_id, proposal=proposal, requested_by=current_user
+            db, trace_id=trace_id, proposal=proposal, requested_by=current_user, diagnosis=diagnosis
         )
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -162,8 +163,20 @@ def orchestrate(
     # Roadmap 4.3: record the fix proposal (if any) the turn just produced.
     # Done after the trace row exists (the proposal links to it) and before
     # the response is built, so the handle can ride along in raw_data.
+    # Roadmap 4.8: the diagnose stage goes into the same hash chain as the
+    # proposal, so one incident reads diagnose -> propose -> validate ->
+    # execute without a gap (structural facts only; see diagnosis_summary).
     approval_handle = _record_fix_proposal(
-        db, trace_id=uuid.UUID(trace_id), agent_result=agent_result, current_user=current_user
+        db, trace_id=uuid.UUID(trace_id), agent_result=agent_result, current_user=current_user,
+        diagnosis=remediation_approval.diagnosis_summary(
+            trace_id=uuid.UUID(trace_id),
+            user_query=payload.query,
+            intent=result.get("intent"),
+            target_agent=result.get("target_agent"),
+            critic_verdict=critic_verdict["status"] if critic_verdict else None,
+            degraded=degraded,
+            steps=result.get("trace_events"),
+        ),
     )
 
     # v0.9: RBAC output filtering -- applied here, to the *response*, never

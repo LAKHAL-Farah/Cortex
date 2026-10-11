@@ -10,9 +10,11 @@ and must read this status; it must not be inferred from anything else.
 What the rules are (all enforced here, not in the router or the UI, so a
 second caller cannot skip them):
 
-- **Approve and reject need an approver role** (`APPROVER_ROLES`). Asking for
+- **Approve and reject need an approver role** (`APPROVER_ROLES`), and the
+  fix must be within that role's reach (rbac.py, roadmap 4.8): an operator may
+  decide low and medium risk fixes, only an admin a high-risk one. Asking for
   more information is open to any signed-in account: wanting to understand a
-  proposal before an admin decides on it must not itself be a privilege.
+  proposal before someone decides on it must not itself be a privilege.
 - **A proposal is decided once.** `approved` and `rejected` are final; a
   second click, a second tab, or a replayed request gets a conflict, never a
   second audit entry that would contradict the first. `info_requested` keeps
@@ -56,16 +58,18 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import models, rbac
 
 logger = logging.getLogger(__name__)
 
 Decision = Literal["approve", "reject", "ask_more_info"]
 
-# Who may approve or reject. The platform has two roles today (models.User);
-# an "operator can approve low-risk only" tier belongs with the trust ladder
-# (roadmap Phase 9), not here -- see adr-0014 on the open question in §13.
-APPROVER_ROLES = frozenset({"admin"})
+# Who may approve or reject, in the broad sense: the roles that can validate
+# *some* fix. Whether one particular fix is within an account's reach also
+# depends on its effective risk -- operators stop at medium, admins have no
+# ceiling -- and that rule lives in rbac.can_validate (roadmap 4.8), checked in
+# `decide` below and in services/remediation_execution.py.
+APPROVER_ROLES = rbac.VALIDATOR_ROLES
 
 MAX_COMMENT_LENGTH = 2000
 GENESIS_HASH = "0" * 64
@@ -274,6 +278,10 @@ def _append(
         ),
     )
     db.add(entry)
+    # Flush so the next append in this same transaction (record_proposal writes
+    # `diagnosed` then `proposed`) sees this entry as the chain's last hash.
+    # Without it both would read the same predecessor and fork the chain.
+    db.flush()
     return entry
 
 
@@ -281,14 +289,58 @@ def _append(
 # Public API
 # --------------------------------------------------------------------
 
+MAX_DIAGNOSIS_STEPS = 40
+
+
+def diagnosis_summary(
+    *,
+    trace_id: Optional[uuid.UUID],
+    user_query: Optional[str],
+    intent: Optional[str],
+    target_agent: Optional[str],
+    critic_verdict: Optional[str],
+    degraded: bool,
+    steps: Optional[list],
+) -> dict:
+    """What goes into the chain for the *diagnose* stage (roadmap 4.8).
+
+    Structural facts only: which agents ran and how it ended. Not the question
+    text, not the findings -- the proposal's history is readable by every
+    signed-in account, and a trace's own RBAC filtering (security specifics are
+    admin-only) lives on the trace, not here. `query_digest` still binds the
+    entry to the exact question asked, so the full trace
+    (GET /api/v1/agents/trace/{trace_id}, or the incident timeline) can be
+    shown to match it later.
+    """
+    return {
+        "trace_id": str(trace_id) if trace_id else None,
+        "query_digest": hashlib.sha256((user_query or "").encode("utf-8")).hexdigest() if user_query else None,
+        "intent": intent,
+        "target_agent": target_agent,
+        "critic_verdict": critic_verdict,
+        "degraded": bool(degraded),
+        "steps": [
+            {"node": st.get("node"), "status": st.get("status"), "duration_ms": st.get("duration_ms")}
+            for st in (steps or [])[:MAX_DIAGNOSIS_STEPS]
+            if isinstance(st, dict)
+        ],
+    }
+
+
 def record_proposal(
     db: Session,
     *,
     trace_id: Optional[uuid.UUID],
     proposal: dict,
     requested_by: Optional[models.User],
+    diagnosis: Optional[dict] = None,
 ) -> models.RemediationProposal:
     """Persist a proposal the agent just made and log that it was proposed.
+
+    When the caller passes the `diagnosis` (see `diagnosis_summary`) the chain
+    starts one step earlier, with a `diagnosed` entry, so the trail for one
+    incident reads diagnose -> propose -> validate -> execute without a gap
+    (roadmap 4.8). Without it the trail starts at `proposed`, as it did before.
 
     Idempotent per (trace_id, proposal_id): recording the same proposal for
     the same turn twice returns the first row and adds no second entry.
@@ -315,6 +367,13 @@ def record_proposal(
     db.add(row)
     try:
         db.flush()
+        if diagnosis is not None:
+            _append(
+                db, row,
+                event="diagnosed", from_status=None, to_status="proposed",
+                actor=requested_by, comment=None,
+                extra_details={"source": "agent_trace", "diagnosis": diagnosis},
+            )
         _append(
             db, row,
             event="proposed", from_status=None, to_status="proposed",
@@ -354,12 +413,31 @@ def history(db: Session, proposal_row_id: uuid.UUID) -> list[models.RemediationA
 
 
 def list_audit(
-    db: Session, *, since: datetime, proposal_id: Optional[str] = None, limit: int = 200
+    db: Session,
+    *,
+    since: datetime,
+    proposal_id: Optional[str] = None,
+    trace_id: Optional[uuid.UUID] = None,
+    event: Optional[str] = None,
+    actor: Optional[str] = None,
+    limit: int = 200,
 ) -> list[models.RemediationAuditEntry]:
-    """Newest first, across all proposals (the admin's view of the trail)."""
+    """Newest first, across all proposals (the admin's view of the trail).
+    Optional filters: one proposal, one incident (`trace_id`), one event kind,
+    one actor's username."""
     query = select(models.RemediationAuditEntry).where(models.RemediationAuditEntry.created_at >= since)
     if proposal_id:
         query = query.where(models.RemediationAuditEntry.proposal_id == proposal_id)
+    if trace_id is not None:
+        query = query.where(
+            models.RemediationAuditEntry.proposal_row_id.in_(
+                select(models.RemediationProposal.id).where(models.RemediationProposal.trace_id == trace_id)
+            )
+        )
+    if event:
+        query = query.where(models.RemediationAuditEntry.event == event)
+    if actor:
+        query = query.where(models.RemediationAuditEntry.actor_username == actor)
     return list(db.execute(query.order_by(models.RemediationAuditEntry.id.desc()).limit(limit)).scalars())
 
 
@@ -394,7 +472,7 @@ def decide(
             "remediation: %s (%s) tried to %s proposal %s without an approver role",
             actor.username, actor.role, decision, proposal_row_id,
         )
-        raise DecisionError(403, "Only an admin can approve or reject a proposed fix. You can still ask for more information.")
+        raise DecisionError(403, rbac.denial_message(actor.role, None, "approve or reject a proposed fix"))
 
     cleaned = (comment or "").strip() or None
     if cleaned and len(cleaned) > MAX_COMMENT_LENGTH:
@@ -413,8 +491,19 @@ def decide(
         word = _STATUS_WORDS.get(row.status, row.status)
         raise DecisionError(409, f"This proposal was already {word}; a final decision cannot be changed.")
 
+    details = step_details(row.proposal)
+    if decision in ("approve", "reject") and not rbac.can_validate(actor.role, details["effective_risk"]):
+        # An operator facing a high-risk fix. Same treatment as above: refused,
+        # not recorded as a decision, and a warning for whoever reads the logs.
+        db.rollback()
+        logger.warning(
+            "remediation: %s (%s) tried to %s %s-risk proposal %s above their role",
+            actor.username, actor.role, decision, details["effective_risk"], proposal_row_id,
+        )
+        raise DecisionError(403, rbac.denial_message(actor.role, details["effective_risk"], "approve or reject a proposed fix"))
+
     event, new_status = _DECISIONS[decision]
-    missing = _requires_reason(decision, step_details(row.proposal))
+    missing = _requires_reason(decision, details)
     if missing and not cleaned:
         db.rollback()
         raise DecisionError(422, missing)

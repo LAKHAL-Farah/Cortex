@@ -6,7 +6,9 @@ module is where that sentence is enforced, in one place, so a second caller
 (another route, a script, a future agent) cannot skip a rule by not going
 through the UI:
 
-1. **A role.** Only an `APPROVER_ROLES` account may execute (admin today).
+1. **A role, within its reach.** Only an `APPROVER_ROLES` account may execute,
+   and only a fix its role may validate (rbac.py, roadmap 4.8): an operator
+   runs low and medium risk fixes, a high-risk one needs an admin.
 2. **An approval.** The stored proposal must be `approved` (or
    `execution_failed`, for a deliberate retry). Never inferred from anything
    else: not from a comment, not from the agent's own confidence, not from the
@@ -46,7 +48,7 @@ from typing import Callable, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import models, rbac
 from . import remediation_approval as approval
 from .impact_simulator import simulate_proposal
 from .remediation_executor import (
@@ -186,13 +188,18 @@ def start_execution(
     if actor.role not in approval.APPROVER_ROLES:
         logger.warning("remediation: %s (%s) tried to execute proposal %s without an approver role",
                        actor.username, actor.role, proposal_row_id)
-        raise approval.DecisionError(403, "Only an admin can execute an approved fix.")
+        raise approval.DecisionError(403, rbac.denial_message(actor.role, None, "execute an approved fix"))
     if execution_mode() != "live":
         raise approval.DecisionError(503, "Execution is switched off on this deployment. Run the command yourself.")
 
     row = db.get(models.RemediationProposal, proposal_row_id)
     if row is None:
         raise approval.DecisionError(404, "No such proposal.")
+    risk = approval.step_details(row.proposal)["effective_risk"]
+    if not rbac.can_validate(actor.role, risk):
+        logger.warning("remediation: %s (%s) tried to execute %s-risk proposal %s above their role",
+                       actor.username, actor.role, risk, proposal_row_id)
+        raise approval.DecisionError(403, rbac.denial_message(actor.role, risk, "execute an approved fix"))
 
     # Cheap refusals first, none of them needs the lock or the graph.
     if not hmac.compare_digest(approval.proposal_digest(row.proposal), confirmed_digest or ""):

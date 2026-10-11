@@ -29,6 +29,7 @@ from .auth import get_current_user, hash_password
 from . import models
 from .services.anomaly_detector import detect_anomalies
 from .services.quota_budget_monitor import check_quota_and_budget
+from .services import alert_routing
 from .services.weekly_digest import DIGEST_CHECK_INTERVAL_SECONDS, send_due_digest
 from .services.baseline_builder import compute_baselines
 from .services.security_snapshot_builder import capture_security_group_snapshots
@@ -112,6 +113,12 @@ PROMETHEUS_HEALTH_SYNC_INTERVAL_SECONDS = int(os.getenv("PROMETHEUS_HEALTH_SYNC_
 # TOPOLOGY_SYNC_INTERVAL_SECONDS since it's the same class of "poll
 # OpenStack" job.
 QUOTA_BUDGET_CHECK_INTERVAL_SECONDS = int(os.getenv("QUOTA_BUDGET_CHECK_INTERVAL_SECONDS", "300"))
+
+# How often the alert outbox is flushed and escalations are checked (roadmap
+# 4.7). This interval is the floor on alert-to-inbox latency once an alert
+# exists -- 10 s keeps a critical alert comfortably inside the one-minute
+# target even with a retry or two, and an idle tick is a single indexed read.
+ALERT_DISPATCH_INTERVAL_SECONDS = int(os.getenv("ALERT_DISPATCH_INTERVAL_SECONDS", "10"))
 
 async def _run_periodic(fn, interval_seconds: float, name: str) -> None:
     """Runs fn(db) in a worker thread on a fixed interval, forever.
@@ -391,6 +398,13 @@ async def lifespan(app: FastAPI):
         # "already sent this week" state in the database (see its docstring).
         asyncio.create_task(
             _run_periodic(send_due_digest, DIGEST_CHECK_INTERVAL_SECONDS, "weekly digest")
+        ),
+        # Roadmap 4.7: deliver queued alert emails (critical first in line by
+        # age, retried with backoff) and queue escalations for alerts nobody
+        # has acknowledged. Separate from detection on purpose, see
+        # services/alert_routing.py.
+        asyncio.create_task(
+            _run_periodic(alert_routing.run_cycle, ALERT_DISPATCH_INTERVAL_SECONDS, "alert dispatch")
         ),
     ]
     try:

@@ -526,7 +526,12 @@ def test_orchestrate_records_the_fix_proposal_and_returns_an_approval_handle(mon
     got = client.get(f"/api/v1/remediation/proposals/{handle['id']}", headers=admin_h).json()
     assert uuid.UUID(got["trace_id"]) == uuid.UUID(body["trace_id"])
     assert got["proposal_id"] == proposal["proposal_id"]
-    assert [e["event"] for e in got["history"]] == ["proposed"]
+    # Roadmap 4.8: the chain starts at the diagnosing agent run, not at the proposal.
+    assert [e["event"] for e in got["history"]] == ["diagnosed", "proposed"]
+    diagnosed = got["history"][0]["details"]["diagnosis"]
+    assert uuid.UUID(diagnosed["trace_id"]) == uuid.UUID(body["trace_id"])
+    assert diagnosed["query_digest"]                      # binds the entry to the question...
+    assert "propose a fix" not in str(got["history"][0])  # ...without storing the question text
     # ...and the proposal itself reached the caller untouched apart from the handle.
     returned = {k: v for k, v in body["raw_data"]["fix_proposal"].items() if k != "approval"}
     assert returned == proposal

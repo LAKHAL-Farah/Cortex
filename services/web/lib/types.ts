@@ -165,6 +165,34 @@ export interface AnomalyEvent {
   resolution_type: "automatic" | "manual" | null;
   resolution_note: string | null;
   is_active: boolean;
+  // Roadmap 4.7: who picked the alert up, and where it was routed.
+  acknowledged_at?: string | null;
+  acknowledged_by?: string | null;
+  routing?: AlertRouting | null;
+}
+
+export interface AlertNotificationRecord {
+  id: string;
+  channel: "dashboard" | "email";
+  kind: "initial" | "severity_upgrade" | "escalation";
+  severity: string;
+  recipient: string | null;
+  status: "delivered" | "pending" | "sent" | "failed" | "skipped";
+  attempts: number;
+  last_error: string | null;
+  created_at: string | null;
+  sent_at: string | null;
+  latency_seconds: number | null;
+}
+
+// null for alerts raised before routing existed.
+export interface AlertRouting {
+  channels: ("dashboard" | "email")[];
+  email_status: AlertNotificationRecord["status"] | null;
+  email_sent_at: string | null;
+  escalated: boolean;
+  escalation_status: AlertNotificationRecord["status"] | null;
+  notifications: AlertNotificationRecord[];
 }
 
 // --- Alert correlation (Phase 6 -- see routers/anomalies.py's /incidents,
@@ -1005,6 +1033,9 @@ export interface RemediationProposalRecord {
   // May *this* user approve/reject right now? (Asking for more info is
   // always allowed while the proposal is open.)
   can_decide: boolean;
+  // Roadmap 4.8: why *this* user cannot decide on this proposal (their role
+  // falls short of its risk), or null. Show it instead of generic copy.
+  approver_hint?: string | null;
   // Roadmap 4.4. The fingerprint the Execute click must echo back, whether
   // *this* user may click it now, and what it would do / why it cannot.
   proposal_digest: string;

@@ -1,4 +1,9 @@
-"""SMTP delivery for high/critical alert episodes."""
+"""SMTP delivery for alert emails, plus the settings row.
+
+*Which* alerts get emailed, when, and the retry/escalation behaviour live in
+services/alert_routing.py (roadmap 4.7); this module is the transport and the
+message body.
+"""
 import logging
 import os
 import smtplib
@@ -10,7 +15,6 @@ from .. import models
 
 logger = logging.getLogger(__name__)
 DEFAULT_RECIPIENT = os.getenv("ALERT_DEFAULT_RECIPIENT_EMAIL", "yosratig0@gmail.com")
-NOTIFIABLE_SEVERITIES = {"high", "critical"}
 
 
 def get_settings(db: Session) -> models.AlertEmailSettings:
@@ -87,16 +91,9 @@ def send_test_email(db: Session) -> None:
 
 
 def notify_new_anomaly(db: Session, event: models.AnomalyEvent) -> None:
-    """Best-effort notification; monitoring must not fail because mail does."""
-    if event.severity not in NOTIFIABLE_SEVERITIES:
-        return
-    try:
-        settings = get_settings(db)
-        if settings.enabled:
-            _send(
-                settings.recipient_email,
-                f"[Cortex] {event.severity.upper()} alert: {event.hostname}",
-                _event_body(event),
-            )
-    except Exception:
-        logger.exception("alert email delivery failed for %s/%s", event.hostname, event.metric_name)
+    """Kept for existing callers: routes the alert (dashboard, plus email for
+    high/critical) via services/alert_routing.py. Nothing is sent from here --
+    the routing layer queues it and its dispatcher delivers; see that module."""
+    from . import alert_routing  # local: alert_routing imports this module
+
+    alert_routing.route_event(db, event)

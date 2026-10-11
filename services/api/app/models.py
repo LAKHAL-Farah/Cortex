@@ -22,17 +22,18 @@ class User(Base):
       become a long-lived credential -- the frontend forces a password
       change before letting that session do anything else.
 
-    role is a plain string CHECK rather than a permissions table -- Cortex
-    only needs two tiers right now (operators who can act on the platform,
-    and admins who can additionally manage nodes/knowledge-base ingestion
-    and other accounts). If that grows past "admin can do everything viewer
-    can, plus X", revisit with real per-permission rows instead of adding
-    more roles here.
+    role is a plain string CHECK rather than a permissions table. Three tiers
+    (see rbac.py for exactly what each may do): `admin` (everything, incl.
+    accounts/nodes/settings and high-risk remediation), `operator` (validate
+    and execute low/medium-risk remediation, read the audit trail,
+    acknowledge alerts) and `viewer` (read-only; may ask questions about a
+    proposal). If this grows past "a few tiers", revisit with real
+    per-permission rows instead of adding more roles here.
     """
     __tablename__ = "users"
 
     __table_args__ = (
-        CheckConstraint("role IN ('admin','viewer')", name="ck_users_role_allowed"),
+        CheckConstraint("role IN ('admin','operator','viewer')", name="ck_users_role_allowed"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -163,6 +164,61 @@ class AnomalyEvent(Base):
     resolved_at = Column(DateTime, nullable=True)  # NULL while still active
     resolution_type = Column(String, nullable=True)  # e.g. "manual"; NULL while unresolved
     resolution_note = Column(Text, nullable=True)
+    # Roadmap 4.7: someone has taken ownership of this alert. Stops the
+    # escalation clock (services/alert_routing.py) without closing the alert.
+    # `acknowledged_by` is a username snapshot, like the audit trail's actor
+    # columns -- renaming or removing the account must not rewrite who acked.
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by = Column(String(64), nullable=True)
+
+
+class AlertNotification(Base):
+    """Roadmap 4.7 -- where one alert went, and whether it got there.
+
+    One row per (alert episode, channel, kind, severity), written by
+    services/alert_routing.py when an episode opens or its severity ratchets
+    up, so "this low-severity alert stayed on the dashboard" and "this critical
+    alert reached the inbox 4 seconds after it opened" are both facts you can
+    query, not behaviour you have to trust.
+
+    - `channel`: `dashboard` (always; the alert itself is the delivery, so
+      these rows are born `delivered`) or `email`.
+    - `kind`: `initial` (the episode opened at a routable severity),
+      `severity_upgrade` (it later got worse) or `escalation` (nobody
+      acknowledged it in time).
+    - `status` (email only): `pending` -> `sent` | `failed` | `skipped`.
+      Email rows double as the outbox: the detection loop only inserts them,
+      a separate dispatcher sends, so a slow or dead SMTP server cannot stall
+      anomaly detection and a failed send is retried (`attempts`,
+      `next_attempt_at`) instead of lost.
+
+    `sent_at - created_at` is the alert-to-inbox latency the roadmap's "within
+    1 min" criterion is measured on. Timestamps are naive UTC, like
+    AnomalyEvent's.
+    """
+    __tablename__ = "alert_notifications"
+
+    __table_args__ = (
+        UniqueConstraint("event_id", "channel", "kind", "severity", name="uq_alert_notifications_route"),
+        CheckConstraint("channel IN ('dashboard','email')", name="ck_alert_notifications_channel"),
+        CheckConstraint("kind IN ('initial','severity_upgrade','escalation')", name="ck_alert_notifications_kind"),
+        CheckConstraint(
+            "status IN ('delivered','pending','sent','failed','skipped')", name="ck_alert_notifications_status"
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_id = Column(UUID(as_uuid=True), ForeignKey("anomaly_events.id", ondelete="CASCADE"), nullable=False, index=True)
+    channel = Column(String(16), nullable=False)
+    kind = Column(String(20), nullable=False)
+    severity = Column(String(16), nullable=False)
+    recipient = Column(String(320), nullable=True)
+    status = Column(String(16), nullable=False)
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    last_error = Column(Text, nullable=True)
+    next_attempt_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    sent_at = Column(DateTime, nullable=True)
 
 
 class AlertEmailSettings(Base):
@@ -679,7 +735,7 @@ class RemediationAuditEntry(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "event IN ('proposed','approved','rejected','info_requested','info_provided',"
+            "event IN ('diagnosed','proposed','approved','rejected','info_requested','info_provided',"
             "'execution_started','executed','execution_failed')",
             name="ck_remediation_audit_log_event_allowed",
         ),

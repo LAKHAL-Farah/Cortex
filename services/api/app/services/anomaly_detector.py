@@ -28,7 +28,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from .. import crud, models
-from . import prometheus_client, auth_log_metrics, alert_email
+from . import prometheus_client, auth_log_metrics, alert_routing
 
 logger = logging.getLogger(__name__)
 
@@ -347,16 +347,21 @@ def _score_and_record(
                 details=details, started_at=now,
             )
             db.add(event)
-            alert_email.notify_new_anomaly(db, event)
+            alert_routing.route_event(db, event)
         elif _SEVERITY_RANK[severity] >= _SEVERITY_RANK[open_event.severity]:
             # Record the peak reached during this episode, not just
             # whatever the last tick happened to be.
+            got_worse = _SEVERITY_RANK[severity] > _SEVERITY_RANK[open_event.severity]
             open_event.current_value = current_value
             open_event.z_score = z_score
             open_event.severity = severity
             open_event.method = method
             open_event.baseline_n = baseline_n
             open_event.details = details
+            if got_worse:
+                # Roadmap 4.7: a medium alert turning critical must reach the
+                # inbox too, not only alerts that *open* as critical.
+                alert_routing.route_event(db, open_event)
     elif open_event is not None:
         open_event.resolved_at = now
         open_event.resolution_type = "automatic"

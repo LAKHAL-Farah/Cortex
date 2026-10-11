@@ -23,7 +23,7 @@ import jwt
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, rbac
 from .db import get_db
 
 # HS256 shared-secret signing. Generate a real one with e.g.
@@ -110,3 +110,24 @@ def require_admin(user: models.User = Depends(get_current_user)) -> models.User:
     if user.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "admin privileges required")
     return user
+
+
+def require_roles(*roles: str):
+    """Dependency factory for endpoints that more than one role may use --
+    e.g. `Depends(require_roles("admin", "operator"))` for the remediation
+    audit trail (see rbac.py for the role matrix). `require_admin` stays the
+    gate for account/infra management."""
+    allowed = frozenset(roles)
+    unknown = allowed - set(rbac.ALL_ROLES)
+    if unknown:
+        raise ValueError(f"unknown role(s): {sorted(unknown)}")
+
+    def _dependency(user: models.User = Depends(get_current_user)) -> models.User:
+        if user.role not in allowed:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "requires one of these roles: " + ", ".join(sorted(allowed)),
+            )
+        return user
+
+    return _dependency

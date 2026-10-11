@@ -26,7 +26,7 @@ def get_alert_email_settings(db: Session = Depends(get_db)):
     return _settings_out(settings)
 
 
-@router.put("/alert-email")
+@router.put("/alert-email", dependencies=[Depends(require_admin)])
 def update_alert_email_settings(payload: schemas.AlertEmailSettingsUpdate, db: Session = Depends(get_db)):
     settings = alert_email.get_settings(db)
     settings.recipient_email, settings.enabled = payload.recipient_email, payload.enabled
@@ -35,7 +35,7 @@ def update_alert_email_settings(payload: schemas.AlertEmailSettingsUpdate, db: S
     return _settings_out(settings)
 
 
-@router.post("/alert-email/test")
+@router.post("/alert-email/test", dependencies=[Depends(require_admin)])
 def test_alert_email(db: Session = Depends(get_db)):
     try:
         alert_email.send_test_email(db)

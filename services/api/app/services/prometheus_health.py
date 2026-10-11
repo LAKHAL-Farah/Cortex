@@ -38,7 +38,7 @@ import logging
 from datetime import datetime
 
 from .. import graph_db, models
-from . import alert_email, container_health
+from . import alert_routing, container_health
 from .prometheus_client import query
 
 logger = logging.getLogger(__name__)
@@ -265,12 +265,15 @@ def _sync_service_state_anomalies(db, service_states: list[dict]) -> None:
                     baseline_n=None, started_at=now,
                 )
                 db.add(event)
-                alert_email.notify_new_anomaly(db, event)
+                alert_routing.route_event(db, event)
             elif _SEVERITY_RANK[severity] >= _SEVERITY_RANK[open_event.severity]:
+                got_worse = _SEVERITY_RANK[severity] > _SEVERITY_RANK[open_event.severity]
                 open_event.current_value = 1.0
                 open_event.z_score = 0.0
                 open_event.severity = severity
                 open_event.method = SERVICE_STATE_METHOD
+                if got_worse:
+                    alert_routing.route_event(db, open_event)
         elif open_event is not None:
             open_event.resolved_at = now
             open_event.resolution_type = "automatic"

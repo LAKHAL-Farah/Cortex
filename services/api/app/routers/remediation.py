@@ -15,8 +15,10 @@ approved) -- see that module for why none of it is here.
 Access: reading one proposal's status and history needs any signed-in account
 (the proposal is already on that account's screen). Deciding is enforced in
 services/remediation_approval.py, not here, so it cannot be bypassed by a
-second caller. The global audit trail and its integrity check are
-admin-only, like the security audit log.
+second caller. Who may decide depends on role *and* risk (rbac.py, roadmap
+4.8). The global audit trail, its integrity check and the per-incident
+timeline (`/audit/incidents/{trace_id}`) are for admins and operators; the
+security audit log stays admin-only.
 """
 import logging
 import uuid
@@ -25,10 +27,11 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
-from ..auth import get_current_user, require_admin
+from .. import models, rbac, schemas
+from ..auth import get_current_user, require_roles
 from ..db import get_db
 from ..services import remediation_approval as approval
+from ..services import remediation_audit
 from ..services import remediation_execution as execution
 
 logger = logging.getLogger(__name__)
@@ -54,9 +57,10 @@ def _proposal_out(
         inputs_needed=details["inputs_needed"],
         created_at=row.created_at,
         updated_at=row.updated_at,
-        can_decide=user.role in approval.APPROVER_ROLES and row.status in approval.OPEN_STATUSES,
+        can_decide=rbac.can_validate(user.role, details["effective_risk"]) and row.status in approval.OPEN_STATUSES,
+        approver_hint=rbac.approver_hint(user.role, details["effective_risk"]),
         proposal_digest=details["proposal_digest"],
-        can_execute=info["available"] and user.role in approval.APPROVER_ROLES,
+        can_execute=info["available"] and rbac.can_validate(user.role, details["effective_risk"]),
         execution=schemas.RemediationExecutionInfo(**info),
         answer_pending=bool(approval.unanswered_questions(entries)),
         history=[schemas.RemediationAuditEntryOut.model_validate(e) for e in entries],
@@ -148,25 +152,62 @@ def execute(
     )
 
 
-@router.get("/audit", response_model=schemas.RemediationAuditLogResponse, dependencies=[Depends(require_admin)])
+_AUDIT_READERS = Depends(require_roles(*sorted(rbac.AUDIT_READER_ROLES)))
+
+
+@router.get("/audit", response_model=schemas.RemediationAuditLogResponse, dependencies=[_AUDIT_READERS])
 def get_audit_log(
     hours: int = 24 * 7,
     proposal_id: str | None = None,
+    trace_id: uuid.UUID | None = None,
+    event: schemas.RemediationEvent | None = None,
+    actor: str | None = None,
     db: Session = Depends(get_db),
 ):
-    """Every proposal / decision event over the last `hours`, newest first."""
+    """Every proposal / decision event over the last `hours`, newest first.
+    Narrow it to one proposal (`proposal_id`), one incident (`trace_id`), one
+    kind of event or one person (`actor`, a username). Admins and operators."""
     since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 24 * 365)))
-    rows = approval.list_audit(db, since=since, proposal_id=proposal_id)
+    rows = approval.list_audit(db, since=since, proposal_id=proposal_id, trace_id=trace_id, event=event, actor=actor)
     return schemas.RemediationAuditLogResponse(
         since=since.isoformat(),
         entries=[schemas.RemediationAuditEntryOut.model_validate(r) for r in rows],
     )
 
 
-@router.get("/audit/verify", response_model=schemas.RemediationChainReport, dependencies=[Depends(require_admin)])
+@router.get("/audit/verify", response_model=schemas.RemediationChainReport, dependencies=[_AUDIT_READERS])
 def verify_audit_chain(db: Session = Depends(get_db)):
     """Re-derives the whole audit chain and reports the first break, if any."""
     report = approval.verify_chain(db)
     return schemas.RemediationChainReport(
         ok=report.ok, entries_checked=report.entries_checked, broken_at=report.broken_at, reason=report.reason
+    )
+
+
+@router.get(
+    "/audit/incidents", response_model=list[schemas.RemediationIncidentSummary], dependencies=[_AUDIT_READERS]
+)
+def list_incidents(hours: int = 24 * 7, limit: int = 100, db: Session = Depends(get_db)):
+    """Recent incidents (agent runs that produced a fix proposal), newest first;
+    open one with GET /audit/incidents/{trace_id}."""
+    since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 24 * 365)))
+    return remediation_audit.list_incidents(db, since=since, limit=max(1, min(limit, 500)))
+
+
+@router.get(
+    "/audit/incidents/{trace_id}", response_model=schemas.RemediationIncidentAudit, dependencies=[_AUDIT_READERS]
+)
+def get_incident_audit(trace_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Roadmap 4.8: one incident, end to end -- the diagnosing agent run, each
+    proposal, who validated it and why, who executed it and what happened, the
+    alerts open on that host meanwhile, and whether the hash chain still
+    verifies. `trace_id` is the id POST /agents/orchestrate returned."""
+    incident = remediation_audit.incident_timeline(db, trace_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Nothing recorded for that incident.")
+    report = incident["chain"]
+    return schemas.RemediationIncidentAudit(
+        **{**incident, "chain": schemas.RemediationChainReport(
+            ok=report.ok, entries_checked=report.entries_checked, broken_at=report.broken_at, reason=report.reason
+        )}
     )

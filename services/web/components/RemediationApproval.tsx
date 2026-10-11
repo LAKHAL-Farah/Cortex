@@ -459,7 +459,8 @@ export function RemediationApproval({ approvalId }: { approvalId: string }) {
       )}
       {isOpen && !data.can_decide && (
         <p className="text-[12px] leading-relaxed text-text-muted">
-          Only an admin can approve or reject. You can ask for more information, and it will be logged.
+          {data.approver_hint ?? "Only an admin or an operator can approve or reject."} You can ask for more
+          information, and it will be logged.
         </p>
       )}
 

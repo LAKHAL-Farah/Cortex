@@ -63,6 +63,12 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      # Roadmap 4.7 -- alert routing / escalation (all optional; defaults shown)
+      ALERT_EMAIL_SEVERITIES: ${ALERT_EMAIL_SEVERITIES:-high,critical}
+      ALERT_ESCALATE_CRITICAL_AFTER_MINUTES: ${ALERT_ESCALATE_CRITICAL_AFTER_MINUTES:-15}
+      ALERT_ESCALATE_HIGH_AFTER_MINUTES: ${ALERT_ESCALATE_HIGH_AFTER_MINUTES:-60}
+      ALERT_ESCALATION_RECIPIENT_EMAIL: ${ALERT_ESCALATION_RECIPIENT_EMAIL:-}
+      ALERT_DISPATCH_INTERVAL_SECONDS: ${ALERT_DISPATCH_INTERVAL_SECONDS:-10}
       # Roadmap 4.5 weekly digest: base URL for the email's "Open Cortex" button
       # (button is hidden when unset). Schedule itself is set in Settings > Weekly digest.
       CORTEX_PUBLIC_URL: ${CORTEX_PUBLIC_URL:-}

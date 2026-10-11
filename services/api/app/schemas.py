@@ -482,7 +482,7 @@ RemediationStatus = Literal[
 ]
 # Everything the audit trail can record: the statuses plus the answer to a question.
 RemediationEvent = Literal[
-    "proposed", "approved", "rejected", "info_requested", "info_provided",
+    "diagnosed", "proposed", "approved", "rejected", "info_requested", "info_provided",
     "execution_started", "executed", "execution_failed",
 ]
 
@@ -552,7 +552,11 @@ class RemediationProposalOut(BaseModel):
     created_at: datetime
     updated_at: datetime | None
     # Whether *this caller* may approve/reject (ask_more_info is always open).
+    # Depends on the caller's role and this fix's risk (rbac.py, roadmap 4.8).
     can_decide: bool
+    # Why not, in a sentence, when the caller's role falls short of this fix's
+    # risk (None when they can decide, or when nothing is open to decide).
+    approver_hint: str | None = None
     # Roadmap 4.4. Exactly what the Execute click must echo back, and whether
     # *this caller* may click it right now.
     proposal_digest: str
@@ -580,6 +584,78 @@ class RemediationChainReport(BaseModel):
     reason: str | None = None
 
 
+# --- Roadmap 4.8: one incident, end to end -----------------------------------
+
+class IncidentStageOut(BaseModel):
+    stage: Literal["diagnose", "propose", "validate", "execute"]
+    done: bool
+    # True when the tamper-evident chain itself records this stage (as opposed
+    # to e.g. a trace row that exists but was never bound into the chain).
+    chained: bool
+    at: datetime | None = None
+    by: str | None = None
+    detail: str | None = None
+
+
+class IncidentTraceOut(BaseModel):
+    trace_id: str
+    created_at: datetime | None = None
+    user_query: str
+    intent: str | None = None
+    target_agent: str | None = None
+    critic_verdict_status: str | None = None
+    degraded: bool = False
+    requested_by_role: str | None = None
+    steps: list[dict] = []
+
+
+class IncidentProposalOut(BaseModel):
+    id: uuid.UUID
+    proposal_id: str
+    status: RemediationStatus
+    command: str | None = None
+    host: str | None = None
+    effective_risk: str | None = None
+
+
+class IncidentAlertOut(BaseModel):
+    """An alert open on the affected host while this incident unfolded --
+    correlated by host and time, shown for context (not part of the hash chain)."""
+    id: uuid.UUID
+    hostname: str
+    metric_name: str
+    severity: str
+    started_at: datetime | None = None
+    resolved_at: datetime | None = None
+    acknowledged_at: datetime | None = None
+    acknowledged_by: str | None = None
+    routing: dict | None = None
+
+
+class RemediationIncidentAudit(BaseModel):
+    trace_id: uuid.UUID
+    outcome: str
+    # All four stages (diagnose, propose, validate, execute) happened.
+    complete: bool
+    stages: list[IncidentStageOut]
+    trace: IncidentTraceOut | None = None
+    proposals: list[IncidentProposalOut]
+    # Every chained entry for this incident's proposals, oldest first.
+    entries: list[RemediationAuditEntryOut]
+    alerts: list[IncidentAlertOut]
+    chain: RemediationChainReport
+
+
+class RemediationIncidentSummary(BaseModel):
+    trace_id: uuid.UUID
+    hosts: list[str]
+    proposals: int
+    outcome: str
+    highest_risk: str | None = None
+    first_at: datetime | None = None
+    last_at: datetime | None = None
+
+
 class AgentStatsResponse(BaseModel):
     since: str
     total_invocations: int
@@ -602,6 +678,7 @@ class AgentStatsResponse(BaseModel):
 
 class UserRole(str, Enum):
     admin = "admin"
+    operator = "operator"
     viewer = "viewer"
 
 
