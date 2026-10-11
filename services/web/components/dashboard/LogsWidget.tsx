@@ -13,13 +13,19 @@ const BUCKETS = 12; // 12 x 5 min = last hour
 export default function LogsWidget() {
   const { parsed, error, isLoading } = useLogs();
   // Ticks with the 5s poll so the 60-minute window slides forward.
-  const [now, setNow] = React.useState(() => Date.now());
+  // Keep the first render identical on the server and client. The current
+  // time is only needed once the component has hydrated.
+  const [now, setNow] = React.useState<number | null>(null);
   React.useEffect(() => {
+    const initialUpdate = window.setTimeout(() => setNow(Date.now()), 0);
     const id = setInterval(() => setNow(Date.now()), 5000);
-    return () => clearInterval(id);
+    return () => {
+      window.clearTimeout(initialUpdate);
+      clearInterval(id);
+    };
   }, []);
   const bucketMs = 5 * 60_000;
-  const start = now - BUCKETS * bucketMs;
+  const start = (now ?? 0) - BUCKETS * bucketMs;
 
   const buckets = Array.from({ length: BUCKETS }, () => ({ ERROR: 0, WARNING: 0, other: 0 }));
   for (const l of parsed) {

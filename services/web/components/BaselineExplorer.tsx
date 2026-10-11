@@ -135,7 +135,15 @@ export default function BaselineExplorer() {
 
   const [host, setHost] = useState<string>(searchParams.get("host") ?? "");
   const [metric, setMetric] = useState<string>(searchParams.get("metric") ?? BASELINE_METRICS[0]);
-  const [weekday, setWeekday] = useState<number>(jsDayToWeekday(new Date().getDay()));
+  // Resolve the local weekday after hydration so the server and browser do
+  // not produce different initial chart data around midnight.
+  const [weekday, setWeekday] = useState<number>(0);
+  useEffect(() => {
+    const updateWeekday = window.setTimeout(() => {
+      setWeekday(jsDayToWeekday(new Date().getDay()));
+    }, 0);
+    return () => window.clearTimeout(updateWeekday);
+  }, []);
 
   // Derived rather than synced via setState-in-effect: falls back to the
   // first available node once the list loads (or if a stale/unknown
