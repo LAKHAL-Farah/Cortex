@@ -889,3 +889,143 @@ select {
   font-size: 10.5px;
   color: var(--text-muted);
 }
+
+/* ───────────────────────── Dashboard look ─────────────────────────
+   Scoped to .cx-dash (the dashboard page root) so nothing else on the site is
+   affected.
+   1. Reduced palette: neutral + orange + a little purple + red. "OK" is neutral
+      (not green), warnings are orange, critical is red; the multi-hue chart
+      colors collapse to the same family.
+   2. A little ambient glow: soft orange/purple washes in the panel corners and
+      a gradient canopy on the header. */
+.cx-dash {
+  --ok: #6B7280;               --ok-soft: rgba(107, 114, 128, 0.12);
+  --warn: #D9731A;             --warn-soft: rgba(217, 115, 26, 0.12);
+  --crit: #D6353B;             --crit-soft: rgba(214, 53, 59, 0.1);
+  --chart-2: #6353C9;          --chart-3: #6B7280;
+  --chart-4: #7C6FE0;          --chart-5: #D9731A;
+  --chart-6: #8A93A6;          --chart-7: #D6353B;
+  --role-controller: #7C6FE0;  --role-controller-soft: rgba(124, 111, 224, 0.1);
+  --role-compute: #E15B3C;     --role-compute-soft: rgba(225, 91, 60, 0.1);
+  --role-storage: #8A93A6;     --role-storage-soft: rgba(138, 147, 166, 0.1);
+  --role-monitoring: #D9731A;  --role-monitoring-soft: rgba(217, 115, 26, 0.1);
+  --glow-strength: 8%;
+}
+.dark .cx-dash {
+  --ok: #A3A9B4;               --ok-soft: rgba(163, 169, 180, 0.12);
+  --warn: #F0883E;             --warn-soft: rgba(240, 136, 62, 0.15);
+  --crit: #F2555A;             --crit-soft: rgba(242, 85, 90, 0.15);
+  --chart-2: #9B90EE;          --chart-3: #8B909A;
+  --chart-4: #A79BEF;          --chart-5: #F0883E;
+  --chart-6: #C2C6CC;          --chart-7: #F2555A;
+  --role-controller: #A79BEF;  --role-controller-soft: rgba(167, 155, 239, 0.14);
+  --role-compute: #E97757;     --role-compute-soft: rgba(233, 119, 87, 0.14);
+  --role-storage: #8B909A;     --role-storage-soft: rgba(139, 144, 154, 0.14);
+  --role-monitoring: #F0883E;  --role-monitoring-soft: rgba(240, 136, 62, 0.14);
+  --glow-strength: 14%;
+}
+
+/* panels: faint corner glow, orange on odd / purple on even so a row alternates */
+.cx-dash .panel {
+  background:
+    radial-gradient(540px 170px at 0% 0%, color-mix(in srgb, var(--accent) calc(var(--glow-strength) * 0.5), transparent), transparent 72%),
+    var(--surface);
+}
+.cx-dash .panel:nth-child(even) {
+  background:
+    radial-gradient(540px 170px at 100% 0%, color-mix(in srgb, var(--medium) calc(var(--glow-strength) * 0.55), transparent), transparent 72%),
+    var(--surface);
+}
+
+/* header canopy */
+.cx-hero {
+  --h-text: var(--text);
+  --h-dim: var(--text-dim);
+  --h-faint: var(--text-faint);
+  --h-line: var(--border-soft);
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--text) 11%, var(--border));
+  color: var(--text);
+  background:
+    radial-gradient(760px 250px at 0% 0%, color-mix(in srgb, var(--accent) var(--glow-strength), transparent), transparent 70%),
+    radial-gradient(680px 280px at 100% 0%, color-mix(in srgb, var(--medium) var(--glow-strength), transparent), transparent 72%),
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 93%, var(--text)), var(--surface) 70%);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent),
+    0 34px 70px -52px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.cx-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--text) 5%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--text) 5%, transparent) 1px, transparent 1px);
+  background-size: 32px 32px;
+  -webkit-mask-image: radial-gradient(ellipse 65% 100% at 88% 0%, #000, transparent 75%);
+  mask-image: radial-gradient(ellipse 65% 100% at 88% 0%, #000, transparent 75%);
+}
+
+/* translucent inset surfaces (Copilot box, activity chart) */
+.cx-glass {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--text) 4.5%, transparent), color-mix(in srgb, var(--text) 1.5%, transparent));
+  border: 1px solid color-mix(in srgb, var(--text) 9%, transparent);
+  border-radius: 10px;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+}
+/* KPI tile: translucent, with a soft status-colored glow when --glow is set */
+.cx-kpi {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--text) 5%, transparent), color-mix(in srgb, var(--text) 1.5%, transparent));
+  border: 1px solid color-mix(in srgb, var(--text) 9%, transparent);
+  border-radius: 10px;
+  box-shadow: 0 0 34px -20px var(--glow, transparent), inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+.cx-kpi:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--glow, var(--accent)) 45%, transparent);
+  box-shadow: 0 0 32px -14px var(--glow, var(--accent)), inset 0 1px 0 color-mix(in srgb, var(--text) 6%, transparent);
+}
+.cx-track { height: 4px; border-radius: 999px; background: color-mix(in srgb, var(--text) 12%, transparent); overflow: hidden; }
+.cx-track > span { display: block; height: 100%; border-radius: inherit; background: var(--bar, var(--accent)); box-shadow: 0 0 10px -1px var(--bar, var(--accent)); }
+
+.cx-input { background: color-mix(in srgb, var(--bg) 55%, transparent); border: 1px solid color-mix(in srgb, var(--text) 13%, transparent); color: var(--text); }
+.cx-input::placeholder { color: var(--text-muted); }
+.cx-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.cx-cta { background: linear-gradient(135deg, var(--accent-strong), var(--accent)); color: #fff; box-shadow: 0 6px 16px -8px var(--accent); }
+.cx-cta:hover { filter: brightness(1.06); }
+
+/* activity bars */
+.cx-bar { position: relative; flex: 1; min-width: 0; display: flex; align-items: flex-end; height: 100%; cursor: default; }
+.cx-bar__fill {
+  position: relative;
+  width: 100%;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--medium) 30%, transparent);
+  overflow: hidden;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.cx-bar--active .cx-bar__fill {
+  background: linear-gradient(to top, color-mix(in srgb, var(--medium) 70%, transparent), var(--accent));
+  box-shadow: 0 0 16px -4px var(--accent);
+}
+.cx-bar__err { position: absolute; left: 0; right: 0; bottom: 0; background: var(--crit); }
+.cx-tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  padding: 3px 7px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: var(--text);
+  color: var(--surface);
+  z-index: 2;
+}

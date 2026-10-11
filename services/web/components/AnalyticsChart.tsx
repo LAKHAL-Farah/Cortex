@@ -31,17 +31,22 @@ export default function AnalyticsChart({
   data,
   primaryColor = "var(--chart-1)",
   secondaryColor = "var(--chart-4)",
+  height = 360,
+  yDomain,
 }: {
   data: AnalyticsPoint[];
   primaryColor?: string;
   secondaryColor?: string;
+  /** Pixels, or a percentage string to fill a sized parent. */
+  height?: number | `${number}%`;
+  yDomain?: [number, number];
 }) {
   return (
-    <ResponsiveContainer width="100%" height={360}>
+    <ResponsiveContainer width="100%" height={height}>
       <AreaChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
         <CartesianGrid stroke="var(--border-soft)" strokeDasharray="3 5" vertical={false} />
         <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: 'var(--text-muted)', fontSize: 12 }} />
-        <YAxis axisLine={false} tickLine={false} tick={{ fill: 'var(--text-muted)', fontSize: 12 }} />
+        <YAxis domain={yDomain} axisLine={false} tickLine={false} tick={{ fill: 'var(--text-muted)', fontSize: 12 }} />
         <Tooltip content={<CustomTooltip />} cursor={{ stroke: 'var(--accent)', strokeWidth: 1, strokeDasharray: '4 4' }} />
 
         <defs>
