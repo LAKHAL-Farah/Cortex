@@ -16,7 +16,7 @@ import {
   CalendarClock,
   SlidersHorizontal,
   Bot,
-  Workflow,
+  ClipboardCheck,
   ShieldCheck,
   ShieldAlert,
   Settings2,
@@ -50,7 +50,7 @@ const NAV_SECTIONS = [
   },
   { title: "AI Copilot", href: "/copilot", icon: Bot },
   { title: "Security", href: "/security", icon: ShieldAlert },
-  { title: "Operations", href: "/operations", icon: Workflow },
+  { title: "Remediation audit", href: "/remediation-audit", icon: ClipboardCheck },
   { title: "Administration", href: "/admin", icon: ShieldCheck },
 ];
 
@@ -87,7 +87,16 @@ export default function Sidebar() {
   const router = useRouter();
   const { user } = useCurrentUser();
 
-  const sections = NAV_SECTIONS.filter((s) => s.href !== "/admin" || user?.role === "admin");
+  // Entries only some roles should see. (The API enforces access regardless;
+  // this just avoids showing a link that would end in a 403.)
+  const ROLE_GATED: Record<string, string[]> = {
+    "/admin": ["admin"],
+    "/remediation-audit": ["admin", "operator"],
+  };
+  const sections = NAV_SECTIONS.filter((s) => {
+    const allowed = s.href ? ROLE_GATED[s.href] : undefined;
+    return !allowed || (user?.role !== undefined && allowed.includes(user.role));
+  });
 
   const logout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });

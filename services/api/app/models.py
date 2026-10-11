@@ -129,10 +129,54 @@ class AnomalyFlag(Base):
     detected_at = Column(DateTime, default=datetime.utcnow)
     manually_resolved_at = Column(DateTime, nullable=True)
     resolution_note = Column(Text, nullable=True)
+    # How many detection ticks in a row this host/metric has been abnormal.
+    # Only used when the admin asks for a persistence requirement (settings ->
+    # anomaly detection): an alert opens once this reaches the configured
+    # number, so a one-tick spike no longer raises one.
+    consecutive_anomalous_ticks = Column(Integer, nullable=False, default=0, server_default="0")
  
     __table_args__ = (
         UniqueConstraint("hostname", "metric_name", name="uq_anomaly_slot"),
     )
+
+
+class DetectionSettings(Base):
+    """How sensitive anomaly detection is -- a single row (id = 1).
+
+    `preset` is `low` / `balanced` / `high`, or `custom`. The preset's numbers
+    live in code (services/detection_settings.py::PRESETS); the columns below
+    are only read when `preset = 'custom'`, and are kept (not cleared) when an
+    admin switches back to a preset, so flipping to "custom" again restores
+    what they last typed.
+
+    - z_*: robust z-score cut-offs for medium / high / critical (CPU, RAM and
+      anything else scored against a baseline).
+    - ssh_*: absolute failed-login counts per 5 minutes for the SSH brute-force
+      floor, which deliberately ignores the learned baseline.
+    - persist_minutes: how long a value must stay abnormal before an alert
+      opens (0 = alert on the first abnormal reading).
+
+    Service-state alerts (a container or node going down) are not statistical
+    and are not affected by any of this.
+    """
+    __tablename__ = "detection_settings"
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_detection_settings_singleton"),
+        CheckConstraint("preset IN ('low','balanced','high','custom')", name="ck_detection_settings_preset"),
+    )
+
+    id = Column(Integer, primary_key=True, default=1)
+    preset = Column(String(16), nullable=False, default="balanced", server_default="balanced")
+    z_medium = Column(Float, nullable=False, default=2.0, server_default="2")
+    z_high = Column(Float, nullable=False, default=3.0, server_default="3")
+    z_critical = Column(Float, nullable=False, default=4.0, server_default="4")
+    ssh_medium = Column(Integer, nullable=False, default=5, server_default="5")
+    ssh_high = Column(Integer, nullable=False, default=15, server_default="15")
+    ssh_critical = Column(Integer, nullable=False, default=30, server_default="30")
+    persist_minutes = Column(Integer, nullable=False, default=0, server_default="0")
+    updated_at = Column(DateTime, nullable=True)
+    updated_by = Column(String(64), nullable=True)
  
  
 class AnomalyEvent(Base):

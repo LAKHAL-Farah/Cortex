@@ -30,7 +30,7 @@ from .routers import openstack_expert
 from .routers import auth as auth_router
 from .auth import get_current_user, hash_password
 from . import models
-from .services.anomaly_detector import detect_anomalies
+from .services.anomaly_detector import DETECTION_INTERVAL_SECONDS, detect_anomalies
 from .services.quota_budget_monitor import check_quota_and_budget
 from .services import alert_routing
 from .services.weekly_digest import DIGEST_CHECK_INTERVAL_SECONDS, send_due_digest
@@ -46,10 +46,10 @@ from .services.prometheus_health import sync_prometheus_health
 from . import crud, graph_db
 logger = logging.getLogger(__name__)
 
-# How often detect_anomalies() re-scores the latest Prometheus values. The
-# EWMA fallback's alpha (see anomaly_detector.EWMA_ALPHA) is tuned assuming
-# ~1-minute ticks, so this is the default.
-ANOMALY_DETECTION_INTERVAL_SECONDS = int(os.getenv("ANOMALY_DETECTION_INTERVAL_SECONDS", "60"))
+# How often detect_anomalies() re-scores the latest Prometheus values. Defined
+# (and explained) in anomaly_detector.DETECTION_INTERVAL_SECONDS, which also
+# scales the EWMA fallback's smoothing to match.
+ANOMALY_DETECTION_INTERVAL_SECONDS = DETECTION_INTERVAL_SECONDS
 # How often the (weekday, hour) baselines table is rebuilt from Prometheus
 # history. Hourly is plenty -- a single slot's stats don't meaningfully change
 # faster than that, and it keeps the range-query load on Prometheus low.
@@ -122,6 +122,19 @@ QUOTA_BUDGET_CHECK_INTERVAL_SECONDS = int(os.getenv("QUOTA_BUDGET_CHECK_INTERVAL
 # exists -- 10 s keeps a critical alert comfortably inside the one-minute
 # target even with a retry or two, and an idle tick is a single indexed read.
 ALERT_DISPATCH_INTERVAL_SECONDS = int(os.getenv("ALERT_DISPATCH_INTERVAL_SECONDS", "10"))
+
+def _detect_and_notify(db) -> None:
+    """One detection pass, then send whatever alert emails it queued right away
+    instead of waiting for the next dispatcher tick -- a critical alert should
+    leave within seconds of being raised (roadmap 4.7). The regular dispatcher
+    still runs as the retry/escalation safety net."""
+    detect_anomalies(db)
+    try:
+        alert_routing.dispatch_due(db)
+    except Exception:  # noqa: BLE001 -- delivery trouble must not fail detection
+        db.rollback()
+        logger.exception("immediate alert dispatch after detection failed; the dispatcher will retry")
+
 
 async def _run_periodic(fn, interval_seconds: float, name: str) -> None:
     """Runs fn(db) in a worker thread on a fixed interval, forever.
@@ -347,7 +360,7 @@ async def lifespan(app: FastAPI):
 
     tasks = [
         asyncio.create_task(
-            _run_periodic(detect_anomalies, ANOMALY_DETECTION_INTERVAL_SECONDS, "anomaly detection")
+            _run_periodic(_detect_and_notify, ANOMALY_DETECTION_INTERVAL_SECONDS, "anomaly detection")
         ),
         asyncio.create_task(
             _run_periodic(compute_baselines, BASELINE_REFRESH_INTERVAL_SECONDS, "baseline refresh")

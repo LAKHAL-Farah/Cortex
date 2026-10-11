@@ -56,6 +56,19 @@ class AlertEmailSettingsUpdate(BaseModel):
         return email
 
 
+class DetectionCustomValues(BaseModel):
+    """The numbers behind `custom` sensitivity. Range/ordering rules are checked
+    by services/detection_settings.validate_custom (422 with the reason)."""
+    z: dict[str, float]
+    ssh: dict[str, int]
+    persist_minutes: int = 0
+
+
+class DetectionSettingsUpdate(BaseModel):
+    preset: Literal["low", "balanced", "high", "custom"]
+    custom: DetectionCustomValues | None = None
+
+
 class WeeklyDigestSettingsUpdate(BaseModel):
     """Schedule for the weekly digest (roadmap 4.5). UTC, so the schedule
     means the same thing regardless of where the API host or the reader is."""

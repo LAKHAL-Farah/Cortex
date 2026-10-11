@@ -69,6 +69,9 @@ services:
       ALERT_ESCALATE_HIGH_AFTER_MINUTES: ${ALERT_ESCALATE_HIGH_AFTER_MINUTES:-60}
       ALERT_ESCALATION_RECIPIENT_EMAIL: ${ALERT_ESCALATION_RECIPIENT_EMAIL:-}
       ALERT_DISPATCH_INTERVAL_SECONDS: ${ALERT_DISPATCH_INTERVAL_SECONDS:-10}
+      # How often anomaly detection runs; 30 s + the 20 s Prometheus scrape keeps "metric crosses
+      # the line" -> "critical email sent" under a minute (roadmap 4.7)
+      ANOMALY_DETECTION_INTERVAL_SECONDS: ${ANOMALY_DETECTION_INTERVAL_SECONDS:-30}
       # Roadmap 4.5 weekly digest: base URL for the email's "Open Cortex" button
       # (button is hidden when unset). Schedule itself is set in Settings > Weekly digest.
       CORTEX_PUBLIC_URL: ${CORTEX_PUBLIC_URL:-}
