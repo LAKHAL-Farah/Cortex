@@ -20,6 +20,21 @@ NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
 NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "")
 
+
+
+class _DropUnknownSchemaNotifications(logging.Filter):
+    """Neo4j answers a query that names a relationship type / label / property
+    that has no data yet (e.g. `-[:RUNS_IN]->` before any Service has been
+    linked to a Container) with an UnknownRelationshipTypeWarning, which the
+    driver logs on every call. It is expected on a young graph, so keep the
+    log readable; every other notification is still logged."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Neo.ClientNotification.Statement.Unknown" not in record.getMessage()
+
+
+logging.getLogger("neo4j.notifications").addFilter(_DropUnknownSchemaNotifications())
+
 # One driver, reused for the process lifetime -- the driver already pools
 # connections internally, so there's no need for a session-per-request
 # factory the way SessionLocal is for SQLAlchemy.

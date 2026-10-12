@@ -81,6 +81,7 @@ import type {
 } from "@/lib/types";
 import NetworkTopologyDiagram from "@/components/NetworkTopologyDiagram";
 import { formatRelativeTime } from "@/lib/logs";
+import { OPENSTACK_CLI_PREAMBLE, needsOpenstackPreamble, withOpenstackEnv } from "@/lib/openstackCli";
 import { metricLabel, SEVERITY_COLOR, SEVERITY_LABEL, SEVERITY_SOFT } from "@/lib/anomalies";
 
 // ---------------------------------------------------------------------------
@@ -1706,7 +1707,7 @@ function CommandRow({ cmd }: { cmd: AgentExpertCommand }) {
 
   async function copy() {
     try {
-      await navigator.clipboard.writeText(cmd.command);
+      await navigator.clipboard.writeText(withOpenstackEnv(cmd.command));
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     } catch {
@@ -1737,10 +1738,18 @@ function CommandRow({ cmd }: { cmd: AgentExpertCommand }) {
       </div>
       <div className="agent-command-row__code">
         <code>{cmd.command}</code>
-        <button onClick={copy} className="agent-command-row__copy" aria-label="Copy command" title="Copy command">
+        <button
+          onClick={copy}
+          className="agent-command-row__copy"
+          aria-label="Copy command"
+          title={needsOpenstackPreamble(cmd.command) ? "Copy command (includes the OpenStack environment setup)" : "Copy command"}
+        >
           {copied ? <Check className="h-3.5 w-3.5" style={{ color: "var(--ok)" }} /> : <Copy className="h-3.5 w-3.5" />}
         </button>
       </div>
+      {needsOpenstackPreamble(cmd.command) && (
+        <p className="mt-1 text-[11px] text-text-faint">Copy adds: {OPENSTACK_CLI_PREAMBLE} &amp;&amp;</p>
+      )}
     </div>
   );
 }

@@ -53,6 +53,8 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
+      mailpit:
+        condition: service_started
     environment:
       DATABASE_URL: postgresql+psycopg2://cortex:${CORTEX_DB_PASSWORD}@postgres:5432/cortex
       CORTEX_API_KEY: ${CORTEX_API_KEY}
@@ -60,6 +62,24 @@ services:
       CORTEX_JWT_TTL_MINUTES: ${CORTEX_JWT_TTL_MINUTES:-480}
       CORTEX_ADMIN_USERNAME: ${CORTEX_ADMIN_USERNAME:-admin}
       CORTEX_ADMIN_PASSWORD: ${CORTEX_ADMIN_PASSWORD:-admin}
+      # Alert e-mail transport. These were missing from the prod file, so the API
+      # saw no SMTP_HOST and reported "SMTP is not configured". Defaults point at
+      # the bundled mailpit proof-of-concept inbox (UI on :8025); override all of
+      # them in .env.prod to use a real relay (and set SMTP_STARTTLS=true).
+      ALERT_DEFAULT_RECIPIENT_EMAIL: ${ALERT_DEFAULT_RECIPIENT_EMAIL:-ops@cortex.local}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-cortex@cortex.local}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      ALERT_EMAIL_SEVERITIES: ${ALERT_EMAIL_SEVERITIES:-high,critical}
+      ALERT_ESCALATE_CRITICAL_AFTER_MINUTES: ${ALERT_ESCALATE_CRITICAL_AFTER_MINUTES:-15}
+      ALERT_ESCALATE_HIGH_AFTER_MINUTES: ${ALERT_ESCALATE_HIGH_AFTER_MINUTES:-60}
+      ALERT_ESCALATION_RECIPIENT_EMAIL: ${ALERT_ESCALATION_RECIPIENT_EMAIL:-}
+      ALERT_DISPATCH_INTERVAL_SECONDS: ${ALERT_DISPATCH_INTERVAL_SECONDS:-10}
+      ANOMALY_DETECTION_INTERVAL_SECONDS: ${ANOMALY_DETECTION_INTERVAL_SECONDS:-30}
+      CORTEX_PUBLIC_URL: ${CORTEX_PUBLIC_URL:-}
       OS_CLIENT_CONFIG_FILE: /etc/openstack/clouds.yaml
       OS_CLOUD: ${OS_CLOUD:-cortex-reader}
       # FinOps cost model (services/api/app/services/finops.py): the fixed monthly
@@ -67,6 +87,17 @@ services:
       FINOPS_MONTHLY_COST_EUR: ${FINOPS_MONTHLY_COST_EUR:-292}
       FINOPS_CPU_ALLOCATION_RATIO: ${FINOPS_CPU_ALLOCATION_RATIO:-4.0}
       FINOPS_RAM_ALLOCATION_RATIO: ${FINOPS_RAM_ALLOCATION_RATIO:-1.0}
+      FINOPS_CPU_SHARE_OF_COMPUTE: ${FINOPS_CPU_SHARE_OF_COMPUTE:-0.60}
+      FINOPS_POOL_SHARE_COMPUTE: ${FINOPS_POOL_SHARE_COMPUTE:-0.50}
+      FINOPS_POOL_SHARE_STORAGE: ${FINOPS_POOL_SHARE_STORAGE:-0.30}
+      FINOPS_POOL_SHARE_PLATFORM: ${FINOPS_POOL_SHARE_PLATFORM:-0.20}
+      # Fallbacks used only when capacity cannot be read from Nova/Placement/Prometheus.
+      # (These were documented in .env.example but never passed into the container.)
+      FINOPS_FALLBACK_PHYSICAL_VCPUS: ${FINOPS_FALLBACK_PHYSICAL_VCPUS:-}
+      FINOPS_FALLBACK_PHYSICAL_RAM_GB: ${FINOPS_FALLBACK_PHYSICAL_RAM_GB:-}
+      FINOPS_FALLBACK_STORAGE_GB: ${FINOPS_FALLBACK_STORAGE_GB:-}
+      FINOPS_FLOATING_IP_MONTH_EUR: ${FINOPS_FLOATING_IP_MONTH_EUR:-0}
+      FINOPS_CAPACITY_FROM_PROMETHEUS: ${FINOPS_CAPACITY_FROM_PROMETHEUS:-true}
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_PASSWORD: ${CORTEX_NEO4J_PASSWORD}
       # Container-side path, matching the `:/file_sd` mount below -- this was
@@ -126,12 +157,25 @@ services:
       - ${PROMETHEUS_FILE_SD_HOST_DIR:-./.local-file-sd}:/file_sd
       - ${CORTEX_ANSIBLE_HOST_DIR:-../infra/ansible}:/infra/ansible
       - ${CORTEX_SSH_KEY_HOST_DIR:-./.sandbox-ssh}:/root/.ssh:ro
-      - ${CORTEX_OPENSTACK_HOST_DIR:-./.local-openstack}:/etc/openstack:ro
+      - ${CORTEX_OPENSTACK_HOST_DIR:?set CORTEX_OPENSTACK_HOST_DIR in .env.prod to the host dir holding clouds.yaml (with a cortex-reader cloud)}:/etc/openstack:ro
       - ../docs/knowledge:/app/docs/knowledge:ro
     ports:
       - "127.0.0.1:8000:8000"
     networks:
       - cortex-net
+  # Proof-of-concept mail sink: catches every alert/digest e-mail instead of
+  # sending it. SMTP on :1025, inbox UI on :8025. Bound to localhost by default
+  # because it accepts mail from anyone who can reach it -- set MAILPIT_BIND_IP
+  # (e.g. 10.0.1.4) in .env.prod to open the UI on the overlay.
+  mailpit:
+    image: axllent/mailpit
+    restart: unless-stopped
+    ports:
+      - "${MAILPIT_BIND_IP:-127.0.0.1}:8025:8025"
+      - "${MAILPIT_BIND_IP:-127.0.0.1}:1025:1025"
+    networks:
+      - cortex-net
+
   web:
     build:
       context: ../services/web

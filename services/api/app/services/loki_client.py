@@ -41,7 +41,9 @@ def label_values(label: str):
     if data.get("status") != "success":
         raise Exception(f"Loki label query failed: {data}")
 
-    return data["data"]
+    # Loki omits "data" entirely when the label has no values yet (fresh
+    # install / nothing ingested): that is an empty list, not an error.
+    return data.get("data") or []
 
 
 def _to_ns(unix_seconds: float) -> int:
