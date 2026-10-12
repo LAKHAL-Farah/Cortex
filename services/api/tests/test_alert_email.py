@@ -24,3 +24,21 @@ def test_alert_email_includes_actionable_event_context():
     assert "Anomaly score (z-score): 4.20" in body
     assert "Baseline samples: 42" in body
     assert "source_ips" in body
+
+
+def test_unresolvable_smtp_host_gives_an_actionable_error(monkeypatch):
+    import socket
+
+    import pytest
+
+    from app.services import alert_email
+
+    monkeypatch.setenv("SMTP_HOST", "no-such-host.invalid")
+    monkeypatch.setenv("SMTP_FROM", "cortex@example.com")
+
+    def _boom(*a, **k):
+        raise socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr(alert_email.smtplib, "SMTP", _boom)
+    with pytest.raises(RuntimeError, match="could not be resolved.*SMTP_HOST"):
+        alert_email.send_email("ops@example.com", "s", "b")

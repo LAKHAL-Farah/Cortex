@@ -214,8 +214,9 @@ def _to_float(raw) -> float | None:
 def _fetch_cloud_capacity(conn, cfg: finops.CostConfig) -> finops.CloudCapacity:
     """Physical capacity the monthly cost pool is spread over.
 
-    - vCPUs / RAM: sum over enabled Nova hypervisors (`vcpus`, and
-      openstacksdk's `memory_size`, which maps Nova's `memory_mb`).
+    - vCPUs / RAM, first that works: enabled Nova hypervisors (`vcpus`,
+      `memory_size`; absent on Nova >= 2.88) -> Placement VCPU/MEMORY_MB
+      inventories -> node_exporter totals of the role=compute nodes.
     - storage: sum of Cinder backend pools' `total_capacity_gb` (needs an
       admin-scoped credential; pools reporting "infinite"/"unknown" are
       skipped).
@@ -224,7 +225,11 @@ def _fetch_cloud_capacity(conn, cfg: finops.CostConfig) -> finops.CloudCapacity:
       UI says "capacity unknown" instead of pricing it at a made-up number.
     """
     cap = finops.CloudCapacity()
+    reasons: list[str] = []  # why each compute tier failed -- shown in the warning
 
+    # Tier 1: Nova hypervisors. Needs admin, and Nova >= 2.88 no longer returns
+    # vcpus / memory_mb here at all (openstacksdk negotiates up to 2.88), so a
+    # modern cloud lands in tier 2 even with a fully privileged credential.
     try:
         vcpus = ram_mb = 0.0
         nodes = 0
@@ -242,8 +247,57 @@ def _fetch_cloud_capacity(conn, cfg: finops.CostConfig) -> finops.CloudCapacity:
         if nodes:
             cap.physical_vcpus, cap.physical_ram_mb, cap.compute_nodes = vcpus, ram_mb, nodes
             cap.source["vcpus"] = cap.source["ram_mb"] = "nova"
-    except Exception:
+        else:
+            reasons.append("Nova returned no vCPU/RAM figures (Nova >= 2.88 dropped them from the hypervisor API)")
+    except Exception as exc:
         logger.warning("quota_budget_monitor: Nova hypervisor capacity unavailable", exc_info=True)
+        reasons.append(f"Nova hypervisors: {type(exc).__name__}: {str(exc)[:160]}")
+
+    # Tier 2: Placement inventories (the source of truth for Nova >= 2.88).
+    if cap.physical_vcpus is None or cap.physical_ram_mb is None:
+        try:
+            vcpus = ram_mb = 0.0
+            nodes = 0
+            for rp in conn.placement.resource_providers():
+                inventory = {i.resource_class: i for i in conn.placement.resource_provider_inventories(rp)}
+                rp_vcpus = _to_float(getattr(inventory.get("VCPU"), "total", None))
+                rp_ram = _to_float(getattr(inventory.get("MEMORY_MB"), "total", None))
+                if not rp_vcpus or not rp_ram:
+                    continue  # not a compute node (e.g. a storage-only provider)
+                vcpus += rp_vcpus
+                ram_mb += rp_ram
+                nodes += 1
+            if nodes:
+                cap.physical_vcpus, cap.physical_ram_mb, cap.compute_nodes = vcpus, ram_mb, nodes
+                cap.source["vcpus"] = cap.source["ram_mb"] = "placement"
+            else:
+                reasons.append("Placement has no compute-node inventories")
+        except Exception as exc:
+            logger.warning("quota_budget_monitor: Placement capacity unavailable", exc_info=True)
+            reasons.append(f"Placement: {type(exc).__name__}: {str(exc)[:160]}")
+
+    # Tier 3: node_exporter on the compute nodes, which needs no OpenStack
+    # privilege at all. Logical CPUs and MemTotal are what Nova itself reports.
+    if (cap.physical_vcpus is None or cap.physical_ram_mb is None) and os.getenv(
+        "FINOPS_CAPACITY_FROM_PROMETHEUS", "true"
+    ).lower() == "true":
+        try:
+            from .prometheus_client import query as prom_query
+
+            cpu = prom_query('count(node_cpu_seconds_total{role="compute",mode="idle"})')
+            mem = prom_query('sum(node_memory_MemTotal_bytes{role="compute"})')
+            hosts = prom_query('count(count by (instance) (node_memory_MemTotal_bytes{role="compute"}))')
+            prom_vcpus = _to_float(cpu[0]["value"][1]) if cpu else None
+            prom_ram_bytes = _to_float(mem[0]["value"][1]) if mem else None
+            if prom_vcpus and prom_ram_bytes:
+                cap.physical_vcpus = prom_vcpus
+                cap.physical_ram_mb = prom_ram_bytes / (1024.0 * 1024.0)
+                cap.compute_nodes = int(float(hosts[0]["value"][1])) if hosts else 0
+                cap.source["vcpus"] = cap.source["ram_mb"] = "prometheus"
+            else:
+                reasons.append("Prometheus has no node_exporter series labelled role=\"compute\"")
+        except Exception as exc:
+            reasons.append(f"Prometheus: {type(exc).__name__}: {str(exc)[:160]}")
 
     try:
         total_gb = 0.0
@@ -273,9 +327,10 @@ def _fetch_cloud_capacity(conn, cfg: finops.CostConfig) -> finops.CloudCapacity:
 
     if cap.physical_vcpus is None or cap.physical_ram_mb is None:
         cap.warnings.append(
-            "Compute capacity unknown (Nova hypervisors unreadable): vCPU/RAM cost cannot be derived. "
-            "Set FINOPS_FALLBACK_PHYSICAL_VCPUS / FINOPS_FALLBACK_PHYSICAL_RAM_GB or grant the Cortex "
-            "reader credential the admin role for hypervisor stats."
+            "Compute capacity unknown: vCPU/RAM cost cannot be derived. "
+            "Set FINOPS_FALLBACK_PHYSICAL_VCPUS / FINOPS_FALLBACK_PHYSICAL_RAM_GB, or give the Cortex "
+            "reader credential read access to Nova hypervisors / Placement."
+            + (f" Tried: {'; '.join(reasons)}." if reasons else "")
         )
     if cap.storage_gb is None:
         cap.warnings.append(

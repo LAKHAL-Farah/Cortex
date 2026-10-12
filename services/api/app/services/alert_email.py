@@ -7,6 +7,7 @@ message body.
 import logging
 import os
 import smtplib
+import socket
 from email.message import EmailMessage
 
 from sqlalchemy.orm import Session
@@ -43,12 +44,24 @@ def send_email(recipient: str, subject: str, text: str, html: str | None = None)
     message.set_content(text)
     if html:
         message.add_alternative(html, subtype="html")
-    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=15) as smtp:
-        if os.getenv("SMTP_STARTTLS", "true").lower() == "true":
-            smtp.starttls()
-        if os.getenv("SMTP_USERNAME") and os.getenv("SMTP_PASSWORD"):
-            smtp.login(os.environ["SMTP_USERNAME"], os.environ["SMTP_PASSWORD"])
-        smtp.send_message(message)
+    port = int(os.getenv("SMTP_PORT", "587"))
+    try:
+        with smtplib.SMTP(host, port, timeout=15) as smtp:
+            if os.getenv("SMTP_STARTTLS", "true").lower() == "true":
+                smtp.starttls()
+            if os.getenv("SMTP_USERNAME") and os.getenv("SMTP_PASSWORD"):
+                smtp.login(os.environ["SMTP_USERNAME"], os.environ["SMTP_PASSWORD"])
+            smtp.send_message(message)
+    except socket.gaierror as exc:
+        raise RuntimeError(
+            f"SMTP host '{host}' could not be resolved from the API container ({exc}). "
+            "Check SMTP_HOST (use 'mailpit' for the bundled mail sink) and the container's DNS."
+        ) from exc
+    except (ConnectionError, TimeoutError, socket.timeout) as exc:
+        raise RuntimeError(
+            f"Could not reach the SMTP server {host}:{port} ({type(exc).__name__}: {exc}). "
+            "Check SMTP_HOST / SMTP_PORT and that the port is open."
+        ) from exc
 
 
 def _send(recipient: str, subject: str, body: str) -> None:

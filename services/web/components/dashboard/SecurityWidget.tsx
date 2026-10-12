@@ -11,9 +11,13 @@ import { formatRelative } from "@/lib/anomalies";
 export default function SecurityWidget() {
   const opts = { refreshInterval: 60_000, shouldRetryOnError: false } as const;
   const status = useSWR<SecurityStatus>("/api/security/status", apiFetcher, opts);
-  const findings = useSWR<SecurityFinding[]>("/api/security/findings", apiFetcher, opts);
+  // GET /api/v1/security/findings returns `{ findings: [...] }`, not a bare
+  // array (the /security page reads `data.findings` too). Treating it as an
+  // array made every count below 0. Accept both shapes defensively.
+  const findings = useSWR<{ findings: SecurityFinding[] } | SecurityFinding[]>("/api/security/findings", apiFetcher, opts);
 
-  const list = Array.isArray(findings.data) ? findings.data : [];
+  const raw = findings.data;
+  const list: SecurityFinding[] = Array.isArray(raw) ? raw : Array.isArray(raw?.findings) ? raw.findings : [];
   const tones = list.map((f) => ({ f, tone: overallSecurityTone(f.raw_data) }));
   const flagged = tones.filter((t) => t.tone.label === "Flagged");
   const degraded = tones.filter((t) => t.tone.label === "Degraded");
@@ -29,7 +33,7 @@ export default function SecurityWidget() {
       ) : (
         <>
           <div className="grid grid-cols-3 gap-2">
-            <MiniStat label="Hosts scanned" value={s?.node_count ?? list.length} />
+            <MiniStat label="Hosts scanned" value={list.length || (s?.node_count ?? 0)} />
             <MiniStat label="Flagged" value={flagged.length} color={flagged.length ? "var(--crit)" : "var(--ok)"} />
             <MiniStat label="Degraded" value={degraded.length} color={degraded.length ? "var(--warn)" : undefined} />
           </div>

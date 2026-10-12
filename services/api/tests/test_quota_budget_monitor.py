@@ -245,3 +245,66 @@ def test_resolved_breach_reverts_to_normal_severity():
     )
     assert row.severity == "normal"
     assert row.message is None
+
+
+# --- compute capacity discovery tiers (Nova -> Placement -> Prometheus) -----
+
+def _cfg():
+    from app.services import finops
+
+    return finops.load_config()
+
+
+def _placement_conn(providers):
+    """`providers`: {rp_id: {"VCPU": n, "MEMORY_MB": n}}"""
+    conn = _fake_conn(NORMAL_COMPUTE, NORMAL_VOLUME, [], hypervisors=None)
+    conn.placement = types.SimpleNamespace(
+        resource_providers=lambda: [types.SimpleNamespace(id=k) for k in providers],
+        resource_provider_inventories=lambda rp: [
+            types.SimpleNamespace(resource_class=c, total=t) for c, t in providers[rp.id].items()
+        ],
+    )
+    return conn
+
+
+def test_capacity_falls_back_to_placement_when_nova_has_no_vcpu_fields(monkeypatch):
+    """Nova >= 2.88 drops vcpus/memory_mb from the hypervisor API."""
+    monkeypatch.setenv("FINOPS_CAPACITY_FROM_PROMETHEUS", "false")
+    conn = _placement_conn({"a": {"VCPU": 16, "MEMORY_MB": 32768}, "b": {"VCPU": 8, "MEMORY_MB": 16384}, "disk": {"DISK_GB": 100}})
+    conn.compute.hypervisors = lambda details=False: [types.SimpleNamespace(status="enabled", vcpus=None, memory_size=None)]
+
+    cap = qbm._fetch_cloud_capacity(conn, _cfg())
+
+    assert (cap.physical_vcpus, cap.physical_ram_mb, cap.compute_nodes) == (24.0, 49152.0, 2)
+    assert cap.source["vcpus"] == "placement"
+    assert not any("Compute capacity unknown" in w for w in cap.warnings)
+
+
+def test_capacity_falls_back_to_prometheus_and_reports_why_earlier_tiers_failed(monkeypatch):
+    monkeypatch.setenv("FINOPS_CAPACITY_FROM_PROMETHEUS", "true")
+    answers = {
+        "node_cpu_seconds_total": [{"value": [0, "12"]}],
+        "sum(node_memory": [{"value": [0, str(16 * 1024**3)]}],
+        "count(count by": [{"value": [0, "2"]}],
+    }
+    import app.services.prometheus_client as pc
+
+    monkeypatch.setattr(pc, "query", lambda q, timeout=5: next(v for k, v in answers.items() if k in q))
+    conn = _fake_conn(NORMAL_COMPUTE, NORMAL_VOLUME, [], hypervisors=None)  # no .placement either
+
+    cap = qbm._fetch_cloud_capacity(conn, _cfg())
+
+    assert cap.physical_vcpus == 12.0 and cap.physical_ram_mb == 16384.0 and cap.compute_nodes == 2
+    assert cap.source["vcpus"] == "prometheus"
+
+
+def test_unknown_capacity_warning_lists_the_reasons(monkeypatch):
+    monkeypatch.setenv("FINOPS_CAPACITY_FROM_PROMETHEUS", "false")
+    monkeypatch.delenv("FINOPS_FALLBACK_PHYSICAL_VCPUS", raising=False)
+    monkeypatch.delenv("FINOPS_FALLBACK_PHYSICAL_RAM_GB", raising=False)
+    conn = _fake_conn(NORMAL_COMPUTE, NORMAL_VOLUME, [], hypervisors=None)
+
+    cap = qbm._fetch_cloud_capacity(conn, _cfg())
+
+    warning = next(w for w in cap.warnings if "Compute capacity unknown" in w)
+    assert "Nova hypervisors: RuntimeError" in warning and "Placement:" in warning

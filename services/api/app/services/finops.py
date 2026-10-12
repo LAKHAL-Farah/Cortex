@@ -166,7 +166,7 @@ class CloudCapacity:
     physical_ram_mb: float | None = None
     storage_gb: float | None = None
     compute_nodes: int = 0
-    source: dict[str, str] = field(default_factory=dict)  # resource -> "nova"|"cinder"|"env"
+    source: dict[str, str] = field(default_factory=dict)  # resource -> "nova"|"placement"|"prometheus"|"cinder"|"env"
     warnings: list[str] = field(default_factory=list)
 
 
