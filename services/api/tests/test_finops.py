@@ -34,7 +34,6 @@ from tests.test_quota_budget_monitor import (
     _compute_absolute,
     _fake_conn,
     _hypervisor,
-    _pool,
     _project,
     _volume_absolute,
 )

@@ -19,7 +19,6 @@ sub-check ("unknown") rather than a false "all clear".
 """
 import base64
 import contextlib
-import copy
 import hmac
 import json
 import logging
@@ -202,7 +201,13 @@ def ssh_run(host: str, command: str, timeout: float | None = None) -> tuple[int,
 
 # Tests replace these.
 RUNNER: Callable[[str, str], tuple[int, str]] = ssh_run
-LONG_RUNNER: Callable[[str, str], tuple[int, str]] = lambda host, cmd: ssh_run(host, cmd, timeout=TRIVY_TIMEOUT)
+
+
+def _long_runner(host: str, cmd: str) -> tuple[int, str]:
+    return ssh_run(host, cmd, timeout=TRIVY_TIMEOUT)
+
+
+LONG_RUNNER: Callable[[str, str], tuple[int, str]] = _long_runner
 
 # Per-host data is refreshed by a background thread and *read* by the endpoints, so an API
 # request never waits for SSH / apt (the API times out after 8 s and its circuit breaker opens).

@@ -13,7 +13,7 @@ import uuid
 
 import pytest
 
-from app import crud, models
+from app import crud
 from app.agents.nodes import openstack_expert_catalog_store as store
 from app.db import SessionLocal
 

@@ -24,7 +24,6 @@ different tables, same "a periodic pass plus a manual on-demand trigger"
 shape -- see routers/security.py's POST /resync.
 """
 import logging
-from datetime import datetime
 
 from sqlalchemy.orm import Session
 

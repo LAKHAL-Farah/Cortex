@@ -85,7 +85,6 @@ reachability.
 """
 import logging
 import socket
-import time
 
 from .. import graph_db
 from . import security_audit

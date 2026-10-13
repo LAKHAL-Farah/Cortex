@@ -22,7 +22,7 @@ tests cover the three new pieces that make that true:
 In-memory SQLite DB (same pattern test_baseline_builder.py/
 test_topology_sync.py already use) -- no live Postgres/OpenStack needed.
 """
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest

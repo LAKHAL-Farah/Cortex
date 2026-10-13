@@ -29,7 +29,6 @@ from .routers import openstack_docs
 from .routers import openstack_expert
 from .routers import auth as auth_router
 from .auth import get_current_user, hash_password
-from . import models
 from .services.anomaly_detector import DETECTION_INTERVAL_SECONDS, detect_anomalies
 from .services.quota_budget_monitor import check_quota_and_budget
 from .services import alert_routing

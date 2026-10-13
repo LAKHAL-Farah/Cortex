@@ -20,10 +20,16 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app import models
+from app.auth import get_current_user
+from app.db import get_db
+from app.routers import settings as settings_router
 from app.services import alert_email, weekly_digest as wd
 from app.services import weekly_digest_email as email_view
 
@@ -235,10 +241,14 @@ def test_security_section_counts_signals_and_ranks_cves_by_severity():
 
 def test_anomaly_stats_resolution_and_notable_ordering():
     t0 = NOW - timedelta(days=2)
-    ev = lambda host, sev, z, res=None, rtype=None: types.SimpleNamespace(
-        hostname=host, metric_name="cpu_usage", severity=sev, z_score=z, current_value=90.0,
-        started_at=t0, resolved_at=(t0 + timedelta(minutes=res)) if res is not None else None, resolution_type=rtype,
-    )
+
+    def ev(host, sev, z, res=None, rtype=None):
+        return types.SimpleNamespace(
+            hostname=host, metric_name="cpu_usage", severity=sev, z_score=z, current_value=90.0,
+            started_at=t0, resolved_at=(t0 + timedelta(minutes=res)) if res is not None else None,
+            resolution_type=rtype,
+        )
+
     stats = wd.build_anomaly_stats(
         [ev("a", "medium", 3.1, 30), ev("b", "critical", 6.0), ev("a", "high", 4.0, 90, "manual")], prev_count=1, open_now=1
     )
@@ -439,14 +449,6 @@ def test_cta_only_renders_with_a_valid_public_url(monkeypatch):
 # ===========================================================================
 # 5. HTTP surface (settings router, mounted on a bare app -- no Postgres)
 # ===========================================================================
-
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-
-from app.auth import get_current_user
-from app.db import get_db
-from app.routers import settings as settings_router
 
 
 def _client(role="admin"):

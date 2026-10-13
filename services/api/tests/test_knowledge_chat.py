@@ -83,7 +83,6 @@ def test_stream_answer_grounds_prompt_in_retrieved_chunks(monkeypatch):
     captured = []
     monkeypatch.setattr(chat, "_client", lambda: _FakeLLM(captured))
 
-    retrieved = chat.retrieve  # keep reference; not used, just documenting shape
     fake_chunks = [
         chat.RetrievedChunk(
             text="Nova is the compute service.",

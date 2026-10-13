@@ -20,10 +20,8 @@ from app import models
 from app.services.anomaly_detector import (
     score_current_value,
     severity_from_zscore,
-    detect_anomalies,
     MIN_BASELINE_SAMPLES,
     MIN_BASELINE_DAYS,
-    MIN_MAD_FLOOR,
     MIN_ROLE_BASELINE_SAMPLES,
     MIN_ROLE_BASELINE_HOSTS,
 )

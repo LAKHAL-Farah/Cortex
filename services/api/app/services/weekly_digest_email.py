@@ -269,7 +269,7 @@ def _kpis(data: dict) -> str:
     cells = "".join([
         _kpi("Fleet CPU", _pct(cpu.get("avg")), _delta(cpu.get("delta"), quiet_below=3) + " vs last wk", _level_color(cpu.get("avg"))),
         _kpi("Alerts", str(ag["total"]),
-             _delta(ag["total"] - ag["prev_total"], unit="") + f" vs last wk", ACCENT),
+             _delta(ag["total"] - ag["prev_total"], unit="") + " vs last wk", ACCENT),
         _kpi("Security", str(sec["total_signals"]),
              (f'<span style="color:{CRIT};font-weight:600">{crit_cves} critical CVE{"s" if crit_cves != 1 else ""}</span>' if crit_cves
               else "open signals" if sec["total_signals"] else "all clear"),
@@ -502,7 +502,7 @@ def _agents(data: dict) -> str:
     avg_min = ag["avg_resolution_minutes"]
     ttr = "–" if avg_min is None else (f"{avg_min:.0f} min" if avg_min < 120 else f"{avg_min / 60:.1f} h")
     stats = (
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 -4px;width:calc(100% + 8px)"><tr>'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 -4px;width:calc(100% + 8px)"><tr>'
         + _mini_stat("Alerts detected", str(ag["total"]), _delta(ag["total"] - ag["prev_total"], unit="") + " vs last week")
         + _mini_stat("Resolved", f'{ag["resolved"]}<span class="em-faint" style="font:500 13px {F_BODY};color:{FAINT}"> / {ag["total"]}</span>', f"avg {ttr} to resolve")
         + _mini_stat("Still open", str(ag["still_open"]), "needs review" if ag["still_open"] else "nothing outstanding")

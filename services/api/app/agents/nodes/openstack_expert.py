@@ -606,7 +606,7 @@ def _render_docs_fallback(query: str, hits: list[DocResult]) -> str:
             f"#### {n}. {label}\n\n{excerpt}\n\n[Open in docs.openstack.org]({hit.source_url})"
         )
     return (
-        f"### From official OpenStack documentation\n\n"
+        "### From official OpenStack documentation\n\n"
         + "\n\n".join(sections)
         + "\n\n---\n"
         + _callout(
@@ -646,7 +646,7 @@ def _build_docs_fallback_result(query: str, hits: list[DocResult]) -> dict:
 def _render_web_fallback(query: str, hits: list[WebSearchResult]) -> str:
     lines = [f"- [{h.title}]({h.url})" + (f" — {h.snippet}" if h.snippet else "") for h in hits]
     return (
-        f"### Community-sourced results (unverified)\n\n"
+        "### Community-sourced results (unverified)\n\n"
         + _callout(
             "WARNING",
             f'No catalog entry or official documentation matches "{query}" -- here\'s what turned '

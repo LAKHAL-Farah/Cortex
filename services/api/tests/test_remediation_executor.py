@@ -25,7 +25,7 @@ from app.agents.nodes import openstack_expert as expert
 from app.agents.nodes.openstack_expert_catalog import CATALOG
 from app.agents.nodes.remediation import build_fix_proposal
 from app.services import remediation_executor as ex
-from app.services.remediation_executor import ExecutionPlan, NotExecutable, plan_for
+from app.services.remediation_executor import NotExecutable, plan_for
 
 UUID = "3f2b8c1e-5d4a-4b7e-9a10-0c6d2e8f1a77"
 

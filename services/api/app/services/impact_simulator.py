@@ -36,7 +36,7 @@ critic's numeric-grounding check (nodes/critic.py) can verify all of them.
 """
 import logging
 import re
-from typing import Any, Optional
+from typing import Optional
 
 from .. import graph_db
 from ..agents.resilience import get_breaker
