@@ -54,7 +54,7 @@ def _measure_one(hostname: str, ip_address: str | None, port: int) -> dict[str, 
                 "reachable": True,
                 "error": None,
             }
-    except Exception as exc:
+    except Exception:
         if ip_address and target != ip_address:
             start = time.perf_counter()
             try:

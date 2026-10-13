@@ -1,9 +1,9 @@
-from app.services.prometheus_client import query, query_range
 import logging
+import time
+
+from app.services.prometheus_client import query, query_range
 
 logger = logging.getLogger(__name__)
-
-import time
 
 METRIC_QUERIES = {
     "cpu_percent":    '100 - (avg by(instance) (rate(node_cpu_seconds_total{{mode="idle"}}[5m])) * 100)',

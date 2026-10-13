@@ -4,7 +4,6 @@ from enum import Enum
 from ipaddress import ip_address, ip_network
 from typing import Literal, TypedDict
 from pydantic import BaseModel, Field, field_validator, ConfigDict
-from ipaddress import ip_address, ip_network
 
 MANAGED_SUBNETS = [
     ip_network("10.0.1.0/24"),   # controller, compute1, compute2

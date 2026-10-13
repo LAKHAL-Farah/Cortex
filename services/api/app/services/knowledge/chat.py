@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from ..llm_client import LLMConfigError, get_chat_model
-from .embeddings import EmbeddingError, embed_query
+from .embeddings import embed_query
 from .qdrant_store import search as qdrant_search
 
 logger = logging.getLogger(__name__)

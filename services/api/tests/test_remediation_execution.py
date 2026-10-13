@@ -36,7 +36,6 @@ from app.db import SessionLocal
 from app.main import app
 from app.services import remediation_approval as approval
 from app.services import remediation_execution as execution
-from app.services import remediation_executor as executor
 from app.services.remediation_executor import ExecutionResult
 
 client = TestClient(app)

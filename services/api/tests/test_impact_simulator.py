@@ -16,7 +16,7 @@ import app.services.impact_simulator as sim
 from app.agents.graph import app_graph
 from app.agents.nodes.critic import critic_check
 from app.agents.nodes.openstack_expert_catalog import CATALOG
-from app.agents.nodes.remediation import build_fix_proposal, render_fix_proposal, render_impact, remediation_agent
+from app.agents.nodes.remediation import build_fix_proposal, render_impact, remediation_agent
 
 HOST = "compute-02"
 

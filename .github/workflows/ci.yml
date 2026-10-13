@@ -21,7 +21,7 @@ env:
   # Gates marked "toggle" below are REPORT-ONLY while this is "false" so the
   # first run is not red because of pre-existing findings. Fix the findings,
   # then flip this to "true" to make them blocking.
-  STRICT_GATES: "false"
+  STRICT_GATES: "true"
   # Trivy is always blocking; add reviewed exceptions to .trivyignore.
   TRIVY_SEVERITY: "HIGH,CRITICAL"
 
@@ -119,8 +119,11 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements-dev.txt
 
-      - name: Dependency audit (pip-audit, toggle)
-        continue-on-error: ${{ env.STRICT_GATES != 'true' }}
+      # TODO: pip-audit has not been measured on a clean run yet. Keep it report-only until the
+      # first green run, then switch to the toggle expression (and add any reviewed
+      # `--ignore-vuln <ID>` with a comment + expiry date).
+      - name: Dependency audit (pip-audit, report-only for now)
+        continue-on-error: true
         run: |
           pip install pip-audit
           pip-audit --skip-editable

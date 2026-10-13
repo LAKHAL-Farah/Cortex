@@ -1,6 +1,5 @@
 """Merge the agent and network-health migration branches."""
 
-from alembic import op
 
 
 revision = "f8a9b0c1d2e3"

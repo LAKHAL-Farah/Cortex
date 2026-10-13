@@ -1,6 +1,5 @@
 """Merge the FinOps and weekly digest migration branches."""
 
-from alembic import op
 
 
 revision = "d6e7f8a9b0c1"
