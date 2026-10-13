@@ -2,6 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { RefreshCw, Sparkles } from "lucide-react";
 import ThemeToggle from "./ThemeToggle";
 import NotificationsMenu from "./NotificationsMenu";
@@ -31,6 +32,7 @@ function IconButton({
 }
 
 export default function Header() {
+  const router = useRouter();
   const { user } = useCurrentUser();
   const username = user?.username ?? "";
   const initial = username ? username.charAt(0).toUpperCase() : "·";
@@ -40,7 +42,7 @@ export default function Header() {
   };
 
   const openChat = () => {
-    window.location.href = "/copilot";
+    router.push("/copilot");
   };
 
   return (

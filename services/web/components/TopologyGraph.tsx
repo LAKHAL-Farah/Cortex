@@ -383,6 +383,8 @@ export default function TopologyGraph({
     const first = highlightIds.find((id) => nodeIds.has(id));
     if (!first) return;
     didAutoFocusHighlight.current = true;
+    // One-shot (ref-guarded) so it cannot cascade; it also has to notify the parent via onSelectVertex.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelectedId(first);
     onSelectVertex(first);
   }, [highlightIds, data, onSelectVertex]);

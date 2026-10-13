@@ -21,6 +21,7 @@ import {
   ShieldAlert,
   Settings2,
   LogOut,
+  type LucideIcon,
 } from "lucide-react";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 
@@ -57,7 +58,7 @@ const FOOTER_ITEMS = [
   { title: "Settings", href: "/settings", icon: Settings2 },
 ];
 
-function NavLink({ href, icon: Icon, title, active }: { href: string; icon: any; title: string; active: boolean }) {
+function NavLink({ href, icon: Icon, title, active }: { href: string; icon: LucideIcon; title: string; active: boolean }) {
   return (
     <Link
       href={href}

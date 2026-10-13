@@ -25,6 +25,7 @@ export default function AdminUsersPage() {
   const [creating, setCreating] = React.useState(false);
   const [createdInfo, setCreatedInfo] = React.useState<string | null>(null);
 
+  // Explicit reloads (after create/delete/...) show the loading state.
   const load = React.useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -39,9 +40,25 @@ export default function AdminUsersPage() {
     }
   }, []);
 
+  // Initial load: `loading` already starts as true, so no state is set synchronously here.
   React.useEffect(() => {
-    load();
-  }, [load]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/users", { cache: "no-store" });
+        if (!res.ok) throw new Error("Failed to load users");
+        const data = await res.json();
+        if (!cancelled) setUsers(data);
+      } catch {
+        if (!cancelled) setError("Couldn't load users.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const createUser = async (e: React.FormEvent) => {
     e.preventDefault();

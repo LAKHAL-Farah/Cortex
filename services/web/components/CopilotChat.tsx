@@ -13,7 +13,6 @@ import {
 import type { AgentOrchestrateResponse, AgentTraceStep } from "@/lib/types";
 import { AnimatedAgentAnswer, agentMeta, ReasoningTrace } from "@/components/CopilotAgentPanels";
 import {
-  type Conversation,
   type ConversationSummary,
   type StoredMessage,
   createConversation as createRemoteConversation,
@@ -44,6 +43,9 @@ interface DisplayMessage extends StoredMessage {
 // ThemeToggle's "cortex-theme") -- which turn happens to be someone's
 // first is a per-browser fact, not something worth a DB column or a
 // per-user setting to manage.
+// Fields on DisplayMessage that exist only for rendering and must not be persisted.
+const UI_ONLY_MESSAGE_FIELDS = new Set(["pending", "startedAt", "elapsedMs", "animated", "steps"]);
+
 const COPILOT_TRACE_ONBOARDED_KEY = "cortex-copilot-trace-onboarded";
 
 function hasSeenReasoningTraceOnboarding(): boolean {
@@ -257,7 +259,10 @@ export default function CopilotChat() {
   }
 
   async function persist(id: string, nextMessages: DisplayMessage[]) {
-    const clean: StoredMessage[] = nextMessages.map(({ pending, startedAt, elapsedMs, animated, steps, ...m }) => m);
+    // Strip the UI-only fields before persisting.
+    const clean = nextMessages.map((m) =>
+      Object.fromEntries(Object.entries(m).filter(([key]) => !UI_ONLY_MESSAGE_FIELDS.has(key))),
+    ) as unknown as StoredMessage[];
     const firstUser = clean.find((m) => m.role === "user")?.content;
     const existingTitle = conversations.find((c) => c.id === id)?.title;
     const title = existingTitle && existingTitle !== "New conversation" ? existingTitle : titleFromMessage(firstUser ?? "New conversation");

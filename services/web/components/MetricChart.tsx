@@ -18,12 +18,14 @@ export function useMetricHistory(instance: string, metric: string, liveValue?: n
       if (raw) {
         const parsed = JSON.parse(raw) as Point[];
         if (Array.isArray(parsed) && parsed.length) {
+          // Hydrating from localStorage must happen after mount (it does not exist during SSR).
+          // eslint-disable-next-line react-hooks/set-state-in-effect
           setSeries(parsed.slice().sort((a,b) => a.t - b.t));
           hasCache = true;
           hydrated.current = true; // allow liveValue appends immediately
         }
       }
-    } catch (e) {
+    } catch {
       // ignore cache errors
     }
 
@@ -36,7 +38,7 @@ export function useMetricHistory(instance: string, metric: string, liveValue?: n
         if (incoming && incoming.length) {
           const sorted = incoming.slice().sort((a,b) => a.t - b.t);
           setSeries(sorted);
-          try { localStorage.setItem(cacheKey, JSON.stringify(sorted)); } catch (e) {}
+          try { localStorage.setItem(cacheKey, JSON.stringify(sorted)); } catch {}
         } else if (!hasCache && liveValue != null) {
           const now = Math.floor(Date.now() / 1000);
           const fallback = [
@@ -44,7 +46,7 @@ export function useMetricHistory(instance: string, metric: string, liveValue?: n
             { t: now, v: liveValue },
           ];
           setSeries(fallback);
-          try { localStorage.setItem(cacheKey, JSON.stringify(fallback)); } catch (e) {}
+          try { localStorage.setItem(cacheKey, JSON.stringify(fallback)); } catch {}
         }
       } catch {
         // ignore fetch failure, preserve cached series if available
@@ -69,7 +71,7 @@ export function useMetricHistory(instance: string, metric: string, liveValue?: n
       try {
         const cacheKey = `cortex:history:${instance}:${metric}`;
         localStorage.setItem(cacheKey, JSON.stringify(next));
-      } catch (e) {}
+      } catch {}
       return next;
     });
   }, [liveValue, instance, metric]);
@@ -102,7 +104,7 @@ export function MetricChart({ data, color, height = 80, showXAxis = false }: { d
         />
 
         <YAxis hide domain={[0, 100]} />
-        <Tooltip labelFormatter={(v:any) => new Date(v * 1000).toLocaleString()} formatter={(val:any) => [val, 'value']} />
+        <Tooltip labelFormatter={(v) => new Date(Number(v) * 1000).toLocaleString()} formatter={(val) => [val, 'value']} />
 
         <Area
           dataKey="v"

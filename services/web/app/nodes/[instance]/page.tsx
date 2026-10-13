@@ -5,9 +5,8 @@ import Link from "next/link";
 import { useMetricHistory } from "@/components/MetricChart";
 import PlotlyChart from "@/components/PlotlyChart";
 import { useEffect, useMemo, useState } from "react";
-import { Card } from "@/components/ui/Card";
 import { ArrowLeft, Server, TrendingUp, ShieldAlert, ShieldQuestion, ShieldCheck, ChevronRight } from "lucide-react";
-import type { SecurityFinding } from "@/lib/types";
+import type { DashboardNode, SecurityFinding } from "@/lib/types";
 import { overallSecurityTone } from "@/lib/securityStatus";
 import SecurityScopeTag from "@/components/SecurityScopeTag";
 
@@ -50,7 +49,7 @@ function MetricPanel({
 }: {
   title: string;
   latestValue: React.ReactNode;
-  data: any[];
+  data: MetricPoint[];
   color: string;
   lastSeen?: string;
 }) {
@@ -68,12 +67,30 @@ function MetricPanel({
   );
 }
 
+type MetricPoint = { t: number; v: number };
+type NodeWithLastSeen = DashboardNode & { last_seen?: string };
+
+function readSavedRange(decoded: string): number | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const saved = localStorage.getItem(`cortex:range:${decoded}`);
+    const parsed = saved ? parseInt(saved, 10) : NaN;
+    return Number.isFinite(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export default function NodeDetailPage() {
   const { instance } = useParams<{ instance: string }>();
   const decoded = decodeURIComponent(instance);
-  const [minutes, setMinutes] = useState<number>(60);
-  const { data: nodes } = useSWR("/api/dashboard", fetcher, { refreshInterval: 5000 });
-  const node = nodes?.find((n: any) =>
+  // Selected range is remembered per node in localStorage. It is read during render (not in an
+  // effect) and overridden in state once the user picks a range.
+  const [pickedRange, setPickedRange] = useState<Record<string, number>>({});
+  const minutes = pickedRange[decoded] ?? readSavedRange(decoded) ?? 60;
+  const setMinutes = (mins: number) => setPickedRange((prev) => ({ ...prev, [decoded]: mins }));
+  const { data: nodes } = useSWR<NodeWithLastSeen[]>("/api/dashboard", fetcher, { refreshInterval: 5000 });
+  const node = nodes?.find((n) =>
     [n.instance, n.id, n.hostname, n.ip_address].some((value) => value === decoded)
   );
   const m = node?.metrics;
@@ -81,16 +98,8 @@ export default function NodeDetailPage() {
   useEffect(() => {
     try {
       const key = `cortex:range:${decoded}`;
-      const saved = localStorage.getItem(key);
-      if (saved) setMinutes(parseInt(saved, 10));
-    } catch (e) {}
-  }, [decoded]);
-
-  useEffect(() => {
-    try {
-      const key = `cortex:range:${decoded}`;
       localStorage.setItem(key, String(minutes));
-    } catch (e) {}
+    } catch {}
   }, [decoded, minutes]);
 
   const cpu = useMetricHistory(decoded, "cpu_percent", m?.cpu_percent, minutes);
@@ -114,7 +123,7 @@ export default function NodeDetailPage() {
 
   if (!node) return <p className="p-6 text-sm text-text-faint">Loading…</p>;
 
-  const latest = (arr: any[]) => (arr && arr.length ? arr[arr.length - 1].v : undefined);
+  const latest = (arr: MetricPoint[]) => (arr && arr.length ? arr[arr.length - 1].v : undefined);
   const health = m?.health ?? "healthy";
 
   return (

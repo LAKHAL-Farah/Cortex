@@ -3,12 +3,15 @@
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { SecurityFinding } from "@/lib/types";
 
-const CustomTooltip = ({ active, payload, label }: any) => {
+type TooltipItem = { dataKey?: string | number; name?: string; value?: number | string; fill?: string };
+type TooltipProps = { active?: boolean; payload?: TooltipItem[]; label?: string | number };
+
+const CustomTooltip = ({ active, payload, label }: TooltipProps) => {
   if (!active || !payload?.length) return null;
   return (
     <div className="panel p-3.5 text-sm text-color-text" style={{ boxShadow: "var(--shadow-hover)" }}>
       <div className="eyebrow">{label}</div>
-      {payload.map((item: any) => (
+      {payload.map((item) => (
         <div key={item.dataKey} className="mt-2 flex items-center gap-2.5">
           <span className="status-dot" style={{ background: item.fill }} />
           <div>

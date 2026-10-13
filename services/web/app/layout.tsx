@@ -1,5 +1,4 @@
 import "./globals.css";
-import Link from "next/link";
 import AppChrome from "../components/AppChrome";
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

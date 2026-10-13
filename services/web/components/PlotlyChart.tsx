@@ -1,8 +1,8 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, type ComponentType } from "react";
 import dynamic from "next/dynamic";
 
-const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as any;
+const Plot = dynamic(() => import("react-plotly.js"), { ssr: false }) as unknown as ComponentType<Record<string, unknown>>;
 
 type Point = { t: number; v: number };
 
@@ -28,19 +28,20 @@ function useThemeColors() {
 
 export default function PlotlyChart({ data, color, height = 260 }: { data: Point[]; color: string; height?: number }) {
   const { text, grid } = useThemeColors();
-  const [resolvedColor, setResolvedColor] = useState(color);
+  // Only CSS-variable colors need resolving (and re-resolving on theme change); plain colors are used as-is.
+  const isCssVar = color.trim().startsWith("var(");
+  const [varColor, setVarColor] = useState<string | null>(null);
+  const resolvedColor = isCssVar ? (varColor ?? color) : color;
 
   useEffect(() => {
-    if (color.trim().startsWith("var(")) {
-      const varName = color.trim().slice(4, -1);
-      const read = () => setResolvedColor(getComputedStyle(document.documentElement).getPropertyValue(varName).trim() || "#E15B3C");
-      read();
-      const observer = new MutationObserver(read);
-      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
-      return () => observer.disconnect();
-    }
-    setResolvedColor(color);
-  }, [color]);
+    if (!isCssVar) return;
+    const varName = color.trim().slice(4, -1);
+    const read = () => setVarColor(getComputedStyle(document.documentElement).getPropertyValue(varName).trim() || "#E15B3C");
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, [color, isCssVar]);
 
   const sorted = (data ?? []).slice().sort((a, b) => a.t - b.t);
   const x = sorted.map((p) => new Date(p.t * 1000));
