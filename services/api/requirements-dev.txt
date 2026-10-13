@@ -3,4 +3,4 @@
 pytest==8.3.3
 ruff==0.6.9
 # Text extraction in the report tests (tests/test_reports.py)
-pypdf==5.1.0
+pypdf==6.20.0
