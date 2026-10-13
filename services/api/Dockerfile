@@ -9,6 +9,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# setuptools 80.10.2 fixes CVE-2025-47273 and vendors a patched wheel; do NOT go
+# to >=82 (drops pkg_resources, which some OpenStack libs still import).
+RUN pip install --no-cache-dir "setuptools==80.10.2"
 RUN ansible-galaxy collection install 'community.general:<11.0.0' -p /opt/ansible-collections
 ENV HF_HOME=/opt/hf-cache
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"

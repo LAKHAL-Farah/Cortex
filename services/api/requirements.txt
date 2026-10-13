@@ -1,14 +1,16 @@
-fastapi==0.115.0
+fastapi==0.143.0
+# Starlette >= 1.3.1 fixes CVE-2026-48818 / CVE-2026-54283 (+ CVE-2024-47874); pinned explicitly.
+starlette==1.7.0
 uvicorn[standard]==0.30.6
 # Username/password auth (app/auth.py): bcrypt for password hashing, PyJWT
 # for signing/verifying the session tokens issued by POST /api/v1/auth/login.
 bcrypt==4.2.0
-PyJWT==2.9.0
+PyJWT==2.15.1
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.9
 alembic==1.13.2
 httpx==0.27.2
-ansible-core==2.17.6
+ansible-core==2.18.19
 requests==2.32.3
 # HTML parsing for the v1.0 official-OpenStack-docs scraper
 # (services/openstack_docs/scraper.py, adr-0010) -- docs.openstack.org is
@@ -25,7 +27,9 @@ qdrant-client==1.12.1
 # Local embedding model for the knowledge RAG pipeline (adr-0004) -- pulls in
 # torch and transformers as transitive deps; expect the image to grow by
 # ~500MB-1GB and the first `pip install` to take a while.
-sentence-transformers==3.3.1
+sentence-transformers==5.6.1
+# transformers >= 5.10.0 fixes CVE-2026-4372 / CVE-2026-5241 / CVE-2026-9856; pinned explicitly.
+transformers==5.10.4
 # Grounded chat generation over the retrieved chunks above (adr-0005) --
 # ChatNVIDIA calls the hosted NVIDIA NIM endpoint, no model weights baked
 # into the image (unlike the embedding model).
