@@ -6,26 +6,54 @@ updates:
     groups:
       actions: { patterns: ["*"] }
 
+  # ---- Python: api (tests run on 3.12, so does the image) ----
   - package-ecosystem: pip
     directory: /services/api
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      python-minor-patch:
+        update-types: ["minor", "patch"]
   - package-ecosystem: pip
     directory: /infra/collector
     schedule: { interval: weekly }
+    groups:
+      collector-minor-patch:
+        update-types: ["minor", "patch"]
 
+  # ---- npm: web ----
   - package-ecosystem: npm
     directory: /services/web
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      # next and its eslint config must move together
+      next:
+        patterns: ["next", "eslint-config-next"]
+      # react and react-dom must always be the same version
+      react:
+        patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
 
-  # Dockerfile FROM lines (keeps tag@sha256 digests current once pinned)
+  # ---- Dockerfile FROM lines (keeps tag@sha256 digests current) ----
+  # Stay on python 3.12 (what the tests run on); only digest/patch updates.
   - package-ecosystem: docker
     directory: /services/api
     schedule: { interval: weekly }
-  - package-ecosystem: docker
-    directory: /services/web
-    schedule: { interval: weekly }
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: docker
     directory: /infra/collector
     schedule: { interval: weekly }
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+  # Node: move majors by hand (24 LTS planned), digest/patch updates are automatic.
+  - package-ecosystem: docker
+    directory: /services/web
+    schedule: { interval: weekly }
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]

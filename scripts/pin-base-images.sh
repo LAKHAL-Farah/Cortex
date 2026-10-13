@@ -12,10 +12,10 @@ for f in "${files[@]}"; do
   while read -r ref; do
     case "$ref" in *@sha256:*|scratch) continue;; esac
     # Skip references to earlier build stages.
-    if grep -qiE "^FROM .* AS ${ref}\$" "$f"; then continue; fi
+    if grep -qiE "^FROM .* AS ${ref}[[:space:]]*\$" "$f"; then continue; fi
     printf 'Inspecting image [%s] in [%s]\n' "$ref" "$f"
     digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')
     echo "$f: $ref -> $digest"
-    sed -i -E "s#^(FROM )${ref}( |\$)#\1${ref}@${digest}\2#I" "$f"
+    sed -i -E "s#^(FROM )${ref}([[:space:]]|\$)#\1${ref}@${digest}\2#I" "$f"
   done < <(awk 'toupper($1)=="FROM"{sub(/\r$/,"",$2); print $2}' "$f" | sort -u)
 done
