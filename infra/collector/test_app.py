@@ -1,4 +1,4 @@
-"""Run: cd infra/collector && pip install -r requirements.txt httpx pytest && pytest -q"""
+"""Run: cd infra/collector && pip install -r requirements.txt -r requirements-dev.txt && pytest -q"""
 import os
 import time
 
