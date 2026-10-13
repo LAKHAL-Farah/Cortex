@@ -9,6 +9,8 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"   # Mondays 05:00 UTC: weekly rebuild picks up base-image/OS patches
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -152,10 +154,35 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: python3 scripts/eval_router_golden_set.py
 
+  test-collector:
+    name: Tests (collector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            infra/collector/requirements.txt
+            infra/collector/requirements-dev.txt
+
+      - name: Install deps
+        working-directory: infra/collector
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      # Run from infra/collector: test_app.py imports `collector` as a sibling module.
+      - name: Run tests
+        working-directory: infra/collector
+        run: pytest -q
+
   # --------------------------------------------- build / scan / sign / attest
   images:
     name: Image ${{ matrix.name }}
-    needs: [secrets-scan, lint-api, lint-web, test-api]
+    needs: [secrets-scan, lint-api, lint-web, test-api, test-collector]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -204,7 +231,7 @@ jobs:
           exit-code: "0"
 
       - name: Upload Trivy SARIF to Security tab
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'schedule'
         uses: github/codeql-action/upload-sarif@cee97f86b972a3ded3c58d04148362b193ddc518 # v4.38.3
         with:
           sarif_file: trivy-${{ matrix.name }}.sarif
