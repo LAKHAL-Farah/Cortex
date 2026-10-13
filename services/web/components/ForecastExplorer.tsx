@@ -48,12 +48,6 @@ const MODEL_TYPE_LABELS: Record<string, string> = {
   fallback_seasonal_persistence: "Fallback model (limited history)",
 };
 
-const HORIZON_LABELS: Record<ForecastHorizonDays, string> = {
-  7: "7 days",
-  30: "30 days",
-  90: "90 days",
-};
-
 // Palette note: deliberately avoids --chart-3 (green) across this whole page —
 // "actual" uses the blue and "predicted" uses the orange/red so the two
 // series stay readable against each other without reaching for green at all.
@@ -273,10 +267,12 @@ export default function ForecastExplorer() {
   // The preset label set differs per horizon (e.g. "3d" doesn't exist in the
   // 90-day set) -- reset to "All" whenever the horizon selection changes so
   // a stale label from the previous set never lingers.
-  useEffect(() => {
+  const [zoomHorizon, setZoomHorizon] = useState(horizonDays);
+  if (zoomHorizon !== horizonDays) {
+    setZoomHorizon(horizonDays);
     setZoomPreset("All");
     setBrushKey((k) => k + 1);
-  }, [horizonDays]);
+  }
 
   const zoomRange = useMemo(() => {
     if (!chartData.length || !nowTs) return null;

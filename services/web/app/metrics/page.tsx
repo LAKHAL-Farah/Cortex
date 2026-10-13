@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { AlertTriangle, Cpu, MemoryStick, Plus, Server } from "lucide-react";

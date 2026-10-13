@@ -1,5 +1,6 @@
 import type { DashboardNode, NodeRole } from "@/lib/types";
 import Link from "next/link";
+import type { LucideIcon } from "lucide-react";
 import { Cpu, MemoryStick, HardDrive, Clock3, Activity } from "lucide-react";
 import { Card } from "./ui/Card";
 
@@ -27,7 +28,7 @@ const ROLE_SOFT: Record<NodeRole, string> = {
   monitoring: "var(--role-monitoring-soft)",
 };
 
-function Stat({ icon: Icon, label, value, color }: { icon: any; label: string; value: React.ReactNode; color: string }) {
+function Stat({ icon: Icon, label, value, color }: { icon: LucideIcon; label: string; value: React.ReactNode; color: string }) {
   return (
     <div className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium" style={{ background: "var(--canvas)", color: "var(--text-dim)" }}>
       <Icon className="h-3 w-3" style={{ color }} strokeWidth={2.25} />

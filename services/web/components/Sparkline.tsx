@@ -23,7 +23,8 @@ export default function Sparkline({ id, value, color }: { id: string; value: num
     arr.forEach((v, i) => {
       const x = (i / (HISTORY_LEN - 1)) * width;
       const y = height - (v / max) * height;
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     });
     const resolvedColor = color.trim().startsWith("var(")
       ? getComputedStyle(document.documentElement).getPropertyValue(color.trim().slice(4, -1)).trim() || "#E15B3C"
