@@ -1,0 +1,3 @@
+# Reviewed Trivy exceptions. One CVE id per line, each with a justification and
+# an expiry so exceptions don't live forever, e.g.:
+#   CVE-2024-12345   # not reachable: <reason>; revisit 2026-12-31
