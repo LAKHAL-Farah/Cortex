@@ -348,7 +348,7 @@ jobs:
         run: |
           set -euo pipefail
           OWNER="${GITHUB_REPOSITORY_OWNER,,}"
-          for svc in api web; do   # collector stays in the lab; not deployed to Azure
+          for svc in api web collector; do   # collector runs in-cluster too (security checks)
             export NAME="ghcr.io/${OWNER}/cortex-${svc}"
             export DIGEST="$(cat ../digests/${svc})"
             yq -i '(.images[] | select(.name == strenv(NAME)) | .digest) = strenv(DIGEST)' overlays/azure/kustomization.yaml
