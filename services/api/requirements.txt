@@ -7,9 +7,7 @@ PyJWT==2.9.0
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.9
 alembic==1.13.2
-pytest==8.3.3
 httpx==0.27.2
-ruff==0.6.9
 ansible-core==2.17.6
 requests==2.32.3
 # HTML parsing for the v1.0 official-OpenStack-docs scraper
@@ -38,5 +36,3 @@ langchain-nvidia-ai-endpoints==1.4.3
 langgraph==1.2.11
 # PDF export of the showback/chargeback report (services/finops_report.py)
 reportlab==4.2.5
-# Text extraction in the report tests (tests/test_reports.py) -- same as pytest/ruff above, a test-time dep.
-pypdf==5.1.0

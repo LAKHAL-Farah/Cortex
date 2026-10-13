@@ -1,4 +1,5 @@
 FROM python:3.12-slim
+LABEL org.opencontainers.image.source="https://github.com/LAKHAL-Farah/Cortex"
 
 WORKDIR /app
 COPY requirements.txt .

@@ -1,3 +1,5 @@
+# Base images: run scripts/pin-base-images.sh to pin FROM lines by digest;
+# Dependabot (docker ecosystem) then keeps the digests current.
 # ---- builder ----
 FROM python:3.12-slim AS builder
 WORKDIR /build
@@ -13,6 +15,7 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 
 # ---- runtime ----
 FROM python:3.12-slim
+LABEL org.opencontainers.image.source="https://github.com/LAKHAL-Farah/Cortex"
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-client git \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 cortex
@@ -20,12 +23,14 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/hf-cache /opt/hf-cache
 COPY --from=builder /opt/ansible-collections /opt/ansible-collections
 ENV PATH="/opt/venv/bin:$PATH" HF_HOME=/opt/hf-cache HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1 ANSIBLE_COLLECTIONS_PATH=/opt/ansible-collections
+    TRANSFORMERS_OFFLINE=1 ANSIBLE_COLLECTIONS_PATH=/opt/ansible-collections \
+    PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini entrypoint.sh ./
 RUN chmod +x entrypoint.sh && chown -R cortex /app
-USER cortex
+# Numeric UID so Kubernetes `runAsNonRoot: true` can verify it.
+USER 10001:10001
 EXPOSE 8000
 ENTRYPOINT ["./entrypoint.sh"]

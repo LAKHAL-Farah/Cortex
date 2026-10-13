@@ -284,6 +284,31 @@ async def _run_periodic_recorded(
             db.close()
         await asyncio.sleep(interval_seconds)
 
+class InsecureBootstrapAdminError(RuntimeError):
+    """Raised at startup when CORTEX_ENV=production would seed a default admin."""
+
+
+_INSECURE_ADMIN_PASSWORDS = {"", "admin"}
+
+
+def _bootstrap_admin_credentials() -> tuple[str, str]:
+    """Resolve the bootstrap admin username/password from the environment.
+
+    In production an unset or default ("admin") password is refused outright:
+    the process fails to start instead of creating a well-known account.
+    Dev/sandbox keep the admin/admin convenience default.
+    """
+    username = os.environ.get("CORTEX_ADMIN_USERNAME", "admin")
+    password = os.environ.get("CORTEX_ADMIN_PASSWORD", "admin")
+    env = os.environ.get("CORTEX_ENV", "development").strip().lower()
+    if env == "production" and password.strip().lower() in _INSECURE_ADMIN_PASSWORDS:
+        raise InsecureBootstrapAdminError(
+            "CORTEX_ENV=production but CORTEX_ADMIN_PASSWORD is unset or the "
+            "default 'admin'; set a strong CORTEX_ADMIN_PASSWORD before first start."
+        )
+    return username, password
+
+
 def _seed_bootstrap_admin(db) -> None:
     """Creates the first admin account if the `users` table is empty --
     otherwise there's a chicken-and-egg problem where you need an admin
@@ -297,8 +322,7 @@ def _seed_bootstrap_admin(db) -> None:
     """
     if crud.count_users(db) > 0:
         return
-    username = os.environ.get("CORTEX_ADMIN_USERNAME", "admin")
-    password = os.environ.get("CORTEX_ADMIN_PASSWORD", "admin")
+    username, password = _bootstrap_admin_credentials()
     crud.create_user(
         db,
         username=username,
@@ -330,6 +354,9 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         await asyncio.to_thread(_seed_bootstrap_admin, db)
+    except InsecureBootstrapAdminError:
+        # Misconfiguration, not a transient failure: refuse to start.
+        raise
     except Exception:
         logger.exception("bootstrap admin seeding failed")
     finally:
