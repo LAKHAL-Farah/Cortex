@@ -12,6 +12,11 @@ env/
 .env
 .env.*
 !.env.example
+
+# OpenStack credentials: clouds.yaml is generated from openstack/clouds.yaml.tpl + .env.prod
+openstack/clouds.yaml
+openstack/secure.yaml
+openstack/*.bak
 # Testing
 .pytest_cache/
 .coverage

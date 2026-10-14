@@ -1,0 +1,4 @@
+# Generated, contains passwords. Only the .tpl, the script and this README are tracked.
+clouds.yaml
+secure.yaml
+*.bak
