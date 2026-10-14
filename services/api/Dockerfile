@@ -19,7 +19,12 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 # ---- runtime ----
 FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 LABEL org.opencontainers.image.source="https://github.com/LAKHAL-Farah/Cortex"
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client git \
+# `apt-get upgrade` first: the digest-pinned base can lag Debian security fixes (git pulls in
+# libcurl3t64-gnutls, which Trivy flagged HIGH: CVE-2026-8286 / CVE-2026-8927, fixed in
+# 8.14.1-2+deb13u7). Re-run scripts/pin-base-images.sh / let Dependabot bump the digest too.
+RUN apt-get update \
+    && apt-get -y --no-install-recommends upgrade \
+    && apt-get install -y --no-install-recommends openssh-client git \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 cortex
 COPY --from=builder /opt/venv /opt/venv
