@@ -17,7 +17,7 @@ requests==2.33.0
 # Sphinx-generated HTML, not Markdown, so this pipeline needs a real DOM
 # parser rather than loader.py's plain-text heading regex.
 beautifulsoup4==4.12.3
-pandas==2.2.3
+pandas==3.0.6
 scipy==1.13.1
 scikit-learn==1.5.2
 joblib==1.6.0
