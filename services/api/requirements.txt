@@ -1,35 +1,35 @@
 fastapi==0.143.0
 # Starlette >= 1.3.1 fixes CVE-2026-48818 / CVE-2026-54283 (+ CVE-2024-47874); pinned explicitly.
 starlette==1.7.0
-uvicorn[standard]==0.30.6
+uvicorn[standard]==0.54.0
 # Username/password auth (app/auth.py): bcrypt for password hashing, PyJWT
 # for signing/verifying the session tokens issued by POST /api/v1/auth/login.
 bcrypt==4.2.0
 PyJWT==2.15.1
-sqlalchemy==2.0.35
-psycopg2-binary==2.9.9
-alembic==1.13.2
-httpx==0.27.2
-ansible-core==2.18.19
-requests==2.33.0
+sqlalchemy==2.1.4
+psycopg2-binary==2.9.13
+alembic==1.20.0
+httpx==0.28.1
+ansible-core==2.21.5
+requests==2.34.2
 # HTML parsing for the v1.0 official-OpenStack-docs scraper
 # (services/openstack_docs/scraper.py, adr-0010) -- docs.openstack.org is
 # Sphinx-generated HTML, not Markdown, so this pipeline needs a real DOM
 # parser rather than loader.py's plain-text heading regex.
-beautifulsoup4==4.12.3
+beautifulsoup4==4.15.0
 pandas==2.2.3
-scipy==1.13.1
-scikit-learn==1.5.2
+scipy==1.18.1
+scikit-learn==1.9.1
 joblib==1.6.0
-openstacksdk==4.18.0
+openstacksdk==4.21.0
 neo4j==5.28.4
-qdrant-client==1.12.1
+qdrant-client==1.19.1
 # Local embedding model for the knowledge RAG pipeline (adr-0004) -- pulls in
 # torch and transformers as transitive deps; expect the image to grow by
 # ~500MB-1GB and the first `pip install` to take a while.
 sentence-transformers==5.6.1
 # transformers >= 5.10.0 fixes CVE-2026-4372 / CVE-2026-5241 / CVE-2026-9856; pinned explicitly.
-transformers==5.10.4
+transformers==5.19.0
 # Grounded chat generation over the retrieved chunks above (adr-0005) --
 # ChatNVIDIA calls the hosted NVIDIA NIM endpoint, no model weights baked
 # into the image (unlike the embedding model).
@@ -37,6 +37,6 @@ langchain-nvidia-ai-endpoints==1.4.3
 # Agent orchestrator graph (router -> monitoring -> compose, see app/agents/).
 # Pulls a compatible langchain-core transitively (already constrained to
 # <2.0.0,>=1.4.7 by langchain-nvidia-ai-endpoints above).
-langgraph==1.2.11
+langgraph==1.2.14
 # PDF export of the showback/chargeback report (services/finops_report.py)
 reportlab==4.2.5
