@@ -7,6 +7,7 @@ import Link from "next/link";
 import { Logo } from "@/components/Logo";
 import ThemeToggle from "@/components/ThemeToggle";
 import styles from "../public-pages.module.css";
+import { apiErrorMessage } from "@/lib/apiError";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -29,7 +30,7 @@ export default function LoginPage() {
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        setError(data.detail ?? "Invalid username or password.");
+        setError(apiErrorMessage(data.detail, "Invalid username or password."));
         return;
       }
 

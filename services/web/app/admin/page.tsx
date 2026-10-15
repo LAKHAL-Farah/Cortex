@@ -3,6 +3,7 @@
 import React from "react";
 import { Card } from "@/components/ui/Card";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { apiErrorMessage } from "@/lib/apiError";
 
 type AdminUser = {
   id: string;
@@ -73,7 +74,7 @@ export default function AdminUsersPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(data.detail ?? "Couldn't create the user.");
+        setError(apiErrorMessage(data.detail, "Couldn't create the user."));
         return;
       }
       setCreatedInfo(
@@ -97,7 +98,7 @@ export default function AdminUsersPage() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail ?? "That change was rejected.");
+      setError(apiErrorMessage(data.detail, "That change was rejected."));
       return;
     }
     load();
