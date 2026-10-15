@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Lock, AlertCircle } from "lucide-react";
 import { AuthShell } from "@/components/auth/AuthShell";
 import { AuthField } from "@/components/auth/AuthField";
+import { apiErrorMessage } from "@/lib/apiError";
 
 function ChangePasswordForm() {
   const router = useRouter();
@@ -36,7 +37,7 @@ function ChangePasswordForm() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(data.detail ?? "Couldn't change the password.");
+        setError(apiErrorMessage(data.detail, "Couldn't change the password."));
         return;
       }
       router.push("/dashboard");
