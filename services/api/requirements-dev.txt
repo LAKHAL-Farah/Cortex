@@ -1,6 +1,6 @@
 # Test/lint-time dependencies. NOT installed in the runtime image.
 -r requirements.txt
-pytest==8.3.3
+pytest==9.1.1
 ruff==0.6.9
 # Text extraction in the report tests (tests/test_reports.py)
 pypdf==6.20.0
