@@ -164,7 +164,7 @@ def _check_auth_anomaly(node: KnownNode) -> dict:
     start = now - _AUTH_LOG_WINDOW_MINUTES * 60
     logql = f'{{host="{node["hostname"]}"}} |~ "{_AUTH_LOG_SIGNAL_PATTERN}"'
 
-    breaker = get_breaker("security.loki", timeout_seconds=8.0, max_retries=1, failure_threshold=2)
+    breaker = get_breaker("security.loki", scope=node["hostname"], timeout_seconds=8.0, max_retries=1, failure_threshold=2)
     call_result = breaker.call(loki_client.query_range, logql, start, now, limit=50)
 
     if not call_result.ok:
@@ -281,7 +281,7 @@ def _check_sec_group_diff(node: KnownNode) -> dict:
     # implausible. Until the trace's error_type confirms which branch this
     # was, timeout_seconds/failure_threshold below are left at their
     # original values rather than tuned blind.
-    breaker = get_breaker("security.neutron", timeout_seconds=10.0, max_retries=1, failure_threshold=2)
+    breaker = get_breaker("security.neutron", scope=node["hostname"], timeout_seconds=10.0, max_retries=1, failure_threshold=2)
     call_result = breaker.call(security_audit.get_node_security_groups, node["hostname"])
 
     if not call_result.ok:
@@ -340,7 +340,7 @@ def _check_sec_group_diff(node: KnownNode) -> dict:
 # --------------------------------------------------------------------
 
 def _check_cve_match(node: KnownNode) -> dict:
-    breaker = get_breaker("security.cve_feed", timeout_seconds=8.0, max_retries=1, failure_threshold=2)
+    breaker = get_breaker("security.cve_feed", scope=node["hostname"], timeout_seconds=8.0, max_retries=1, failure_threshold=2)
     call_result = breaker.call(cve_feed.get_package_inventory, node["hostname"])
 
     if not call_result.ok:
@@ -389,7 +389,7 @@ def _check_exposed_ports(node: KnownNode, sec_group: dict) -> dict:
     investigation pass would only re-fetch data `_check_sec_group_diff`
     already has.
     """
-    breaker = get_breaker("security.exposed_ports", timeout_seconds=8.0, max_retries=1, failure_threshold=2)
+    breaker = get_breaker("security.exposed_ports", scope=node["hostname"], timeout_seconds=8.0, max_retries=1, failure_threshold=2)
     call_result = breaker.call(exposed_ports.get_listening_ports, node["hostname"])
 
     if not call_result.ok:
@@ -436,7 +436,7 @@ def _check_exposed_ports(node: KnownNode, sec_group: dict) -> dict:
 # --------------------------------------------------------------------
 
 def _check_ebpf_signal(node: KnownNode) -> dict:
-    breaker = get_breaker("security.ebpf", timeout_seconds=8.0, max_retries=1, failure_threshold=2)
+    breaker = get_breaker("security.ebpf", scope=node["hostname"], timeout_seconds=8.0, max_retries=1, failure_threshold=2)
     call_result = breaker.call(ebpf_signal.get_node_ebpf_alerts, node["hostname"])
 
     if not call_result.ok:
