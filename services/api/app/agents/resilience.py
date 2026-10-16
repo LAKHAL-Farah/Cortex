@@ -221,16 +221,23 @@ _REGISTRY: dict[str, CircuitBreaker] = {}
 _REGISTRY_LOCK = threading.Lock()
 
 
-def get_breaker(name: str, **overrides) -> CircuitBreaker:
+def get_breaker(name: str, scope: Optional[str] = None, **overrides) -> CircuitBreaker:
     """Returns the shared breaker for `name`, creating it on first use.
+
+    `scope` (e.g. a hostname) gives each scope its own breaker state while the
+    breaker keeps reporting `name` as the failure source. Without it, one dead
+    node's failures open the breaker for every other node's call to the same
+    source (a scan of N nodes trips after `failure_threshold` dead nodes in a row).
+
     `overrides` (timeout_seconds, max_retries, failure_threshold,
     reset_after_seconds) only take effect the first time a given name is
     requested -- later calls just get the existing instance, same as
     logging.getLogger(name)."""
+    key = name if scope is None else f"{name}::{scope}"
     with _REGISTRY_LOCK:
-        if name not in _REGISTRY:
-            _REGISTRY[name] = CircuitBreaker(name, **overrides)
-        return _REGISTRY[name]
+        if key not in _REGISTRY:
+            _REGISTRY[key] = CircuitBreaker(name, **overrides)
+        return _REGISTRY[key]
 
 
 def reset_all_breakers() -> None:
