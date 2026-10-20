@@ -1,4 +1,4 @@
 httpx>=0.27,<1
 pytest>=8,<9
 # test_output_feeds_the_unmodified_api_keystone_rule imports services/api keystone_audit
-requests>=2.32,<3
+requests>=2.34.2,<3
